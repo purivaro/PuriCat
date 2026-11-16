@@ -138,13 +138,16 @@ export const useAgent = create<AgentState>((set, get) => {
       if (!message || get().running) return;
       // Claim the turn before the context is fetched, so a second Enter cannot start another.
       const id = crypto.randomUUID();
-      set((s) => ({ running: "starting", turns: [...s.turns, { id, role: "user", text: message, status: "done", context: null, target }] }));
+      const claim = `starting:${id}`;
+      set((s) => ({ running: claim, turns: [...s.turns, { id, role: "user", text: message, status: "done", context: null, target }] }));
       let shared: string | null = null;
       try {
         shared = await context();
       } catch {
         /* the context could not be read (connection closed): ask without it */
       }
+      // Stopped, or the chat was cleared, while the context was being read: nothing is sent.
+      if (get().running !== claim) return;
       patchTurn(id, { context: shared });
       await answer(shared);
     },
@@ -161,7 +164,10 @@ export const useAgent = create<AgentState>((set, get) => {
 
     stop: () => {
       const { running } = get();
-      if (running && running !== "starting") void ipc.cancelJob(running);
+      if (!running) return;
+      // Before the CLI has started there is no job to cancel: giving up the claim is enough.
+      if (running.startsWith("starting:")) set({ running: null });
+      else void ipc.cancelJob(running);
     },
 
     reset: () => {

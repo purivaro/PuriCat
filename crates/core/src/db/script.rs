@@ -226,16 +226,21 @@ pub fn classify(engine: Engine, statement: &str) -> (Kind, Option<&'static str>)
     }
 }
 
-/// Does the statement contain this keyword (upper case), outside strings and comments?
-pub fn mentions(engine: Engine, statement: &str, keyword: &str) -> bool {
-    let mut found = false;
+/// Is this `CREATE TEMPORARY …` / `DROP TEMPORARY …`? Judged by position, so a table that
+/// happens to be called `temporary` is not mistaken for one.
+pub fn is_temporary_ddl(engine: Engine, statement: &str) -> bool {
+    let mut words = 0;
+    let mut second = false;
     scan(
         engine,
         statement,
-        |w, _, _| found |= w.eq_ignore_ascii_case(keyword),
+        |w, _, _| {
+            words += 1;
+            second |= words == 2 && w.eq_ignore_ascii_case("TEMPORARY");
+        },
         |_| {},
     );
-    found
+    second
 }
 
 /// Does a transaction-control statement leave the session inside a transaction?
@@ -274,12 +279,22 @@ pub fn redact(sql: &str) -> String {
     for marker in ["password", "identified by", "identified with"] {
         let mut from = 0;
         while let Some(found) = lower[from..].find(marker) {
-            let after = from + found + marker.len();
+            let at = from + found;
+            let mut after = at + marker.len();
             from = after;
+            // The word itself may be a quoted name ("password" = 'x'): its closing quote
+            // does not open the literal.
+            let bytes = lower.as_bytes();
+            if at > 0
+                && matches!(bytes[at - 1], b'"' | b'`')
+                && bytes.get(after) == Some(&bytes[at - 1])
+            {
+                after += 1;
+            }
             let Some(open) = lower[after..].find(['\'', '"']).filter(|&gap| gap <= 48) else {
                 continue;
             };
-            let quote = lower.as_bytes()[after + open] as char;
+            let quote = bytes[after + open] as char;
             let start = after + open + 1;
             if let Some(len) = sql[start..].find(quote) {
                 spans.push((start, start + len));
@@ -433,16 +448,24 @@ mod tests {
             redact(r#"CREATE USER app IDENTIFIED BY "s3cret""#),
             r#"CREATE USER app IDENTIFIED BY "***""#
         );
+        // A quoted column named password does not shield the value that follows it.
+        assert_eq!(
+            redact(r#"UPDATE users SET "password" = 'hunter2' WHERE id = 1"#),
+            r#"UPDATE users SET "password" = '***' WHERE id = 1"#
+        );
+        assert_eq!(
+            redact("UPDATE users SET `password` = 'hunter2'"),
+            "UPDATE users SET `password` = '***'"
+        );
         assert_eq!(redact("SELECT 1"), "SELECT 1");
-        assert!(mentions(
+        assert!(is_temporary_ddl(
             Engine::Mysql,
-            "create temporary table t (a int)",
-            "TEMPORARY"
+            "-- scratch\ncreate temporary table t (a int)"
         ));
-        assert!(!mentions(
+        assert!(is_temporary_ddl(Engine::Mysql, "DROP TEMPORARY TABLE t"));
+        assert!(!is_temporary_ddl(
             Engine::Mysql,
-            "CREATE TABLE t (a int) COMMENT 'temporary'",
-            "TEMPORARY"
+            "CREATE TABLE temporary (a int) COMMENT 'temporary'"
         ));
     }
 }

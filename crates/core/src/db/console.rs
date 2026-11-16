@@ -619,7 +619,7 @@ impl Console {
                 // MySQL commits implicitly around DDL, except for temporary tables.
                 if statement.kind == Kind::Ddl
                     && engine == Engine::Mysql
-                    && !script::mentions(engine, &statement.text, "TEMPORARY")
+                    && !script::is_temporary_ddl(engine, &statement.text)
                 {
                     self.in_transaction = false;
                 }

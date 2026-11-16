@@ -24,7 +24,7 @@ use crate::db::{DbObject, ObjectKind, TableMeta};
 use crate::model::Engine;
 use crate::{Error, Result};
 
-/// A turn that produces nothing for this long is abandoned.
+/// A turn that has not finished after this long is ended.
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 /// The conversation resent with each turn is cut to its most recent part beyond this.
 const MAX_TRANSCRIPT_CHARS: usize = 60_000;
@@ -102,7 +102,7 @@ pub fn validate_model(model: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Invalid(
-            "That is not a valid model name (letters, digits and . _ : / @ - only)".into(),
+            "That is not a valid model name (letters, digits and . _ : / @ - [ ] only)".into(),
         ))
     }
 }
@@ -301,6 +301,9 @@ pub struct StreamParser {
     text: String,
     /// `Some(Ok)` once the CLI reported success, `Some(Err)` with its own error message.
     pub outcome: Option<std::result::Result<(), String>>,
+    /// The last error the CLI mentioned without ending the turn (Codex reports retries this
+    /// way). It becomes the explanation only if the turn then ends without a verdict.
+    pub notice: Option<String>,
 }
 
 impl StreamParser {
@@ -309,6 +312,7 @@ impl StreamParser {
             provider,
             text: String::new(),
             outcome: None,
+            notice: None,
         }
     }
 
@@ -436,14 +440,19 @@ impl StreamParser {
                 self.outcome = Some(Ok(()));
                 Vec::new()
             }
-            Some("turn.failed") | Some("error") => {
+            Some(kind @ ("turn.failed" | "error")) => {
                 let raw = v
                     .get("error")
                     .and_then(|e| e.get("message"))
                     .or_else(|| v.get("message"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("The CLI reported an error without a message");
-                self.outcome = Some(Err(codex_error(raw)));
+                // Only `turn.failed` is final: an `error` line may be a retry in progress.
+                if kind == "turn.failed" {
+                    self.outcome = Some(Err(codex_error(raw)));
+                } else {
+                    self.notice = Some(codex_error(raw));
+                }
                 Vec::new()
             }
             _ => Vec::new(),
@@ -672,7 +681,12 @@ pub async fn chat_with(
             None if status.is_some_and(|s| s.success()) && !parser.text().is_empty() => {
                 Ok(parser.text().to_string())
             }
-            None => Err(Error::Unsupported(describe_failure(provider, &stderr))),
+            None => Err(Error::Unsupported(
+                parser
+                    .notice
+                    .take()
+                    .unwrap_or_else(|| describe_failure(provider, &stderr)),
+            )),
         },
     }
 }
@@ -843,6 +857,14 @@ mod tests {
         );
         assert_eq!(parser.outcome, Some(Ok(())));
 
+        // An `error` line alone does not end the turn (Codex reports retries that way)...
+        let (_, parser) = feed(Provider::Codex, &CODEX_REFUSED[..3]);
+        assert_eq!(parser.outcome, None);
+        assert!(parser.notice.as_deref().unwrap().contains("not supported"));
+        let mut retried = CODEX_REFUSED[..3].to_vec();
+        retried.extend(&CODEX_OK[3..]);
+        assert_eq!(feed(Provider::Codex, &retried).1.outcome, Some(Ok(())));
+        // ...`turn.failed` does.
         let (_, parser) = feed(Provider::Codex, CODEX_REFUSED);
         assert_eq!(
             parser.outcome,

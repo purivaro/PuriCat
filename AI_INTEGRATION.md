@@ -74,7 +74,7 @@ One turn is one CLI subprocess (`agent::chat`, started by the `agent_send` comma
 | Working directory | `agent-scratch` inside the app-data directory, created on first use and otherwise empty: the CLI has nothing of the user's in front of it |
 | Input | The whole prompt is written to stdin, then stdin is closed, from a task of its own so that a CLI that does not read cannot block the turn. Nothing of the conversation or the schema is in the arguments |
 | Output | stdout is read line by line as JSON events; the tail of stderr (the last 32 to 64 KiB) is kept for the error message |
-| End of a turn | The first line that carries a verdict ends the turn (Claude: `result`; Codex: `turn.completed`, `turn.failed` or `error`), even while a process the CLI started still holds the pipe open. So does the CLI closing its output. The CLI then has 5 seconds to exit by itself; if it has not, it is killed |
+| End of a turn | The first line that carries a verdict ends the turn (Claude: `result`; Codex: `turn.completed` or `turn.failed`), even while a process the CLI started still holds the pipe open. So does the CLI closing its output. The CLI then has 5 seconds to exit by itself; if it has not, it is killed |
 | Environment | PuriCat's own, with the tool's directory prepended to `PATH`. PuriCat adds no variable and puts no database credential anywhere near the CLI |
 | Stop | Sets the turn's cancel flag (`cancel_job`). The reader looks at the flag before every read — after each line, and at least every 150 ms — and then kills the CLI. What had streamed stays in the conversation, marked "Stopped before the answer was complete." A Stop pressed while the context is still being read, before the CLI has started, does nothing |
 | Timeout | 10 minutes from the start of the turn, checked in the same place; then the CLI is killed and the turn fails with a message |
@@ -152,7 +152,8 @@ Codex (`exec --json`) — **partly confirmed** on codex-cli 0.133.0:
 |---|---|---|
 | `thread.started` | The turn has started (no model is reported) | Yes |
 | `turn.started` | Ignored | Yes |
-| `error`, `turn.failed` | Fail the turn with `error.message` or `message`. When that message is itself JSON with an inner `error.message`, the inner sentence is shown | Yes |
+| `turn.failed` | Fails the turn with `error.message`. When that message is itself JSON with an inner `error.message`, the inner sentence is shown | Yes |
+| `error` | Remembered, but does not end the turn: it may be a retry in progress. Its message is shown only if the turn then ends without a verdict | Yes |
 | `item.completed` with an item of type `agent_message` | Its `text` is the answer; several in one turn are joined as paragraphs. Items of other types (reasoning) are ignored | **No** — from the documented format |
 | `turn.completed` | The turn succeeded | **No** — from the documented format |
 
@@ -160,7 +161,7 @@ The service refused every model that was tried from this machine ("The '<model>'
 
 When the CLI closes its output without a verdict, an exit status of 0 (reached within the 5 seconds it is given) with some answer text counts as success; otherwise the turn fails with the last non-empty line the CLI wrote to stderr (at most 500 characters), or "ended without an answer".
 
-Because the first verdict ends the turn, a Codex `error` line fails it at once, whatever would have followed. Whether Codex also uses `error` for notices it recovers from was not checked.
+A Codex `error` line alone does not fail the turn; `turn.failed` does (unit test: an `error` followed by a completed turn is a success). Whether Codex really uses `error` for notices it recovers from was not observed.
 
 There is no version check. A CLI that does not accept one of the options fails the turn with whatever it prints.
 
@@ -200,7 +201,7 @@ SELECT 1
 | Engine name and server version | The version text as the server reports it, which can name a build or distribution |
 | Database name, and schema name on PostgreSQL | Of the tab in front |
 | Tables, views and materialized views | The first 40 that the catalogue lists, each with its columns (at most 80, then a count of the rest): name, type as the catalogue gives it, `PRIMARY KEY` or `NOT NULL`, `GENERATED`, and the planner's row estimate where there is one. The remaining objects, and any whose description could not be read, are listed by name only |
-| The SQL in the active query tab | The whole text of the editor as it is at that moment, when the tab in front is a query tab and the text is not empty. It is sent as typed; the history's password masking is not applied to it |
+| The SQL in the active query tab | The whole text of the editor as it is at that moment, when the tab in front is a query tab and the text is not empty. Password literals are masked the way the history masks them (`script::redact`); everything else is sent as typed |
 | The user's messages and the earlier answers | See "The prompt on stdin" |
 
 | Never part of the context | |
@@ -238,7 +239,7 @@ Not built from the earlier plan: marking columns as sensitive, sample rows, pinn
 
 ### Limits and risks
 
-- **What is sent leaves the machine.** It goes to the provider under the user's own account and terms. Table and column names, and the SQL in the active query tab, can themselves be sensitive; literals and passwords written in that SQL are sent as typed. The inspector and the switch are the controls; there is no per-column redaction.
+- **What is sent leaves the machine.** It goes to the provider under the user's own account and terms. Table and column names, and the SQL in the active query tab, can themselves be sensitive. Password literals in that SQL are masked the way the history masks them (`script::redact`, a heuristic); every other literal is sent as typed. The inspector and the switch are the controls; there is no per-column redaction.
 - **The context is a UI rule.** `agent_send` forwards whatever context text it is given; the backend does not check that it came from `agent_context` or that sharing is on.
 - **Database identifiers are untrusted text inside the prompt.** A table or column name, or the active query, can carry text written to steer the model. The context is fenced and the instructions call it reference data, but that is a request to the model, not a guarantee. Because the model has no tools, a successful injection can change the text of an answer and nothing else — so the SQL in an answer must still be read before it is run.
 - **Claude Code runs with no tools at all. Codex does not.** Codex keeps its own shell tool, and PuriCat knows no documented option that switches it off. It runs in the read-only sandbox, in the empty scratch directory: its commands cannot write, and the sandbox blocks the network for them, but a manipulated Codex could read local files the user can read and quote them in its answer.

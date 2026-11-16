@@ -95,10 +95,15 @@ export function AiPanel() {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 pb-3">
           <section data-agent-status className="flex flex-col gap-3 rounded-xl border border-border p-3">
-            {!status ? (
+            {statuses === null ? (
               <div className="flex items-center gap-2 py-1 text-[13px] text-fg-muted">
                 <Spinner className="size-3.5" /> {t("ai.checking")}
               </div>
+            ) : !status ? (
+              // The check itself failed: say so instead of looking busy forever.
+              <StatusLine tone="unknown" icon={<CircleHelp className="size-4" />} title={t("ai.checkFailed")}>
+                {t("ai.checkFailedBody")}
+              </StatusLine>
             ) : !status.installed ? (
               <StatusLine tone="bad" icon={<CircleX className="size-4" />} title={t("ai.notInstalled")}>
                 {t("ai.notInstalledBody", { name })}

@@ -156,9 +156,10 @@ pub async fn duplicate_connection(
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<()> {
     state.remove_session(&id).await;
     let key = password_key(&id);
-    state.with_secrets(move |s| s.delete(&key)).await?;
-    // What was run on a connection goes with it.
+    // What was run on a connection goes with it. First, so that a failure here leaves the
+    // connection whole rather than without its password.
     state.store.clear_history(&id).await?;
+    state.with_secrets(move |s| s.delete(&key)).await?;
     state.store.delete_connection(&id).await
 }
 
@@ -576,6 +577,8 @@ pub async fn agent_context(
         };
         tables.push((object, meta));
     }
+    // Password literals in the active query are masked, as they are in the history.
+    let sql = sql.as_deref().map(script::redact);
     Ok(agent::render_context(
         info.engine,
         &info.version,

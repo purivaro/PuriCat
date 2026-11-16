@@ -178,7 +178,7 @@ Query tabs run SQL the user typed ([ADR 0015](docs/adr/0015-sql-console.md)). Th
 | Open-transaction guards | UI: badge, dot on the tab, database selector disabled, confirmation before closing, refusal to disconnect, change or delete the connection | Implemented & verified for the badge, the dot, the selector and the close confirmation (E2E, MySQL); "Roll back and close" and the refusals have no automated test |
 | Nothing keeps running unseen | Closing a query tab or closing its session interrupts the tab's running statement before the connection is dropped | Implemented, not yet verified |
 | Lost connection | A connection that ended is reported as such, never reused, and replaced on the next run | Implemented & verified in the backend (live tests, both engines: the server kills the connection) |
-| Masked history | `script::redact` masks quoted literals — single quotes, or the double quotes MySQL also accepts — that follow `password`, `identified by` or `identified with` before a script is stored | Implemented & verified for the function (unit test, both kinds of quote); the `run_sql` path that calls it is not asserted |
+| Masked history | `script::redact` masks quoted literals — single quotes, or the double quotes MySQL also accepts — that follow `password`, `identified by` or `identified with` before a script is stored; a quoted column named `"password"` does not shield the value after it | Implemented & verified for the function (unit test, both kinds of quote and the quoted name); the `run_sql` path that calls it is not asserted |
 | History goes with the connection | `delete_connection` deletes the connection's history entries before the profile | Implemented, not yet verified (the store's `clear_history` is unit-tested; the command is not) |
 | Exports written by the backend | The web view gets a path from the native Save dialog and passes it to `export_result`; it has no filesystem permission | Implemented & verified (unit tests, live CSV, E2E through the command). The dialog itself is not exercised |
 
@@ -248,7 +248,7 @@ The agent chat sends text to the user's Claude Code or Codex CLI and shows the t
 AI chat limitations:
 
 - **What is sent goes to the provider**, under the user's own account and that provider's terms. PuriCat cannot recall it.
-- **Schema names and the active query can themselves be sensitive.** Table and column names are sent as they are. The SQL of the active query tab is sent as typed — the history's password masking is not applied to it — so a literal or a password written in that tab goes along. There is no per-column redaction and no way to exclude a table.
+- **Schema names and the active query can themselves be sensitive.** Table and column names are sent as they are. The SQL of the active query tab is sent with the history's password masking applied (`script::redact`, a heuristic) and otherwise as typed, so any other literal written in that tab goes along. There is no per-column redaction and no way to exclude a table.
 - **The user's messages are not filtered.** Whatever is typed or pasted into the composer, including rows or credentials, is sent.
 - **Switching the provider keeps the conversation.** The next turn resends the earlier questions and answers, with the context of the new message, to the other provider.
 - **Database identifiers are untrusted text inside the prompt.** A table name, a column name or the active query can be written to steer the model. The fence and the instructions are a request to the model, not a control. Because the model has no tools, an injection can at most change the text of an answer — which is why SQL from an answer must still be read before it is run. On a connection whose schema other people can write to, treat answers accordingly.
@@ -302,7 +302,7 @@ One hook is not debug-only: a query tab attaches its Monaco editor object to the
 | SQL console: a switch to turn history off, masking of secrets other than password literals | Not scheduled |
 | SQL console: verification through the UI of Stop, the lost-connection path, the Production confirmation and PostgreSQL | 4 |
 | AI: MCP server with read-only tools, approval queue, audit log | 5 |
-| AI: per-column redaction, masking of the active query's text, a scope the user can narrow | 5 |
+| AI: per-column redaction, masking of literals other than passwords in the active query's text, a scope the user can narrow | 5 |
 | AI: Codex's successful path verified against the real CLI; a way to run Codex without its shell tool; CLI version checks | 5 |
 | AI: backend enforcement of the "Share context" switch | Not scheduled |
 | Backup file permissions and encryption | 6 |
