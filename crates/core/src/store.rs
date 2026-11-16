@@ -25,7 +25,35 @@ const MIGRATIONS: &[&str] = &[
         key   TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
      );",
+    // 2 — SQL history. Statements are stored after password literals were masked.
+    "CREATE TABLE query_history (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection_id TEXT NOT NULL,
+        database_name TEXT,
+        sql           TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        summary       TEXT NOT NULL,
+        elapsed_ms    INTEGER NOT NULL,
+        started_at    INTEGER NOT NULL
+     );
+     CREATE INDEX query_history_recent ON query_history (connection_id, id DESC);",
 ];
+
+/// Entries kept; older ones are dropped as new ones arrive.
+const HISTORY_LIMIT: i64 = 1000;
+
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub id: i64,
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub sql: String,
+    pub status: String,
+    pub summary: String,
+    pub elapsed_ms: i64,
+    pub started_at: i64,
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -174,6 +202,77 @@ impl Store {
         Ok(())
     }
 
+    // ---- query history ------------------------------------------------------------------
+
+    pub async fn add_history(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        sql: &str,
+        status: &str,
+        summary: &str,
+        elapsed_ms: u64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO query_history (connection_id, database_name, sql, status, summary, elapsed_ms, started_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(connection_id)
+        .bind(database)
+        .bind(sql)
+        .bind(status)
+        .bind(summary)
+        .bind(elapsed_ms as i64)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        sqlx::query(
+            "DELETE FROM query_history WHERE id <= (SELECT MAX(id) FROM query_history) - ?",
+        )
+        .bind(HISTORY_LIMIT)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        Ok(())
+    }
+
+    /// Most recent first, for one connection.
+    pub async fn list_history(&self, connection_id: &str, limit: u32) -> Result<Vec<HistoryEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, connection_id, database_name, sql, status, summary, elapsed_ms, started_at
+             FROM query_history WHERE connection_id = ? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(connection_id)
+        .bind(limit.min(500))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        rows.iter()
+            .map(|r| {
+                Ok(HistoryEntry {
+                    id: r.try_get(0).map_err(Error::store)?,
+                    connection_id: r.try_get(1).map_err(Error::store)?,
+                    database: r.try_get(2).map_err(Error::store)?,
+                    sql: r.try_get(3).map_err(Error::store)?,
+                    status: r.try_get(4).map_err(Error::store)?,
+                    summary: r.try_get(5).map_err(Error::store)?,
+                    elapsed_ms: r.try_get(6).map_err(Error::store)?,
+                    started_at: r.try_get(7).map_err(Error::store)?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn clear_history(&self, connection_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM query_history WHERE connection_id = ?")
+            .bind(connection_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
     // ---- settings ----------------------------------------------------------------------
 
     pub async fn settings(&self) -> Result<HashMap<String, String>> {
@@ -297,6 +396,37 @@ mod tests {
             store.save_connection(p).await,
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn history_is_per_connection_newest_first_and_bounded() {
+        let store = Store::open_in_memory().await.unwrap();
+        for i in 0..(HISTORY_LIMIT + 5) {
+            let connection = if i % 2 == 0 { "a" } else { "b" };
+            store
+                .add_history(
+                    connection,
+                    Some("db"),
+                    &format!("SELECT {i}"),
+                    "ok",
+                    "1 row",
+                    3,
+                )
+                .await
+                .unwrap();
+        }
+        let a = store.list_history("a", 3).await.unwrap();
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].sql, format!("SELECT {}", HISTORY_LIMIT + 4));
+        assert!(a[0].id > a[1].id && a[0].started_at > 0);
+        assert_eq!(a[0].database.as_deref(), Some("db"));
+        // Nothing older than the limit survives, across all connections.
+        let all = store.list_history("a", 500).await.unwrap().len()
+            + store.list_history("b", 500).await.unwrap().len();
+        assert_eq!(all, 1000);
+        store.clear_history("a").await.unwrap();
+        assert!(store.list_history("a", 10).await.unwrap().is_empty());
+        assert!(!store.list_history("b", 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ import {
   Star,
   StarOff,
   Table2,
+  TerminalSquare,
   Trash2,
   Unplug,
   X,
@@ -362,9 +363,14 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                 if (!open && !loaded) void load();
               }}
               menu={
-                <ContextMenu.Item className={menuItemClass} onSelect={() => void load()}>
-                  <RefreshCw className="size-3.5" /> {t("common.refresh")}
-                </ContextMenu.Item>
+                <>
+                  <ContextMenu.Item className={menuItemClass} onSelect={() => useWorkspace.getState().openSql(connection.id, db.name)}>
+                    <TerminalSquare className="size-3.5" /> {t("sql.newQuery")}
+                  </ContextMenu.Item>
+                  <ContextMenu.Item className={menuItemClass} onSelect={() => void load()}>
+                    <RefreshCw className="size-3.5" /> {t("common.refresh")}
+                  </ContextMenu.Item>
+                </>
               }
             />
             {open &&
@@ -436,6 +442,12 @@ function ConnectionNode({ connection, query }: { connection: ConnectionView; que
             ) : (
               <ContextMenu.Item className={menuItemClass} onSelect={() => void openNode()}>
                 <Plug className="size-3.5" /> {t("explorer.connect")}
+              </ContextMenu.Item>
+            )}
+            {connected && (
+              <ContextMenu.Item className={menuItemClass} onSelect={() => useWorkspace.getState().openSql(connection.id, null)}>
+                <TerminalSquare className="size-3.5" /> {t("sql.newQuery")}
+                <span className="ml-auto pl-4 text-xs text-fg-subtle">⌘T</span>
               </ContextMenu.Item>
             )}
             {connected && (

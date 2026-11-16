@@ -20,7 +20,7 @@ const THEMES: { value: ThemeChoice; icon: typeof Sun; key: string }[] = [
 function ActiveConnection() {
   const { t } = useTranslation();
   const tab = useWorkspace((s) => s.tabs.find((x) => x.id === s.activeId));
-  const connectionId = tab?.kind === "table" ? tab.connectionId : null;
+  const connectionId = tab && tab.kind !== "welcome" ? tab.connectionId : null;
   const connection = useConnections((s) => s.connections.find((c) => c.id === connectionId));
   const session = useConnections((s) => (connectionId ? sessionOf(s.sessions, connectionId) : null));
 

@@ -1,6 +1,6 @@
-import { Eye, Home, Table2, X } from "lucide-react";
+import { Eye, Home, Table2, TerminalSquare, X } from "lucide-react";
 import { AlertDialog, ContextMenu } from "radix-ui";
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import { TableTabView } from "../../features/table/TableTab";
@@ -15,7 +15,7 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
   const { t } = useTranslation();
   const { activate, close, closeOthers, closeAll } = useWorkspace.getState();
   const connection = useConnections((s) =>
-    tab.kind === "table" ? s.connections.find((c) => c.id === tab.connectionId) : undefined,
+    tab.kind === "welcome" ? undefined : s.connections.find((c) => c.id === tab.connectionId),
   );
   const dirty = useWorkspace((s) => !!s.dirty[tab.id]);
   const ref = useRef<HTMLDivElement>(null);
@@ -24,12 +24,14 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
     if (active) ref.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [active]);
 
-  const Icon = tab.kind === "welcome" ? Home : tab.objectKind === "table" ? Table2 : Eye;
-  const title = tab.kind === "welcome" ? t("tabs.welcome") : tab.table.name;
+  const Icon = tab.kind === "welcome" ? Home : tab.kind === "sql" ? TerminalSquare : tab.objectKind === "table" ? Table2 : Eye;
+  const title = tab.kind === "welcome" ? t("tabs.welcome") : tab.kind === "sql" ? tab.title : tab.table.name;
   const where =
     tab.kind === "table"
       ? [connection?.name, tab.table.database, tab.table.schema].filter(Boolean).join(" › ")
-      : undefined;
+      : tab.kind === "sql"
+        ? [connection?.name, tab.database].filter(Boolean).join(" › ")
+        : undefined;
 
   return (
     <ContextMenu.Root>
@@ -54,7 +56,14 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
           {active && <span aria-hidden className="absolute inset-x-2 top-0 h-0.5 rounded-b bg-accent" />}
           <Icon className={cn("size-3.5 shrink-0", active ? "text-accent-text" : "text-fg-subtle")} />
           <span className="min-w-0 flex-1 truncate">{title}</span>
-          {dirty && <span role="img" aria-label={t("table.unsaved")} title={t("table.unsaved")} className="size-2 shrink-0 rounded-full bg-accent" />}
+          {dirty && (
+            <span
+              role="img"
+              aria-label={t(tab.kind === "sql" ? "sql.transactionOpen" : "table.unsaved")}
+              title={t(tab.kind === "sql" ? "sql.transactionOpen" : "table.unsaved")}
+              className="size-2 shrink-0 rounded-full bg-accent"
+            />
+          )}
           {connection && (
             // The colour ties the tab to its environment even when the name is cut off.
             <span className={cn("max-w-20 shrink truncate rounded px-1 text-[10px] font-semibold", ENV_TONE[connection.environment])}>
@@ -96,28 +105,31 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
   );
 }
 
-/** Closing a tab with staged edits asks first. */
+const SqlTabView = lazy(() => import("../../features/sql/SqlTab"));
+
+/** Closing a tab with staged edits, or a query tab with an open transaction, asks first. */
 function DiscardDialog() {
   const { t } = useTranslation();
   const closing = useWorkspace((s) => s.tabs.find((x) => x.id === s.closing));
   const { cancelClose, forceClose } = useWorkspace.getState();
+  const sql = closing?.kind === "sql";
   return (
     <AlertDialog.Root open={!!closing} onOpenChange={(open) => !open && cancelClose()}>
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="animate-fade fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px] dark:bg-black/55" />
         <AlertDialog.Content className="animate-pop fixed top-1/2 left-1/2 z-50 w-[min(92vw,420px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-raised p-5 shadow-pop outline-none">
           <AlertDialog.Title className="text-[15px] leading-snug font-semibold break-words">
-            {t("closeDirty.title", { name: closing?.kind === "table" ? closing.table.name : "" })}
+            {sql ? t("closeDirty.titleSql", { name: closing.title }) : t("closeDirty.title", { name: closing?.kind === "table" ? closing.table.name : "" })}
           </AlertDialog.Title>
           <AlertDialog.Description className="mt-1.5 text-[13px] leading-relaxed text-fg-muted">
-            {t("closeDirty.body")}
+            {t(sql ? "closeDirty.bodySql" : "closeDirty.body")}
           </AlertDialog.Description>
           <div className="mt-5 flex justify-end gap-2">
             <AlertDialog.Cancel asChild>
-              <Button variant="primary">{t("closeDirty.keep")}</Button>
+              <Button variant="primary">{t(sql ? "closeDirty.keepSql" : "closeDirty.keep")}</Button>
             </AlertDialog.Cancel>
             <Button variant="danger" onClick={() => closing && forceClose(closing.id)}>
-              {t("closeDirty.discard")}
+              {t(sql ? "closeDirty.discardSql" : "closeDirty.discard")}
             </Button>
           </div>
         </AlertDialog.Content>
@@ -141,7 +153,16 @@ export function Workspace() {
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl rounded-tl-none border border-border bg-surface shadow-card">
         {tabs.map((tab) => (
           <div key={tab.id} role="tabpanel" hidden={tab.id !== activeId} className="h-full">
-            {tab.kind === "welcome" ? <WelcomeTab /> : <TableTabView tab={tab} active={tab.id === activeId} />}
+            {tab.kind === "welcome" ? (
+              <WelcomeTab />
+            ) : tab.kind === "sql" ? (
+              // The editor is a large dependency: it loads when the first query tab opens.
+              <Suspense fallback={null}>
+                <SqlTabView tab={tab} active={tab.id === activeId} />
+              </Suspense>
+            ) : (
+              <TableTabView tab={tab} active={tab.id === activeId} />
+            )}
           </div>
         ))}
       </div>

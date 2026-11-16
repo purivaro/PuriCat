@@ -94,7 +94,8 @@ function initialWidths(page: RowPage): number[] {
 interface Props {
   page: RowPage;
   sort: SortSpec | null;
-  onSort: (sort: SortSpec | null) => void;
+  /** Omit for grids that cannot be re-sorted on the server (query results). */
+  onSort?: (sort: SortSpec | null) => void;
   /** Sorting reloads the page, which is not allowed while edits are pending. */
   sortDisabled: boolean;
   /** `false` renders a plain read-only grid. */
@@ -381,13 +382,14 @@ export function DataGrid(props: Props) {
               <div style={{ width: GUTTER }} className="sticky left-0 z-10 shrink-0 border-r border-border bg-sunken" />
               {page.columns.map((col, c) => (
                 <HeaderCell
-                  key={col.name}
+                  key={c}
                   column={col}
                   width={widths[c] ?? MIN_WIDTH}
                   sort={sort?.column === col.name ? sort : null}
-                  sortDisabled={sortDisabled}
+                  sortDisabled={sortDisabled || !onSort}
+                  sortHint={onSort ? t("table.dirtyLocked") : undefined}
                   showLock={editable && !col.editable}
-                  onSort={() => onSort(nextSort(sort, col.name))}
+                  onSort={() => onSort?.(nextSort(sort, col.name))}
                   onResizeStart={(e) => startResize(e, c)}
                 />
               ))}
@@ -594,12 +596,13 @@ interface HeaderCellProps {
   width: number;
   sort: SortSpec | null;
   sortDisabled: boolean;
+  sortHint?: string;
   showLock: boolean;
   onSort: () => void;
   onResizeStart: (e: PointerEvent<HTMLSpanElement>) => void;
 }
 
-function HeaderCell({ column, width, sort, sortDisabled, showLock, onSort, onResizeStart }: HeaderCellProps) {
+function HeaderCell({ column, width, sort, sortDisabled, sortHint, showLock, onSort, onResizeStart }: HeaderCellProps) {
   const { t } = useTranslation();
   const Icon = column.primaryKey ? KeyRound : KIND_ICON[column.kind];
   return (
@@ -613,7 +616,7 @@ function HeaderCell({ column, width, sort, sortDisabled, showLock, onSort, onRes
         type="button"
         onClick={onSort}
         disabled={sortDisabled}
-        title={sortDisabled ? t("table.dirtyLocked") : `${column.name} · ${column.dataType}`}
+        title={sortDisabled && sortHint ? sortHint : `${column.name} · ${column.dataType}`}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left text-xs font-semibold text-fg enabled:hover:bg-border/50 focus-visible:outline-offset-[-2px]"
       >
         <Icon className={cn("size-3.5 shrink-0", column.primaryKey ? "text-accent-text" : "text-fg-subtle")} />

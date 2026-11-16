@@ -3,9 +3,12 @@
 //! Each engine gets its own module with its own SQL; nothing here rewrites one dialect
 //! into another. `Session` is a plain enum so adding an engine is a compile-time checklist.
 
+pub mod console;
+pub mod export;
 pub mod ident;
 mod mysql;
 mod postgres;
+pub mod script;
 pub mod smart;
 pub mod write;
 
@@ -304,10 +307,18 @@ impl Session {
         ))
     }
 
-    fn engine(&self) -> Engine {
+    pub fn engine(&self) -> Engine {
         match self {
             Session::MySql(_) => Engine::Mysql,
             Session::Postgres(_) => Engine::Postgres,
+        }
+    }
+
+    /// A connection of its own for one query tab, on `database` (the default one if `None`).
+    pub async fn open_console(&self, database: Option<&str>) -> Result<console::Console> {
+        match self {
+            Session::MySql(s) => s.open_console(database).await,
+            Session::Postgres(s) => s.open_console(database).await,
         }
     }
 

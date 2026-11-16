@@ -13,6 +13,7 @@ import { TitleBar } from "./components/layout/TitleBar";
 import { Workspace } from "./components/layout/Workspace";
 import { Button, StateMessage } from "./components/ui/primitives";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
+import i18n from "./i18n";
 import { errorMessage } from "./lib/ipc";
 import { useConnections } from "./stores/connections";
 import { resolveTheme, useSettings } from "./stores/settings";
@@ -145,6 +146,21 @@ export default function App() {
         b: () => settings.update({ explorerOpen: !settings.explorerOpen }),
         j: () => settings.update({ aiOpen: !settings.aiOpen }),
         w: () => useWorkspace.getState().close(useWorkspace.getState().activeId),
+        // New query on the connection of the tab in front, or the only one that is connected.
+        t: () => {
+          const workspace = useWorkspace.getState();
+          const current = workspace.tabs.find((x) => x.id === workspace.activeId);
+          const sessions = useConnections.getState().sessions;
+          const open = Object.keys(sessions).filter((id) => sessions[id]?.status === "connected");
+          const target =
+            current && current.kind !== "welcome" && sessions[current.connectionId]?.status === "connected"
+              ? current.connectionId
+              : open.length === 1
+                ? open[0]
+                : undefined;
+          if (target) workspace.openSql(target, current?.kind === "table" ? current.table.database : current?.kind === "sql" ? current.database : null);
+          else toast.info(i18n.t("sql.needConnection"));
+        },
       };
       const action = !e.shiftKey && actions[e.key.toLowerCase()];
       if (!action) return;

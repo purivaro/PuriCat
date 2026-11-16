@@ -5,6 +5,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use sqlx::{ConnectOptions, Executor, Row};
 use tokio::sync::Mutex;
 
+use super::console::Console;
 use super::smart::UniqueKey;
 use super::write::{self, Statement};
 use super::{
@@ -402,6 +403,10 @@ impl PgSession {
             out.push(cells);
         }
         Ok(out)
+    }
+
+    pub async fn open_console(&self, database: Option<&str>) -> Result<Console> {
+        Console::postgres(&self.pool(database.unwrap_or(&self.home)).await?).await
     }
 
     pub async fn close(&self) {

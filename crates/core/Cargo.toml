@@ -21,3 +21,5 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
 ] }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+rust_xlsxwriter = "0.96.0"

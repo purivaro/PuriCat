@@ -3,6 +3,7 @@ use std::time::Duration;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::{ConnectOptions, Executor, Row};
 
+use super::console::Console;
 use super::smart::UniqueKey;
 use super::write::{self, Statement};
 use super::{
@@ -349,6 +350,10 @@ impl MySqlSession {
             out.push(cells);
         }
         Ok(out)
+    }
+
+    pub async fn open_console(&self, database: Option<&str>) -> Result<Console> {
+        Console::mysql(&self.pool, database).await
     }
 
     pub async fn close(&self) {

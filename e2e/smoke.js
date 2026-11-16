@@ -6,7 +6,16 @@
   const PAUSE = 1400; // long enough for the runner to take a screenshot of each stage
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = [];
-  const report = (stage, extra) => invoke("e2e_report", { text: JSON.stringify({ stage, ...extra, log }, null, 1) });
+  // Content-Security-Policy violations and uncaught errors seen while the test ran. They are
+  // part of the report: under the production policy a blocked resource fails silently.
+  const problems = [];
+  addEventListener("securitypolicyviolation", (e) => problems.push(`csp: ${e.violatedDirective} blocked ${e.blockedURI || "inline code"} at ${e.sourceFile ?? "?"}:${e.lineNumber ?? "?"}`));
+  addEventListener("error", (e) => problems.push(`error: ${e.message}`));
+  addEventListener("unhandledrejection", (e) => {
+    // Monaco rejects its own pending timers with "Canceled" whenever focus moves; that is not a fault.
+    if (e.reason?.name !== "Canceled") problems.push(`rejection: ${e.reason?.stack ?? e.reason}`);
+  });
+  const report = (stage, extra) => invoke("e2e_report", { text: JSON.stringify({ stage, ...extra, problems, log }, null, 1) });
   const stage = async (name, data = {}) => {
     log.push({ stage: name, ...data });
     await report(name);
@@ -345,6 +354,111 @@
     await waitFor(() => cellText(0, 1) === "SO-99001", "inserted row visible");
     log.push({ stage: "smart-paste-done", updated: ["Completed", "999.99"], inserted: [cellText(0, 1), cellText(0, 4), cellText(0, 5)] });
 
+    // 8c. SQL console (MySQL): run a script, confirmation for a destructive statement,
+    //     the impact guard, an error, the history, and exports
+    await rightClick(treeRow("Demo MySQL"));
+    await click(await waitFor(() => withText('[role="menuitem"]', "New query"), "new query menu"), "new query");
+    const sqlTab = () => document.querySelector(`${panelSel} [data-sql-tab]`);
+    await waitFor(() => sqlTab()?.__editor, "sql editor", 30000);
+    const sqlButton = (label) => all(`${panelSel} button`).find((b) => b.textContent.trim().startsWith(label));
+    const runSql = async (text) => {
+      const before = document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent ?? "";
+      sqlTab().__editor.setValue(text);
+      await sleep(80);
+      await click(sqlButton("Run"), "run sql");
+      return before;
+    };
+    const messages = () => all(`${panelSel} [data-sql-messages] li`).map((li) => ({ status: li.dataset.status, text: li.textContent.replace(/\s+/g, " ").trim().slice(0, 220) }));
+    const sqlStatus = () => all(`${panelSel} [data-sql-messages] li`).map((li) => li.dataset.status).join(",");
+    const showMessages = () => click(all(`${panelSel} [role="tab"]`).find((b) => b.textContent.trim() === "Messages"), "messages tab");
+
+    await runSql(
+      "-- two statements\nSELECT order_no, status, total_amount FROM puricat_e2e.orders WHERE order_no IN ('SO-10001', 'SO-99001') ORDER BY order_no;\nSELECT COUNT(*) AS customers FROM puricat_e2e.customers;",
+    );
+    await waitFor(() => gridCells().includes("SO-10001"), "sql result rows", 20000);
+    const sqlFirst = {
+      row: gridCells(),
+      tabs: all(`${panelSel} [role="tab"]`).map((b) => b.textContent.replace(/\s+/g, " ").trim()),
+      summary: document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim(),
+    };
+    await stage("sql-console", { sqlFirst });
+
+    // a DELETE without WHERE asks first; cancelling runs nothing
+    await runSql("DELETE FROM puricat_e2e.audit_log");
+    const sqlConfirm = await waitFor(() => document.querySelector("[data-sql-confirm]"), "destructive confirmation");
+    const confirmText = sqlConfirm.textContent.replace(/\s+/g, " ").trim().slice(0, 260);
+    await click(exact("[data-sql-confirm] button", "Cancel"), "cancel destructive");
+    await waitFor(() => !document.querySelector("[data-sql-confirm]"), "confirmation closed");
+
+    // an UPDATE over the connection's row limit is rolled back, then allowed explicitly
+    await runSql("UPDATE puricat_e2e.orders SET note = 'bulk' WHERE id <= 50");
+    await waitFor(() => sqlStatus() === "blocked", "impact guard", 20000);
+    const blocked = messages();
+    await stage("sql-blocked", { confirmText, blocked });
+    await click(sqlButton("Run it without the limit"), "run anyway");
+    await waitFor(() => sqlStatus() === "ok" && messages()[0].text.includes("50 rows affected"), "large change applied", 20000);
+    const allowed = messages();
+
+    // an error is reported with the server's message, and later statements are skipped
+    await runSql("SELECT 1;\nSELECT * FROM puricat_e2e.no_such_table;\nSELECT 2");
+    await sleep(600);
+    await showMessages();
+    await waitFor(() => sqlStatus() === "ok,error", "sql error", 20000);
+    const failed = { messages: messages(), skipped: withText(`${panelSel} [data-sql-messages] p`, "not run")?.textContent };
+
+    // a transaction the user opens (even behind a comment) is theirs: the impact guard stays
+    // out of it, the tab is flagged, the database cannot be switched, and closing asks first
+    await runSql("-- held open\nBEGIN;\nUPDATE puricat_e2e.orders SET note = 'tx' WHERE id <= 40");
+    const txnBadge = await waitFor(() => document.querySelector(`${panelSel} [data-sql-transaction]`), "transaction badge", 20000);
+    const txn = {
+      badge: txnBadge.textContent.trim(),
+      statuses: sqlStatus(),
+      tabFlagged: !!document.querySelector('[role="tab"][aria-selected="true"] [role="img"]'),
+      databaseLocked: document.querySelector(`${panelSel} select[aria-label="Database"]`).disabled,
+    };
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close tab in transaction");
+    const txnDialog = await waitFor(() => document.querySelector('[role="alertdialog"]'), "transaction close dialog");
+    txn.dialog = txnDialog.textContent.replace(/\s+/g, " ").trim();
+    await stage("sql-transaction", { txn });
+    await click(exact('[role="alertdialog"] button', "Keep the tab"), "keep the tab");
+    await waitFor(() => !document.querySelector('[role="alertdialog"]'), "dialog closed");
+    await runSql("ROLLBACK;\nSELECT COUNT(*) AS still_tx FROM puricat_e2e.orders WHERE note = 'tx'");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-sql-transaction]`) && gridCells().join() === "0", "rolled back", 20000);
+    txn.afterRollback = {
+      tabFlagged: !!document.querySelector('[role="tab"][aria-selected="true"] [role="img"]'),
+      databaseLocked: document.querySelector(`${panelSel} select[aria-label="Database"]`).disabled,
+    };
+    if (txn.statuses !== "ok,ok" || !txn.tabFlagged || !txn.databaseLocked || txn.afterRollback.tabFlagged || txn.afterRollback.databaseLocked) {
+      throw new Error(`transaction handling is wrong: ${JSON.stringify(txn)}`);
+    }
+
+    // a run that cannot start says so in Messages, not behind the previous result
+    await runSql("-- nothing to run");
+    const noStatement = await waitFor(() => document.querySelector(`${panelSel} [role="alert"]`), "failure shown");
+    txn.failure = noStatement.textContent.trim();
+
+    // history lists what ran on this connection
+    await click(document.querySelector(`${panelSel} button[aria-label="History"]`), "history");
+    document.querySelector(`${panelSel} button[aria-label="History"]`).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    const historyMenu = await waitFor(() => document.querySelector("[data-sql-history] [role=menuitem]") && document.querySelector("[data-sql-history]"), "history list");
+    const historyItems = [...historyMenu.querySelectorAll("[role=menuitem]")].map((m) => m.textContent.replace(/\s+/g, " ").trim().slice(0, 90));
+    // Escape is sent to the menu itself until it is gone: where focus sits at this instant varies.
+    await waitFor(() => {
+      const menu = document.querySelector("[data-sql-history]");
+      menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      return !menu;
+    }, "history closed");
+
+    // exports are written by the backend from the full result
+    await runSql("SELECT id, name, city FROM puricat_e2e.customers ORDER BY id");
+    await waitFor(() => gridCells().includes("สมชาย ใจดี"), "customers result", 20000);
+    const sqlTabId = JSON.parse((await invoke("get_settings")).workspace).tabs.find((x) => x.kind === "sql").id;
+    const exported = {};
+    for (const format of ["csv", "json", "xlsx"]) {
+      exported[format] = await invoke("export_result", { tab: sqlTabId, result: 0, format, path: `__WORK__/export.${format}` });
+    }
+    log.push({ stage: "sql-more", allowed, failed, txn, historyItems, exported });
+
     // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
     await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
     await waitFor(() => cellText(0, 1) === "SO-10001" && editState() === "editable", "postgres orders tab");
@@ -416,6 +530,7 @@
       restoredTabs: JSON.parse(settings.workspace).tabs.map((t) => t.kind === "table" ? t.table.name : t.kind),
     });
     if (previousClipboard !== null) await invoke("plugin:clipboard-manager|write_text", { text: previousClipboard });
+    if (problems.length > 0) throw new Error(`the page reported ${problems.length} problem(s); see "problems" in the report`);
     await report("done");
   } catch (e) {
     await report("FAILED", { error: `${e?.message ?? e}\n${e?.stack ?? ""}`, where: document.querySelector('[role="dialog"]')?.textContent.slice(0, 300) });

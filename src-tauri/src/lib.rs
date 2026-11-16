@@ -6,6 +6,7 @@ use tauri::Manager;
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             // Tests point debug builds at a throwaway directory instead of the real settings.
@@ -29,6 +30,7 @@ pub fn run() {
             commands::list_databases,
             commands::list_schemas,
             commands::list_objects,
+            commands::describe_table,
             commands::fetch_rows,
             commands::plan_changes,
             commands::apply_changes,
@@ -36,6 +38,13 @@ pub fn run() {
             commands::analyze_paste,
             commands::apply_paste,
             commands::cancel_job,
+            commands::analyze_sql,
+            commands::run_sql,
+            commands::cancel_sql,
+            commands::close_console,
+            commands::list_history,
+            commands::clear_history,
+            commands::export_result,
             commands::get_settings,
             commands::set_setting,
             commands::detect_ai_clis,

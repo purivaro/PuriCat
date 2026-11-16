@@ -24,9 +24,10 @@ echo "› fixtures"
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' -c 'CREATE DATABASE puricat_e2e'
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -v ON_ERROR_STOP=1 -f "$ROOT/e2e/fixtures/postgres.sql" >/dev/null
 
-sed -e "s/__MYSQL_USER__/$MYSQL_USER/" -e "s/__PG_USER__/$PG_USER/" "$ROOT/e2e/smoke.js" >"$WORK/smoke.js"
+sed -e "s/__MYSQL_USER__/$MYSQL_USER/" -e "s/__PG_USER__/$PG_USER/" -e "s|__WORK__|$WORK|g" "$ROOT/e2e/smoke.js" >"$WORK/smoke.js"
 
 cleanup() {
+  rm -rf "$WORK"
   if [ "${KEEP_DB:-0}" != 1 ]; then
     "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e' 2>/dev/null || true
     "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' 2>/dev/null || true
@@ -88,6 +89,15 @@ for _ in $(seq 1 1200); do
 done
 
 cp "$REPORT" "$ROOT/target/e2e-report.json" 2>/dev/null || true
+if [ "$last" = done ]; then
+  # The files the app exported must hold exactly what the grid showed.
+  check() { grep -q "$2" "$1" || { echo "✗ export check failed: $1 lacks $2"; exit 1; }; }
+  check "$WORK/export.csv" '^1,สมชาย ใจดี,'
+  check "$WORK/export.json" '"name":"สมชาย ใจดี"'
+  unzip -p "$WORK/export.xlsx" xl/sharedStrings.xml | grep -q 'สมชาย ใจดี' || { echo "✗ export check failed: xlsx"; exit 1; }
+  head -c 3 "$WORK/export.csv" | xxd -p | grep -q '^efbbbf$' || { echo "✗ export check failed: CSV has no byte-order mark"; exit 1; }
+  echo "  · exported CSV, JSON and XLSX verified"
+fi
 if [ "$last" = done ]; then
   echo "✓ end-to-end smoke test passed — report: target/e2e-report.json"
 else

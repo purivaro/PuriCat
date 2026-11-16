@@ -16,7 +16,19 @@ export interface WelcomeTab {
   kind: "welcome";
 }
 
-export type Tab = WelcomeTab | TableTab;
+export interface SqlTab {
+  id: string;
+  kind: "sql";
+  connectionId: string;
+  /** Database the tab's connection is on; `null` uses the connection's default. */
+  database: string | null;
+  title: string;
+}
+
+export type Tab = WelcomeTab | TableTab | SqlTab;
+
+/** Settings key holding a query tab's text, so it survives a restart. */
+export const sqlTextKey = (tabId: string) => `sql:${tabId}`;
 
 const WELCOME: WelcomeTab = { id: "welcome", kind: "welcome" };
 
@@ -25,6 +37,16 @@ export function tableTabId(connectionId: string, t: TableRef): string {
 }
 
 /** Remove a tab and decide which tab becomes active: the right neighbour, else the left. */
+/** A closed query tab gives its connection back and its saved text is cleared. */
+function released(before: Tab[], after: Tab[]) {
+  for (const t of before) {
+    if (t.kind === "sql" && !after.some((x) => x.id === t.id)) {
+      void ipc.closeConsole(t.id);
+      void ipc.setSetting(sqlTextKey(t.id), "");
+    }
+  }
+}
+
 export function closeTabIn(tabs: Tab[], activeId: string, id: string): { tabs: Tab[]; activeId: string } {
   const index = tabs.findIndex((t) => t.id === id);
   if (index < 0) return { tabs, activeId };
@@ -49,6 +71,8 @@ interface WorkspaceState {
   cancelClose: () => void;
   restore: () => Promise<void>;
   openTable: (connectionId: string, table: TableRef, objectKind: ObjectKind) => void;
+  openSql: (connectionId: string, database: string | null) => void;
+  setSqlDatabase: (id: string, database: string | null) => void;
   openWelcome: () => void;
   activate: (id: string) => void;
   close: (id: string) => void;
@@ -65,6 +89,7 @@ function isTab(v: unknown): v is Tab {
   if (!v || typeof v !== "object") return false;
   const t = v as Record<string, unknown>;
   if (t.kind === "welcome") return t.id === "welcome";
+  if (t.kind === "sql") return typeof t.id === "string" && typeof t.connectionId === "string" && typeof t.title === "string";
   const table = t.table as Record<string, unknown> | undefined;
   return (
     t.kind === "table" &&
@@ -78,6 +103,7 @@ function isTab(v: unknown): v is Tab {
 
 export const useWorkspace = create<WorkspaceState>((set, get) => {
   const commit = (next: Pick<WorkspaceState, "tabs" | "activeId">) => {
+    released(get().tabs, next.tabs);
     set(next);
     persist(next);
   };
@@ -107,6 +133,22 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       commit({ tabs: [...tabs, { id, kind: "table", connectionId, table, objectKind }], activeId: id });
     },
 
+    openSql: (connectionId, database) => {
+      const { tabs } = get();
+      // "Query 3" is the next free number, so names stay unique while tabs are open.
+      const used = new Set(tabs.flatMap((t) => (t.kind === "sql" ? [t.title] : [])));
+      let n = 1;
+      while (used.has(`Query ${n}`)) n++;
+      const id = `sql:${crypto.randomUUID()}`;
+      commit({ tabs: [...tabs, { id, kind: "sql", connectionId, database, title: `Query ${n}` }], activeId: id });
+    },
+
+    setSqlDatabase: (id, database) =>
+      commit({
+        tabs: get().tabs.map((t) => (t.id === id && t.kind === "sql" ? { ...t, database } : t)),
+        activeId: get().activeId,
+      }),
+
     openWelcome: () => {
       const { tabs } = get();
       commit({ tabs: tabs.some((t) => t.id === WELCOME.id) ? tabs : [WELCOME, ...tabs], activeId: WELCOME.id });
@@ -123,7 +165,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         return { dirty: next };
       }),
     hasUnsavedFor: (connectionId) =>
-      get().tabs.some((t) => t.kind === "table" && t.connectionId === connectionId && get().dirty[t.id]),
+      get().tabs.some((t) => t.kind !== "welcome" && t.connectionId === connectionId && get().dirty[t.id]),
     cancelClose: () => set({ closing: null }),
     forceClose: (id) => {
       set({ closing: null });
@@ -148,7 +190,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     closeForConnection: (connectionId) => {
       let next = { tabs: get().tabs, activeId: get().activeId };
       for (const t of get().tabs) {
-        if (t.kind === "table" && t.connectionId === connectionId) next = closeTabIn(next.tabs, next.activeId, t.id);
+        if (t.kind !== "welcome" && t.connectionId === connectionId) next = closeTabIn(next.tabs, next.activeId, t.id);
       }
       commit(next);
     },

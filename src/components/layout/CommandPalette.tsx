@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { Eye, Home, Languages, Moon, PanelLeft, Plug, Plus, Search, Sparkles, Sun, Table2, X } from "lucide-react";
+import { Eye, Home, Languages, Moon, PanelLeft, Plug, Plus, Search, Sparkles, Sun, Table2, TerminalSquare, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -86,6 +86,19 @@ export function CommandPalette() {
           <Item icon={<Plus className="size-4" />} shortcut="⌘N" onSelect={run(() => useUi.getState().openConnectionDialog())}>
             {t("palette.newConnection")}
           </Item>
+          {connections
+            .filter((c) => sessionOf(sessions, c.id).status === "connected")
+            .map((c) => (
+              <Item
+                key={`query-${c.id}`}
+                value={`new query sql ${c.name} ${c.id}`}
+                icon={<TerminalSquare className="size-4" />}
+                trailing={<EngineTag engine={c.engine} />}
+                onSelect={run(() => useWorkspace.getState().openSql(c.id, null))}
+              >
+                {t("sql.newQueryHere", { name: c.name })}
+              </Item>
+            ))}
           <Item
             icon={dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             onSelect={run(() => settings.update({ theme: dark ? "light" : "dark" }))}
@@ -140,11 +153,13 @@ export function CommandPalette() {
             {tabs.map((tab) => (
               <Item
                 key={tab.id}
-                value={`tab ${tab.kind === "table" ? tab.table.name : "welcome"} ${tab.id}`}
-                icon={tab.kind === "welcome" ? <Home className="size-4" /> : <Table2 className="size-4" />}
+                value={`tab ${tab.kind === "table" ? tab.table.name : tab.kind === "sql" ? tab.title : "welcome"} ${tab.id}`}
+                icon={
+                  tab.kind === "welcome" ? <Home className="size-4" /> : tab.kind === "sql" ? <TerminalSquare className="size-4" /> : <Table2 className="size-4" />
+                }
                 onSelect={run(() => useWorkspace.getState().activate(tab.id))}
               >
-                {tab.kind === "welcome" ? t("tabs.welcome") : tab.table.name}
+                {tab.kind === "welcome" ? t("tabs.welcome") : tab.kind === "sql" ? tab.title : tab.table.name}
               </Item>
             ))}
           </Command.Group>

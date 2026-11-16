@@ -9,17 +9,23 @@ use puricat_core::ai_detect::{self, CliStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use puricat_core::db::console::{RunOptions, RunOutcome, Status};
+use puricat_core::db::export::{self, Format};
+use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
 use puricat_core::db::write::{ApplyResult, ChangeSet, Statement};
-use puricat_core::db::{DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableRef};
+use puricat_core::db::{
+    DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta, TableRef,
+};
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
+use puricat_core::store::HistoryEntry;
 use puricat_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::state::AppState;
+use crate::state::{AppState, ConsoleSlot};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,6 +234,16 @@ pub async fn list_objects(
         .await
 }
 
+/// Columns of a table, for the SQL editor's completion.
+#[tauri::command]
+pub async fn describe_table(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+) -> Result<TableMeta> {
+    state.session(&id).await?.describe_table(&table).await
+}
+
 #[tauri::command]
 pub async fn fetch_rows(
     state: State<'_, AppState>,
@@ -342,6 +358,166 @@ pub fn cancel_job(state: State<'_, AppState>, job: String) {
     if let Some(flag) = state.jobs.lock().unwrap().get(&job) {
         flag.store(true, Ordering::Relaxed);
     }
+}
+
+// ---- SQL console -----------------------------------------------------------------------
+
+/// Split a script into statements and say what each one does, for the pre-run confirmation.
+#[tauri::command]
+pub async fn analyze_sql(
+    state: State<'_, AppState>,
+    id: String,
+    sql: String,
+) -> Result<Vec<script::Statement>> {
+    Ok(script::split(state.session(&id).await?.engine(), &sql))
+}
+
+async fn console_slot(
+    state: &AppState,
+    connection_id: &str,
+    tab: &str,
+    database: Option<String>,
+) -> Result<Arc<ConsoleSlot>> {
+    let mut consoles = state.consoles.lock().await;
+    if let Some(slot) = consoles.get(tab) {
+        if slot.connection_id == connection_id && slot.database == database {
+            return Ok(slot.clone());
+        }
+    }
+    let console = state
+        .session(connection_id)
+        .await?
+        .open_console(database.as_deref())
+        .await?;
+    let slot = Arc::new(ConsoleSlot {
+        connection_id: connection_id.to_string(),
+        database,
+        canceller: console.canceller(),
+        console: tokio::sync::Mutex::new(console),
+        stop: AtomicBool::new(false),
+    });
+    consoles.insert(tab.to_string(), slot.clone());
+    Ok(slot)
+}
+
+/// Run a script on the tab's own connection and record it in the local history.
+#[tauri::command]
+pub async fn run_sql(
+    state: State<'_, AppState>,
+    id: String,
+    tab: String,
+    database: Option<String>,
+    sql: String,
+    options: RunOptions,
+) -> Result<RunOutcome> {
+    let slot = console_slot(&state, &id, &tab, database.clone()).await?;
+    let mut console = slot.console.lock().await;
+    slot.stop.store(false, Ordering::Relaxed);
+    let outcome = console.run(&sql, &options, &slot.stop).await?;
+    drop(console);
+    if outcome.connection_lost {
+        // Forget the dead connection; the tab's next run opens a new one.
+        let mut consoles = state.consoles.lock().await;
+        if consoles
+            .get(&tab)
+            .is_some_and(|current| Arc::ptr_eq(current, &slot))
+        {
+            consoles.remove(&tab);
+        }
+    }
+
+    let worst = outcome.statements.last().map(|s| s.status);
+    let status = match worst {
+        Some(Status::Error) => "error",
+        Some(Status::Blocked) => "blocked",
+        Some(Status::Cancelled) => "cancelled",
+        _ => "ok",
+    };
+    let rows: usize = outcome
+        .statements
+        .iter()
+        .flat_map(|s| &s.results)
+        .map(|r| r.rows.len())
+        .sum();
+    let affected: u64 = outcome
+        .statements
+        .iter()
+        .filter_map(|s| s.rows_affected)
+        .sum();
+    let summary = format!(
+        "{} statements, {rows} rows, {affected} affected",
+        outcome.statements.len()
+    );
+    // History is a convenience: failing to write it must not fail the query.
+    let _ = state
+        .store
+        .add_history(
+            &id,
+            database.as_deref(),
+            &script::redact(&sql),
+            status,
+            &summary,
+            outcome.elapsed_ms,
+        )
+        .await;
+    Ok(outcome)
+}
+
+/// Interrupt the statement a tab is running. The rest of its script is not run.
+#[tauri::command]
+pub async fn cancel_sql(state: State<'_, AppState>, tab: String) -> Result<()> {
+    let slot = state.consoles.lock().await.get(&tab).cloned();
+    if let Some(slot) = slot {
+        slot.stop.store(true, Ordering::Relaxed);
+        slot.canceller.cancel().await?;
+    }
+    Ok(())
+}
+
+/// Drop a tab's connection (closing the tab). A running statement is interrupted and an open
+/// transaction is rolled back by the server.
+#[tauri::command]
+pub async fn close_console(state: State<'_, AppState>, tab: String) -> Result<()> {
+    let slot = state.consoles.lock().await.remove(&tab);
+    if let Some(slot) = slot {
+        slot.abandon().await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_history(
+    state: State<'_, AppState>,
+    id: String,
+    limit: u32,
+) -> Result<Vec<HistoryEntry>> {
+    state.store.list_history(&id, limit).await
+}
+
+#[tauri::command]
+pub async fn clear_history(state: State<'_, AppState>, id: String) -> Result<()> {
+    state.store.clear_history(&id).await
+}
+
+/// Write one result of the tab's last run to a file the user chose. Returns rows written.
+#[tauri::command]
+pub async fn export_result(
+    state: State<'_, AppState>,
+    tab: String,
+    result: usize,
+    format: Format,
+    path: String,
+) -> Result<usize> {
+    let slot = state
+        .consoles
+        .lock()
+        .await
+        .get(&tab)
+        .cloned()
+        .ok_or_else(|| Error::NotFound("This query tab's results (run the query again)".into()))?;
+    let console = slot.console.lock().await;
+    let set = console.result(result)?;
+    tokio::task::block_in_place(|| export::write(std::path::Path::new(&path), format, set))
 }
 
 #[tauri::command]

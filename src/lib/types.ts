@@ -165,6 +165,69 @@ export interface PasteAnalysis {
   elapsedMs: number;
 }
 
+export type SqlKind = "read" | "dml" | "ddl" | "transaction" | "other";
+
+export interface SqlStatement {
+  text: string;
+  start: number;
+  kind: SqlKind;
+  danger: string | null;
+}
+
+export interface ResultColumn {
+  name: string;
+  typeName: string;
+  kind: ValueKind;
+}
+
+export interface ResultPreview {
+  id: number;
+  columns: ResultColumn[];
+  rows: (string | null)[][];
+  truncated: [number, number][];
+  capped: boolean;
+}
+
+export type SqlStatus = "ok" | "error" | "blocked" | "cancelled";
+
+export interface StatementOutcome {
+  sql: string;
+  kind: SqlKind;
+  status: SqlStatus;
+  results: ResultPreview[];
+  rowsAffected: number | null;
+  message: string | null;
+  elapsedMs: number;
+}
+
+export interface RunOutcome {
+  statements: StatementOutcome[];
+  skipped: number;
+  resume: string | null;
+  inTransaction: boolean;
+  /** The tab's connection died during the run; the next run opens a new one. */
+  connectionLost: boolean;
+  elapsedMs: number;
+}
+
+export interface HistoryEntry {
+  id: number;
+  connectionId: string;
+  database: string | null;
+  sql: string;
+  status: SqlStatus;
+  summary: string;
+  elapsedMs: number;
+  startedAt: number;
+}
+
+export type ExportFormat = "csv" | "json" | "xlsx";
+
+export interface TableColumns {
+  columns: ColumnMeta[];
+  primaryKey: string[];
+}
+
 export type AiProvider = "claude" | "codex";
 
 export interface CliStatus {
