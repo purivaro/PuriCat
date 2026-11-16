@@ -54,6 +54,8 @@ Labels used across the docs:
 | SQL | History per connection (local, password literals in single or double quotes masked, at most 1,000 entries, deleted with the connection); completion of table names, columns and keywords; formatting | History: implemented & verified (unit tests; listed in E2E); its deletion with the connection has no test. Completion and formatting: implemented, not yet verified |
 | SQL | Saved scripts, run statement at cursor, alias-aware completion, results and exports beyond 100,000 rows, EXPLAIN view, query parameters, object editing with DDL preview, import from CSV / XLSX, SQL dump export | Planned (Phase 4) |
 | Backups | Manual and scheduled backup, restore | Planned (Phase 6) |
-| Release | Signed and notarized builds, updater, Windows | Planned (Phase 7) |
+| Release | A download for macOS: pushing a tag runs `.github/workflows/release.yml`, which builds the universal app and attaches `PuriCat-mac.dmg` and `SHA256SUMS.txt` to the GitHub release | Implemented & verified for v0.1.0 (2026-11-16): the workflow ran on the tag, the file downloads from `releases/latest/download/PuriCat-mac.dmg`, its checksum matches, the bundle's signature verifies, it holds `x86_64` and `arm64`, and the app started from the downloaded image on Apple Silicon and showed the welcome window. Nothing else was exercised in that build, and the Intel half has not been run. It is **ad-hoc signed**: Gatekeeper rejects it until the user allows it (README, "Install on a Mac") |
+| Release | Builds signed with a Developer ID and notarized | The workflow does it when the repository has the Apple signing secrets; they are not set, so this has not run |
+| Release | Updater, Windows and Linux builds | Planned (Phase 7) |
 
 Details per engine are in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md).

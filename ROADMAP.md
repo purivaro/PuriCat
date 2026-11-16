@@ -24,7 +24,7 @@ Status on 2026-11-16. Phases follow the delivery plan in the [product brief](doc
 - Branding, light / dark / system themes, English and Thai.
 - Connection manager, local settings store with migrations, OS credential store.
 - Command palette, toasts, error boundary.
-- Build scripts and a CI workflow file (not yet run).
+- Build scripts and a CI workflow file (first run on 2026-11-16, when the repository was published).
 
 ## Phase 2 — Real database connectivity: partial
 

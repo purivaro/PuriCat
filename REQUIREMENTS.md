@@ -113,7 +113,7 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | Signed and notarized macOS build, signed updates | Installs without Gatekeeper warnings | Planned (Phase 7) |
 | Licence review and third-party notices | Notices shipped with the app | Partial: PuriCat's own licence is MIT ([LICENSE](LICENSE)); [LICENSES.md](LICENSES.md) drafted for the direct dependencies; generated notices Planned (Phase 7) |
 | Tests against disposable databases only | Suites create and drop their own databases | Done for MySQL and PostgreSQL |
-| CI | Typecheck, lint and unit tests on every push | Partial: workflow file exists; it has not run yet |
+| CI | Typecheck, lint and unit tests on every push | Done: the workflow runs on every push to `main` and on pull requests (first run on 2026-11-16, passed). Live-database and end-to-end tests are not part of it |
 | Windows | Credential store, paths, scheduler, installer | Planned (after macOS beta) |
 
 ## Definition of done for the first public macOS beta

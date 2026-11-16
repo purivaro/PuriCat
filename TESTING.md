@@ -14,7 +14,7 @@
 | End-to-end smoke test | `e2e/run.sh`, `e2e/smoke.js`, stand-in AI CLIs in `e2e/fixtures/bin` | macOS desktop session, local MySQL and PostgreSQL, `python3` (the stand-in for a turn with tools). No AI account, network or quota | No | No |
 | Manual run of the real Claude Code CLI through the window | **Not in the repository and not a test**: the end-to-end runner with a throwaway variant of the script and without the stand-in `claude` on `PATH`, done once by hand (see "Results") | The bundled debug app, the installed and signed-in Claude Code CLI, the end-to-end PostgreSQL database; one turn with tools on that account | No | No |
 
-The CI workflow (`.github/workflows/ci.yml`, macOS runner) exists but **has not run yet**.
+The CI workflow (`.github/workflows/ci.yml`, macOS runner) ran for the first time on 2026-11-16, on the first push to the public repository, and passed. The live-database and end-to-end suites are not part of it.
 
 ## Commands
 
@@ -509,6 +509,7 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | PostgreSQL session time zone | The `TimeZone=UTC` behaviour is a known limitation with no test asserting it |
 | Windows, Linux | Not built or run |
 | Release-profile build and DMG | Built once by hand on the development machine (`APPLE_SIGNING_IDENTITY=- pnpm tauri build`, Apple Silicon): `PuriCat.app` and a `.dmg`, ad-hoc signed; `codesign --verify --deep --strict` accepted the bundle; the app was started and showed the welcome window. Nothing else was exercised in a release-profile build: every test above ran against debug builds. The Intel half of the universal build that the release workflow makes has never been run |
+| The published download (v0.1.0) | Checked once by hand on 2026-11-16: `PuriCat-mac.dmg` from the release built by the workflow on GitHub — downloaded (18.4 MB), checksum equal to `SHA256SUMS.txt`, `codesign --verify --deep --strict` accepted, `lipo -archs` gave `x86_64 arm64`, `spctl -a` said `rejected` (ad-hoc signed, as the README says), and the app started from the mounted image on Apple Silicon and showed the welcome window. No test suite ran against it; the Intel half was not run; opening it after a download through a browser (with the quarantine flag) was not tried, so the steps in the README's "Install on a Mac" are from macOS's documented behaviour, not from a trial |
 | Signed or notarized builds | None: no Developer ID was used. The release workflow signs and notarizes only when the repository has the signing secrets |
 | CI on GitHub | Workflow has not run |
 | Accessibility | No audit |
