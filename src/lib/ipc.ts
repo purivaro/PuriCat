@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AppError,
+  ApplyResult,
+  ChangeSet,
   CliStatus,
   ConnectionProfile,
   ConnectionView,
@@ -11,6 +13,7 @@ import type {
   RowPage,
   ServerInfo,
   SortSpec,
+  Statement,
   TableRef,
 } from "./types";
 
@@ -41,6 +44,10 @@ export const ipc = {
     invoke<DbObject[]>("list_objects", { id, database, schema }),
   fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null }) =>
     invoke<RowPage>("fetch_rows", { id, table, page }),
+  planChanges: (id: string, table: TableRef, changes: ChangeSet) =>
+    invoke<Statement[]>("plan_changes", { id, table, changes }),
+  applyChanges: (id: string, table: TableRef, changes: ChangeSet) =>
+    invoke<ApplyResult>("apply_changes", { id, table, changes }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),

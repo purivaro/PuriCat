@@ -264,6 +264,38 @@ async fn mysql_body(t: Target, db: String) {
         Err(Error::NotFound(_))
     ));
 
+    // The session keeps the server's time zone and SQL dialect; only strict mode is added.
+    // (Read through PuriCat's own session, from MySQL's variable tables.)
+    let mut variables = std::collections::HashMap::new();
+    for scope in ["session_variables", "global_variables"] {
+        let table = TableRef {
+            database: "performance_schema".into(),
+            schema: None,
+            name: scope.into(),
+        };
+        let p = session
+            .fetch_rows(&table, &page(0, 1000, None))
+            .await
+            .unwrap();
+        for row in &p.rows {
+            variables.insert(
+                (scope, row[0].clone().unwrap_or_default()),
+                row[1].clone().unwrap_or_default(),
+            );
+        }
+    }
+    let var = |scope: &'static str, name: &str| variables[&(scope, name.to_string())].clone();
+    assert_eq!(
+        var("session_variables", "time_zone"),
+        var("global_variables", "time_zone")
+    );
+    let mode = var("session_variables", "sql_mode");
+    assert!(mode.contains("STRICT_ALL_TABLES"), "{mode}");
+    assert_eq!(
+        mode.contains("PIPES_AS_CONCAT"),
+        var("global_variables", "sql_mode").contains("PIPES_AS_CONCAT")
+    );
+
     // Composite keys keep their key order; awkward names are quoted, not interpolated.
     let pairs = TableRef {
         name: "pairs".into(),

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import i18n from "../i18n";
 import { errorMessage, ipc } from "../lib/ipc";
 import type { ConnectionProfile, ConnectionView, DbObject, Namespace, PasswordChange, ServerInfo } from "../lib/types";
 import { useWorkspace } from "./workspace";
@@ -81,6 +82,8 @@ export const useConnections = create<ConnectionsState>((set, get) => {
     load: async () => set({ connections: await ipc.listConnections(), loaded: true }),
 
     save: async (profile, password) => {
+      // Changing how to connect closes the session, which would drop staged edits.
+      if (profile.id && useWorkspace.getState().hasUnsavedFor(profile.id)) throw new Error(i18n.t("table.unsavedBlocks"));
       const { connection, sessionClosed } = await ipc.saveConnection(profile, password);
       replace(connection);
       if (sessionClosed) reset(connection.id);
@@ -90,6 +93,7 @@ export const useConnections = create<ConnectionsState>((set, get) => {
     duplicate: async (id, name) => replace(await ipc.duplicateConnection(id, name)),
 
     remove: async (id) => {
+      if (useWorkspace.getState().hasUnsavedFor(id)) throw new Error(i18n.t("table.unsavedBlocks"));
       await ipc.deleteConnection(id);
       useWorkspace.getState().closeForConnection(id);
       reset(id);
@@ -123,6 +127,7 @@ export const useConnections = create<ConnectionsState>((set, get) => {
     },
 
     disconnect: async (id) => {
+      if (useWorkspace.getState().hasUnsavedFor(id)) throw new Error(i18n.t("table.unsavedBlocks"));
       await ipc.closeConnection(id);
       reset(id);
       set((s) => ({ expanded: { ...s.expanded, [nodeKey.connection(id)]: false } }));

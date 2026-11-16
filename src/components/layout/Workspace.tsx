@@ -1,5 +1,5 @@
 import { Eye, Home, Table2, X } from "lucide-react";
-import { ContextMenu } from "radix-ui";
+import { AlertDialog, ContextMenu } from "radix-ui";
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,7 +9,7 @@ import { cn } from "../../lib/cn";
 import { useConnections } from "../../stores/connections";
 import { type Tab, useWorkspace } from "../../stores/workspace";
 import { ENV_TONE } from "../Brand";
-import { menuContentClass, menuItemClass, menuSeparatorClass } from "../ui/primitives";
+import { Button, menuContentClass, menuItemClass, menuSeparatorClass } from "../ui/primitives";
 
 function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
   const { t } = useTranslation();
@@ -17,6 +17,7 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
   const connection = useConnections((s) =>
     tab.kind === "table" ? s.connections.find((c) => c.id === tab.connectionId) : undefined,
   );
+  const dirty = useWorkspace((s) => !!s.dirty[tab.id]);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -53,6 +54,7 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
           {active && <span aria-hidden className="absolute inset-x-2 top-0 h-0.5 rounded-b bg-accent" />}
           <Icon className={cn("size-3.5 shrink-0", active ? "text-accent-text" : "text-fg-subtle")} />
           <span className="min-w-0 flex-1 truncate">{title}</span>
+          {dirty && <span role="img" aria-label={t("table.unsaved")} title={t("table.unsaved")} className="size-2 shrink-0 rounded-full bg-accent" />}
           {connection && (
             // The colour ties the tab to its environment even when the name is cut off.
             <span className={cn("max-w-20 shrink truncate rounded px-1 text-[10px] font-semibold", ENV_TONE[connection.environment])}>
@@ -94,6 +96,36 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
   );
 }
 
+/** Closing a tab with staged edits asks first. */
+function DiscardDialog() {
+  const { t } = useTranslation();
+  const closing = useWorkspace((s) => s.tabs.find((x) => x.id === s.closing));
+  const { cancelClose, forceClose } = useWorkspace.getState();
+  return (
+    <AlertDialog.Root open={!!closing} onOpenChange={(open) => !open && cancelClose()}>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="animate-fade fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px] dark:bg-black/55" />
+        <AlertDialog.Content className="animate-pop fixed top-1/2 left-1/2 z-50 w-[min(92vw,420px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-raised p-5 shadow-pop outline-none">
+          <AlertDialog.Title className="text-[15px] leading-snug font-semibold break-words">
+            {t("closeDirty.title", { name: closing?.kind === "table" ? closing.table.name : "" })}
+          </AlertDialog.Title>
+          <AlertDialog.Description className="mt-1.5 text-[13px] leading-relaxed text-fg-muted">
+            {t("closeDirty.body")}
+          </AlertDialog.Description>
+          <div className="mt-5 flex justify-end gap-2">
+            <AlertDialog.Cancel asChild>
+              <Button variant="primary">{t("closeDirty.keep")}</Button>
+            </AlertDialog.Cancel>
+            <Button variant="danger" onClick={() => closing && forceClose(closing.id)}>
+              {t("closeDirty.discard")}
+            </Button>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  );
+}
+
 export function Workspace() {
   const tabs = useWorkspace((s) => s.tabs);
   const activeId = useWorkspace((s) => s.activeId);
@@ -113,6 +145,7 @@ export function Workspace() {
           </div>
         ))}
       </div>
+      <DiscardDialog />
     </div>
   );
 }

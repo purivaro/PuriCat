@@ -19,6 +19,7 @@ export interface ConnectionProfile {
   favorite: boolean;
   tags: string[];
   connectTimeoutSecs: number;
+  bulkReviewRows: number;
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
@@ -76,6 +77,7 @@ export interface ColumnMeta {
   default: string | null;
   primaryKey: boolean;
   generated: boolean;
+  editable: boolean;
 }
 
 export interface SortSpec {
@@ -95,6 +97,31 @@ export interface RowPage {
   elapsedMs: number;
 }
 
+export interface CellValue {
+  column: string;
+  value: string | null;
+}
+
+export interface ChangeSet {
+  updates: { key: CellValue[]; changes: { column: string; original: string | null; value: string | null }[] }[];
+  inserts: { values: CellValue[] }[];
+  deletes: { key: CellValue[] }[];
+}
+
+export interface Statement {
+  kind: "update" | "insert" | "delete";
+  sql: string;
+  params: (string | null)[];
+  row: string;
+}
+
+export interface ApplyResult {
+  updated: number;
+  inserted: number;
+  deleted: number;
+  elapsedMs: number;
+}
+
 export type AiProvider = "claude" | "codex";
 
 export interface CliStatus {
@@ -106,6 +133,6 @@ export interface CliStatus {
 }
 
 export interface AppError {
-  kind: "invalid" | "not_found" | "database" | "store" | "secret" | "unsupported" | "io" | "unknown";
+  kind: "invalid" | "not_found" | "database" | "store" | "secret" | "unsupported" | "conflict" | "io" | "unknown";
   message: string;
 }

@@ -23,6 +23,7 @@ import { type KeyboardEvent, type ReactNode, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { clipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { errorMessage } from "../../lib/ipc";
 import type { ConnectionView, DbObject, Namespace } from "../../lib/types";
@@ -224,7 +225,7 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                         </ContextMenu.Item>
                         <ContextMenu.Item
                           className={menuItemClass}
-                          onSelect={() => void navigator.clipboard.writeText(o.name).then(() => toast.success(t("common.copied")))}
+                          onSelect={() => void clipboard.write(o.name).then(() => toast.success(t("common.copied")))}
                         >
                           <Copy className="size-3.5" /> {t("explorer.copyName")}
                         </ContextMenu.Item>

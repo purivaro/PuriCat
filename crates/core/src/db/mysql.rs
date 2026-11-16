@@ -3,6 +3,7 @@ use std::time::Duration;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::{ConnectOptions, Executor, Row};
 
+use super::write::{self, Statement};
 use super::{
     ident, Capabilities, ColumnMeta, DbObject, Namespace, ObjectKind, Order, PageRequest,
     TableMeta, TableRef, ValueKind, MAX_BINARY_BYTES, MAX_CELL_CHARS,
@@ -40,6 +41,11 @@ impl MySqlSession {
             .port(profile.port)
             .username(&profile.username)
             .charset("utf8mb4")
+            // Keep the server's own session defaults. The driver would otherwise force the
+            // time zone to UTC (changing what CURRENT_TIMESTAMP stores and how TIMESTAMP reads)
+            // and turn `||` into string concatenation.
+            .timezone(None::<String>)
+            .pipes_as_concat(false)
             .ssl_mode(match profile.tls {
                 TlsMode::Disable => MySqlSslMode::Disabled,
                 TlsMode::Prefer => MySqlSslMode::Preferred,
@@ -69,6 +75,13 @@ impl MySqlSession {
             .idle_timeout(Some(Duration::from_secs(600)))
             .after_connect(move |conn, _meta| {
                 Box::pin(async move {
+                    // Reject invalid values instead of silently truncating or zeroing them,
+                    // whatever the server's default sql_mode is.
+                    conn.execute(
+                        "SET SESSION sql_mode = IF(@@SESSION.sql_mode = '', 'STRICT_ALL_TABLES', \
+                         CONCAT(@@SESSION.sql_mode, ',STRICT_ALL_TABLES'))",
+                    )
+                    .await?;
                     if read_only {
                         // Applies to every later transaction, including autocommit statements.
                         conn.execute("SET SESSION TRANSACTION READ ONLY").await?;
@@ -179,12 +192,18 @@ impl MySqlSession {
             let column_type = text(r, 1)?.unwrap_or_default();
             let data_type = text(r, 2)?.unwrap_or_default().to_ascii_lowercase();
             let extra = text(r, 5)?.unwrap_or_default().to_ascii_lowercase();
+            let kind = value_kind(&data_type, &column_type);
+            let generated = is_generated(&extra);
             columns.push(ColumnMeta {
-                kind: value_kind(&data_type, &column_type),
+                kind,
+                editable: !generated
+                    && kind != ValueKind::Binary
+                    && !SPATIAL_TYPES.contains(&data_type.as_str()),
                 nullable: text(r, 3)?.as_deref() == Some("YES"),
                 default: text(r, 4)?,
                 primary_key: primary_key.contains(&name),
-                generated: is_generated(&extra),
+                generated,
+                base_type: data_type,
                 data_type: column_type,
                 name,
             });
@@ -233,6 +252,29 @@ impl MySqlSession {
             out.push(cells);
         }
         Ok(out)
+    }
+
+    /// Run planned statements in one transaction; each must touch exactly one row.
+    pub async fn apply(&self, statements: &[Statement]) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(Error::database)?;
+        for statement in statements {
+            let mut query = sqlx::query(&statement.sql);
+            for param in &statement.params {
+                query = query.bind(param.as_deref());
+            }
+            let affected = match query.execute(&mut *tx).await {
+                Ok(done) => done.rows_affected(),
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(write::failed(statement, e));
+                }
+            };
+            if affected != 1 {
+                let _ = tx.rollback().await;
+                return Err(write::conflict(statement, affected));
+            }
+        }
+        tx.commit().await.map_err(Error::database)
     }
 
     pub async fn close(&self) {
@@ -335,6 +377,8 @@ mod tests {
             default: None,
             primary_key: false,
             generated: false,
+            editable: true,
+            base_type: data_type.split(['(', ' ']).next().unwrap_or("").into(),
         }
     }
 

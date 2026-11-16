@@ -162,6 +162,149 @@
       status: document.querySelector("footer")?.textContent.trim(),
     });
 
+
+    // ---- editing: type, paste from a spreadsheet, undo, review, save ------------------
+    const gridEl = () => document.querySelector(`${panelSel} [role="grid"]`);
+    const dataRows = () => all(`${panelSel} [role="grid"] [role="row"]`).slice(1);
+    const cellAt = (r, c) => dataRows()[r]?.querySelectorAll('[role="gridcell"]')[c];
+    const cellText = (r, c) => cellAt(r, c)?.textContent;
+    const mouse = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+    const selectCell = async (r, c) => {
+      mouse(cellAt(r, c), "mousedown");
+      window.dispatchEvent(new MouseEvent("mouseup"));
+      gridEl().focus();
+      await sleep(60);
+    };
+    const gridKey = async (k, opts = {}) => {
+      gridEl().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...opts }));
+      await sleep(120);
+    };
+    const editor = () => document.querySelector(`${panelSel} [aria-label="Edit cell"]`);
+    const typeInEditor = async (text) => {
+      const el = await waitFor(editor, "cell editor");
+      const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      await sleep(40);
+      editor().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await sleep(120);
+    };
+    const dirtySummary = () => document.querySelector(`${panelSel} [data-dirty-summary]`)?.textContent.trim();
+    const panelButton = (label) => all(`${panelSel} button`).find((b) => b.textContent.trim().startsWith(label) || b.getAttribute("aria-label") === label);
+    const editState = () => document.querySelector(`${panelSel} [data-edit-state]`)?.dataset.editState;
+
+    await click(treeRow("customers"), "mysql customers");
+    await waitFor(() => cellText(0, 1) === "สมชาย ใจดี", "customers rows");
+    if (editState() !== "editable") throw new Error("customers should be editable");
+
+    // 1. double-click a cell and type
+    mouse(cellAt(0, 2), "dblclick");
+    await typeInEditor("เชียงราย");
+    await waitFor(() => cellAt(0, 2)?.dataset.edited === "true" && cellText(0, 2) === "เชียงราย", "staged edit");
+    const afterTyping = dirtySummary();
+
+    // 2. paste a 3x2 block copied from a spreadsheet: quotes, a tab inside a cell, and one row past the end
+    let previousClipboard = null;
+    try {
+      previousClipboard = await invoke("plugin:clipboard-manager|read_text");
+    } catch {
+      /* the clipboard held no text */
+    }
+    await invoke("plugin:clipboard-manager|write_text", {
+      text: 'Kenji T.\tKyoto\r\n"มาลี ""คนใหม่"""\t"ภูเก็ต\tใต้"\r\nNew Co\tTokyo\r\n',
+    });
+    await selectCell(3, 1);
+    await gridKey("v", { metaKey: true });
+    await waitFor(() => document.querySelector(`${panelSel} [data-row-state="inserted"]`), "pasted new row");
+    const afterPaste = dirtySummary();
+    const pasted = [cellText(3, 1), cellText(3, 2), cellText(4, 1), cellText(4, 2), cellText(5, 1), cellText(5, 2)];
+
+    // 3. undo and redo the paste
+    await gridKey("z", { metaKey: true });
+    await waitFor(() => !document.querySelector(`${panelSel} [data-row-state="inserted"]`), "undo");
+    const afterUndo = dirtySummary();
+    await gridKey("z", { metaKey: true, shiftKey: true });
+    await waitFor(() => document.querySelector(`${panelSel} [data-row-state="inserted"]`), "redo");
+
+    // 4. add a row with the button and type straight into it
+    await click(panelButton("Add row"), "add row");
+    await waitFor(() => all(`${panelSel} [data-row-state="inserted"]`).length === 2, "second new row");
+    await gridKey("Q");
+    await typeInEditor("Quick Shop");
+    await waitFor(() => cellText(6, 1) === "Quick Shop", "typed into new row");
+
+    // 5. mark a customer that still has orders for deletion: the review step is mandatory,
+    //    the server refuses (foreign key), and nothing at all is saved
+    mouse(dataRows()[2].firstElementChild, "mousedown");
+    await sleep(80);
+    await click(panelButton("Delete selected rows"), "delete rows");
+    await waitFor(() => dataRows()[2].dataset.rowState === "deleted", "row marked deleted");
+    await stage("mysql-editing", { afterTyping, afterPaste, afterUndo, pasted, beforeSave: dirtySummary() });
+
+    await click(panelButton("Save"), "save");
+    const review = await waitFor(() => document.querySelector("[data-review-dialog]"), "review dialog");
+    await waitFor(() => review.querySelector("ol li"), "planned statements");
+    const planned = [...review.querySelectorAll("ol li")].map((li) => li.textContent.replace(/\s+/g, " ").trim().slice(0, 150));
+    await stage("review-dialog", { planned });
+    await click(exact("[data-review-dialog] button", "Save changes"), "commit");
+    const refused = await waitFor(() => document.querySelector("[data-review-error]"), "foreign key error");
+    log.push({ stage: "save-refused", message: refused.textContent.trim() });
+    await click(exact("[data-review-dialog] button", "Cancel"), "cancel review");
+    await waitFor(() => !document.querySelector("[data-review-dialog]"), "review closed");
+    if (cellText(0, 2) !== "เชียงราย" || !dirtySummary()) throw new Error("staged edits were lost after a failed save");
+
+    // 6. restore the row; the remaining small save goes straight through
+    mouse(dataRows()[2].firstElementChild, "mousedown");
+    await sleep(80);
+    await click(panelButton("Restore selected rows"), "restore rows");
+    await waitFor(() => !dataRows()[2].dataset.rowState, "row restored");
+    await click(panelButton("Save"), "save");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && dataRows().length === 7, "saved and reloaded", 15000);
+    const savedRows = dataRows().map((r) => [...r.querySelectorAll('[role="gridcell"]')].slice(0, 3).map((c) => c.textContent));
+    if (savedRows[0][2] !== "เชียงราย" || savedRows[4][1] !== 'มาลี "คนใหม่"' || savedRows[4][2] !== "ภูเก็ต\tใต้") {
+      throw new Error(`saved data does not match what was typed: ${JSON.stringify(savedRows)}`);
+    }
+    await stage("mysql-saved", { savedRows, stillEdited: all(`${panelSel} [data-edited]`).length });
+
+    // 7. closing a tab with unsaved edits asks first
+    mouse(cellAt(1, 2), "dblclick");
+    await typeInEditor("temp");
+    const tabDirty = !!document.querySelector('[role="tab"][aria-selected="true"] [role="img"]');
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close dirty tab");
+    const discard = await waitFor(() => document.querySelector('[role="alertdialog"]'), "discard dialog");
+    const discardText = discard.textContent.replace(/\s+/g, " ").trim();
+    await click(exact('[role="alertdialog"] button', "Keep editing"), "keep editing");
+    await waitFor(() => !document.querySelector('[role="alertdialog"]'), "dialog closed");
+    if (cellText(1, 2) !== "temp") throw new Error("edit lost after keeping the tab open");
+    await click(panelButton("Discard"), "discard");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellText(1, 2) === "Chiang Mai", "discarded");
+    log.push({ stage: "dirty-tab-guard", tabDirty, discardText });
+
+    // 8. views and keyless tables are read-only, and say why
+    await click(treeRow("audit_log"), "keyless table");
+    await waitFor(() => document.querySelector(`${panelSel} h1`)?.textContent === "audit_log" && editState(), "audit_log");
+    const keyless = editState();
+    await click(all("[data-tree-row]").find((r) => rowLabel(r).startsWith("Views (")), "views group");
+    await click(await waitFor(() => treeRow("order_totals"), "view row"), "view");
+    await waitFor(() => document.querySelector(`${panelSel} h1`)?.textContent === "order_totals" && editState(), "view");
+    log.push({ stage: "read-only-objects", keyless, view: editState() });
+
+    // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
+    await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
+    await waitFor(() => cellText(0, 1) === "SO-10001" && editState() === "editable", "postgres orders tab");
+    mouse(cellAt(0, 5), "dblclick");
+    await typeInEditor("abc");
+    await click(panelButton("Save"), "save invalid");
+    const pgError = await waitFor(() => document.querySelector(`${panelSel} [data-save-error]`), "postgres rejects bad number");
+    const pgRefused = pgError.textContent.trim();
+    mouse(cellAt(0, 5), "dblclick");
+    await typeInEditor("200.50");
+    mouse(cellAt(0, 4), "dblclick");
+    await typeInEditor("Completed");
+    await click(panelButton("Save"), "save valid");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellText(0, 5) === "200.50", "postgres saved", 15000);
+    log.push({ stage: "pg-edited", refused: pgRefused, saved: [cellText(0, 4), cellText(0, 5)] });
+
     // ---- AI panel: real CLI detection ------------------------------------------------
     await click(document.querySelector('button[aria-label="Toggle AI panel"]'), "ai toggle");
     const aiCard = () => all("aside").at(-1);
@@ -216,6 +359,7 @@
       ui: JSON.parse(settings.ui),
       restoredTabs: JSON.parse(settings.workspace).tabs.map((t) => t.kind === "table" ? t.table.name : t.kind),
     });
+    if (previousClipboard !== null) await invoke("plugin:clipboard-manager|write_text", { text: previousClipboard });
     await report("done");
   } catch (e) {
     await report("FAILED", { error: `${e?.message ?? e}\n${e?.stack ?? ""}`, where: document.querySelector('[role="dialog"]')?.textContent.slice(0, 300) });

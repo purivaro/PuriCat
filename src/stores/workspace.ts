@@ -38,6 +38,15 @@ export function closeTabIn(tabs: Tab[], activeId: string, id: string): { tabs: T
 interface WorkspaceState {
   tabs: Tab[];
   activeId: string;
+  /** Tabs with unsaved edits. */
+  dirty: Record<string, true>;
+  /** A dirty tab the user asked to close; the workspace asks before discarding. */
+  closing: string | null;
+  setDirty: (id: string, dirty: boolean) => void;
+  hasUnsavedFor: (connectionId: string) => boolean;
+  /** Close even if dirty (after the user confirmed). */
+  forceClose: (id: string) => void;
+  cancelClose: () => void;
   restore: () => Promise<void>;
   openTable: (connectionId: string, table: TableRef, objectKind: ObjectKind) => void;
   openWelcome: () => void;
@@ -103,13 +112,39 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       commit({ tabs: tabs.some((t) => t.id === WELCOME.id) ? tabs : [WELCOME, ...tabs], activeId: WELCOME.id });
     },
 
+    dirty: {},
+    closing: null,
+    setDirty: (id, dirty) =>
+      set((s) => {
+        if (!!s.dirty[id] === dirty) return s;
+        const next = { ...s.dirty };
+        if (dirty) next[id] = true;
+        else delete next[id];
+        return { dirty: next };
+      }),
+    hasUnsavedFor: (connectionId) =>
+      get().tabs.some((t) => t.kind === "table" && t.connectionId === connectionId && get().dirty[t.id]),
+    cancelClose: () => set({ closing: null }),
+    forceClose: (id) => {
+      set({ closing: null });
+      commit(closeTabIn(get().tabs, get().activeId, id));
+    },
+
     activate: (id) => commit({ tabs: get().tabs, activeId: id }),
-    close: (id) => commit(closeTabIn(get().tabs, get().activeId, id)),
+    close: (id) => {
+      if (get().dirty[id]) return set({ closing: id, activeId: id });
+      commit(closeTabIn(get().tabs, get().activeId, id));
+    },
+    // Bulk closes never discard work: tabs with unsaved edits stay open.
     closeOthers: (id) => {
-      const keep = get().tabs.filter((t) => t.id === id);
+      const keep = get().tabs.filter((t) => t.id === id || get().dirty[t.id]);
       if (keep.length) commit({ tabs: keep, activeId: id });
     },
-    closeAll: () => commit({ tabs: [WELCOME], activeId: WELCOME.id }),
+    closeAll: () => {
+      const keep = get().tabs.filter((t) => get().dirty[t.id]);
+      if (keep.length) commit({ tabs: keep, activeId: keep.some((t) => t.id === get().activeId) ? get().activeId : keep[0]!.id });
+      else commit({ tabs: [WELCOME], activeId: WELCOME.id });
+    },
     closeForConnection: (connectionId) => {
       let next = { tabs: get().tabs, activeId: get().activeId };
       for (const t of get().tabs) {

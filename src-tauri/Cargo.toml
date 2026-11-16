@@ -19,3 +19,4 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"

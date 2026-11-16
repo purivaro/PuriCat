@@ -5,6 +5,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use sqlx::{ConnectOptions, Executor, Row};
 use tokio::sync::Mutex;
 
+use super::write::{self, Statement};
 use super::{
     ident, Capabilities, ColumnMeta, DbObject, Namespace, ObjectKind, Order, PageRequest,
     TableMeta, TableRef, ValueKind, MAX_BINARY_BYTES, MAX_CELL_CHARS,
@@ -218,7 +219,8 @@ impl PgSession {
                     pg_get_expr(d.adbin, d.adrelid),
                     t.typcategory::text,
                     t.typname::text,
-                    (a.attidentity <> '' OR a.attgenerated <> '')
+                    (a.attidentity <> '' OR a.attgenerated <> ''),
+                    format_type(a.atttypid, NULL)
              FROM pg_attribute a
              JOIN pg_class c ON c.oid = a.attrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -242,12 +244,16 @@ impl PgSession {
             let serial = default
                 .as_deref()
                 .is_some_and(|d| d.starts_with("nextval("));
+            let kind = value_kind(&category, &typname);
+            let generated = identity || serial;
             columns.push(ColumnMeta {
                 data_type: r.try_get(1).map_err(Error::database)?,
-                kind: value_kind(&category, &typname),
+                kind,
+                editable: !generated && kind != ValueKind::Binary,
                 nullable: r.try_get(2).map_err(Error::database)?,
                 primary_key: primary_key.contains(&name),
-                generated: identity || serial,
+                generated,
+                base_type: r.try_get(7).map_err(Error::database)?,
                 default,
                 name,
             });
@@ -297,6 +303,30 @@ impl PgSession {
             out.push(cells);
         }
         Ok(out)
+    }
+
+    /// Run planned statements in one transaction; each must touch exactly one row.
+    pub async fn apply(&self, database: &str, statements: &[Statement]) -> Result<()> {
+        let pool = self.pool(database).await?;
+        let mut tx = pool.begin().await.map_err(Error::database)?;
+        for statement in statements {
+            let mut query = sqlx::query(&statement.sql);
+            for param in &statement.params {
+                query = query.bind(param.as_deref());
+            }
+            let affected = match query.execute(&mut *tx).await {
+                Ok(done) => done.rows_affected(),
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(write::failed(statement, e));
+                }
+            };
+            if affected != 1 {
+                let _ = tx.rollback().await;
+                return Err(write::conflict(statement, affected));
+            }
+        }
+        tx.commit().await.map_err(Error::database)
     }
 
     pub async fn close(&self) {
@@ -370,6 +400,8 @@ mod tests {
             default: None,
             primary_key: false,
             generated: false,
+            editable: true,
+            base_type: "x".into(),
         };
         let meta = TableMeta {
             columns: vec![

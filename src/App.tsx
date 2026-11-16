@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { CircleAlert, Trash2 } from "lucide-react";
 import { AlertDialog, Tooltip } from "radix-ui";
 import { type PointerEvent, useEffect, useState } from "react";
+import type React from "react";
 import { useTranslation } from "react-i18next";
 import { toast, Toaster } from "sonner";
 
@@ -213,8 +214,9 @@ export default function App() {
       <CommandPalette />
       <Toaster
         theme={resolveTheme(theme)}
-        position="top-center"
-        offset={54}
+        position="bottom-left"
+        offset={{ left: 16, bottom: 40 }}
+        style={{ "--width": "252px" } as React.CSSProperties}
         duration={2600}
         toastOptions={{
           style: {

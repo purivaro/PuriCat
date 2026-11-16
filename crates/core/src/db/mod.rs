@@ -6,6 +6,7 @@
 pub mod ident;
 mod mysql;
 mod postgres;
+pub mod write;
 
 use std::time::Instant;
 
@@ -103,6 +104,13 @@ pub struct ColumnMeta {
     pub primary_key: bool,
     /// Value is produced by the server (identity, auto-increment, generated column).
     pub generated: bool,
+    /// The grid may write this column (not generated, binary or spatial).
+    pub editable: bool,
+    /// Type name without length/precision (`character varying`, `numeric`, `bigint`).
+    /// Used for casts: casting to `varchar(5)` would silently truncate, whereas casting to
+    /// the bare type lets the column assignment enforce its own limits.
+    #[serde(skip_serializing)]
+    pub base_type: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -260,6 +268,41 @@ impl Session {
         Ok(finish_page(meta, raw, order, req, started))
     }
 
+    /// The statements a change set would run, without running them.
+    pub async fn plan_changes(
+        &self,
+        table: &TableRef,
+        changes: &write::ChangeSet,
+    ) -> Result<Vec<write::Statement>> {
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let engine = match self {
+            Session::MySql(_) => Engine::Mysql,
+            Session::Postgres(_) => Engine::Postgres,
+        };
+        write::plan(engine, table, &meta, changes)
+    }
+
+    /// Run a change set in one transaction. Either every row change is applied, or none.
+    pub async fn apply_changes(
+        &self,
+        table: &TableRef,
+        changes: &write::ChangeSet,
+    ) -> Result<write::ApplyResult> {
+        let started = Instant::now();
+        let statements = self.plan_changes(table, changes).await?;
+        match self {
+            Session::MySql(s) => s.apply(&statements).await?,
+            Session::Postgres(s) => s.apply(&table.database, &statements).await?,
+        }
+        Ok(write::tally(
+            &statements,
+            started.elapsed().as_millis() as u64,
+        ))
+    }
+
     pub async fn close(&self) {
         match self {
             Session::MySql(s) => s.close().await,
@@ -376,6 +419,8 @@ mod tests {
             default: None,
             primary_key: pk,
             generated: false,
+            editable: true,
+            base_type: "x".into(),
         }
     }
 

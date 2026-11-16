@@ -22,6 +22,9 @@ pub enum Error {
     Secret(String),
     #[error("{0}")]
     Unsupported(String),
+    /// The data changed underneath the user; nothing was written.
+    #[error("{0}")]
+    Conflict(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
 }
@@ -35,6 +38,7 @@ impl Error {
             Error::Store(_) => "store",
             Error::Secret(_) => "secret",
             Error::Unsupported(_) => "unsupported",
+            Error::Conflict(_) => "conflict",
             Error::Io(_) => "io",
         }
     }

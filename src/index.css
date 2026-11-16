@@ -88,7 +88,7 @@
   --color-info-soft: var(--info-soft);
   --font-sans:
     "Inter Variable", "Noto Sans Thai Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-mono: "JetBrains Mono Variable", "Noto Sans Thai Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --shadow-pop: var(--shadow-pop);
   --shadow-card: var(--shadow-card);
 }
@@ -122,6 +122,14 @@ body {
   -webkit-user-select: none;
 }
 
+/* SQL and data must read exactly as typed: `<=>` is three characters, not an arrow. */
+.font-mono,
+pre,
+code,
+kbd {
+  font-variant-ligatures: none;
+}
+
 input,
 textarea,
 [data-selectable] {
@@ -129,9 +137,13 @@ textarea,
   -webkit-user-select: text;
 }
 
-:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
+/* In the base layer so a component can opt out with a utility (e.g. the grid draws its own
+   focus on the active cell). Unlayered rules would win over every utility class. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
 }
 
 ::selection {

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use puricat_core::ai_detect::{self, CliStatus};
+use puricat_core::db::write::{ApplyResult, ChangeSet, Statement};
 use puricat_core::db::{DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableRef};
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
@@ -78,6 +79,7 @@ fn same_endpoint(a: &ConnectionProfile, b: &ConnectionProfile) -> bool {
         environment: Default::default(),
         favorite: false,
         tags: Vec::new(),
+        bulk_review_rows: 0,
         created_at: 0,
         updated_at: 0,
         last_used_at: None,
@@ -229,6 +231,42 @@ pub async fn fetch_rows(
     page: PageRequest,
 ) -> Result<RowPage> {
     state.session(&id).await?.fetch_rows(&table, &page).await
+}
+
+/// The exact statements a save would run, for the review step.
+#[tauri::command]
+pub async fn plan_changes(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    changes: ChangeSet,
+) -> Result<Vec<Statement>> {
+    state
+        .session(&id)
+        .await?
+        .plan_changes(&table, &changes)
+        .await
+}
+
+/// Save staged edits in one transaction.
+#[tauri::command]
+pub async fn apply_changes(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    changes: ChangeSet,
+) -> Result<ApplyResult> {
+    // Refuse early with a clear message; the server would reject the write anyway.
+    if state.store.get_connection(&id).await?.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to edit data.".into(),
+        ));
+    }
+    state
+        .session(&id)
+        .await?
+        .apply_changes(&table, &changes)
+        .await
 }
 
 #[tauri::command]

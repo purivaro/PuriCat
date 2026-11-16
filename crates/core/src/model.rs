@@ -77,6 +77,9 @@ pub struct ConnectionProfile {
     pub tags: Vec<String>,
     #[serde(default = "default_timeout")]
     pub connect_timeout_secs: u32,
+    /// Saves touching more rows than this always go through the review step.
+    #[serde(default = "default_review_rows")]
+    pub bulk_review_rows: u32,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -86,6 +89,10 @@ pub struct ConnectionProfile {
 }
 
 fn default_timeout() -> u32 {
+    10
+}
+
+fn default_review_rows() -> u32 {
     10
 }
 
@@ -149,6 +156,7 @@ mod tests {
         assert_eq!(p.environment, Environment::Development);
         assert_eq!(p.tls, TlsMode::Prefer);
         assert_eq!(p.connect_timeout_secs, 10);
+        assert_eq!(p.bulk_review_rows, 10);
     }
 
     #[test]

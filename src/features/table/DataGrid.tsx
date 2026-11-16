@@ -6,11 +6,16 @@ import {
   Braces,
   Calendar,
   CircleDot,
+  CircleSlash,
+  ClipboardPaste,
   Copy,
   Hash,
   KeyRound,
-  Rows3,
+  Lock,
+  Plus,
+  RotateCcw,
   ToggleLeft,
+  Trash2,
   Type,
 } from "lucide-react";
 import { ContextMenu } from "radix-ui";
@@ -18,9 +23,27 @@ import { type KeyboardEvent, type PointerEvent, useEffect, useMemo, useRef, useS
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
-import { menuContentClass, menuItemClass } from "../../components/ui/primitives";
+import { menuContentClass, menuDangerClass, menuItemClass, menuSeparatorClass } from "../../components/ui/primitives";
+import { clipboard, parseClipboardTable, toClipboardTable } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
+import { errorMessage } from "../../lib/ipc";
 import type { ColumnMeta, RowPage, SortSpec, ValueKind } from "../../lib/types";
+import {
+  addRows,
+  blocker,
+  type Cell,
+  cellValue,
+  clearedValue,
+  isEdited,
+  isInserted,
+  isTruncated,
+  pasteMatrix,
+  type Pending,
+  rowCount,
+  setCells,
+  setDeleted,
+  typedValue,
+} from "./pending";
 import { nextSort } from "./sort";
 
 const ROW_HEIGHT = 30;
@@ -38,6 +61,27 @@ const KIND_ICON: Record<ValueKind, typeof Hash> = {
   other: CircleDot,
 };
 
+export interface Selection {
+  anchor: Cell;
+  focus: Cell;
+}
+
+export interface Range {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+export function rangeOf(s: Selection): Range {
+  return {
+    top: Math.min(s.anchor.r, s.focus.r),
+    bottom: Math.max(s.anchor.r, s.focus.r),
+    left: Math.min(s.anchor.c, s.focus.c),
+    right: Math.max(s.anchor.c, s.focus.c),
+  };
+}
+
 /** Width from the header and a sample of values, so most columns fit without dragging. */
 function initialWidths(page: RowPage): number[] {
   return page.columns.map((col, c) => {
@@ -51,14 +95,36 @@ interface Props {
   page: RowPage;
   sort: SortSpec | null;
   onSort: (sort: SortSpec | null) => void;
+  /** Sorting reloads the page, which is not allowed while edits are pending. */
+  sortDisabled: boolean;
+  /** `false` renders a plain read-only grid. */
+  editable: boolean;
+  pending: Pending;
+  onChange: (next: Pending) => void;
+  selection: Selection | null;
+  onSelect: (selection: Selection | null) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onSave: () => void;
 }
 
-export function DataGrid({ page, sort, onSort }: Props) {
+interface Editing extends Cell {
+  text: string;
+  /** What the editor opened with; an untouched editor changes nothing. */
+  initial: string;
+}
+
+export function DataGrid(props: Props) {
+  const { page, sort, onSort, sortDisabled, editable, pending, onChange, selection, onSelect } = props;
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
   const signature = page.columns.map((c) => c.name).join("\u0000");
   const [widths, setWidths] = useState(() => initialWidths(page));
-  const [active, setActive] = useState<{ r: number; c: number } | null>(null);
+  const [editing, setEditing] = useState<Editing | null>(null);
+
+  const rows = rowCount(page, pending);
+  const cols = page.columns.length;
 
   // New table shape: recompute widths. Paging or sorting the same table keeps the user's widths.
   useEffect(() => {
@@ -66,16 +132,18 @@ export function DataGrid({ page, sort, onSort }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature]);
 
-  // A new page of rows: the old selection no longer points at the same data.
+  // A new page of rows: scroll back to the top (the owner resets selection and edits).
   useEffect(() => {
-    setActive(null);
+    setEditing(null);
     scrollRef.current?.scrollTo({ top: 0 });
   }, [page]);
 
-  const truncated = useMemo(
-    () => new Set(page.truncated.map(([r, c]) => r * page.columns.length + c)),
-    [page],
-  );
+  useEffect(() => {
+    const stop = () => (dragging.current = false);
+    window.addEventListener("mouseup", stop);
+    return () => window.removeEventListener("mouseup", stop);
+  }, []);
+
   const lefts = useMemo(() => {
     let x = GUTTER;
     return widths.map((w) => {
@@ -87,57 +155,192 @@ export function DataGrid({ page, sort, onSort }: Props) {
   const totalWidth = GUTTER + widths.reduce((a, b) => a + b, 0);
 
   const virtualizer = useVirtualizer({
-    count: page.rows.length,
+    count: rows,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 12,
     scrollPaddingStart: HEADER_HEIGHT,
   });
 
-  const reveal = (r: number, c: number) => {
-    virtualizer.scrollToIndex(r);
+  // Keep the focused cell in view, however the selection moved.
+  const focus = selection?.focus;
+  useEffect(() => {
+    if (!focus || dragging.current) return;
+    virtualizer.scrollToIndex(focus.r);
     const el = scrollRef.current;
     if (!el) return;
-    const left = lefts[c] ?? 0;
-    const right = left + (widths[c] ?? 0);
+    const left = lefts[focus.c] ?? 0;
+    const right = left + (widths[focus.c] ?? 0);
     if (left - GUTTER < el.scrollLeft) el.scrollLeft = left - GUTTER;
     else if (right > el.scrollLeft + el.clientWidth) el.scrollLeft = right - el.clientWidth;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.r, focus?.c]);
+
+  const range = selection ? rangeOf(selection) : null;
+  const selectedRows = range ? Array.from({ length: range.bottom - range.top + 1 }, (_, i) => range.top + i) : [];
+  const allSelectedDeleted = selectedRows.length > 0 && selectedRows.every((r) => pending.deletes[r]);
+
+  const clampCell = (r: number, c: number): Cell => ({
+    r: Math.min(rows - 1, Math.max(0, r)),
+    c: Math.min(cols - 1, Math.max(0, c)),
+  });
+  const moveTo = (cell: Cell, extend = false) =>
+    onSelect({ anchor: extend && selection ? selection.anchor : cell, focus: cell });
+
+  // ---- editing ---------------------------------------------------------------------
+
+  const startEdit = (cell: Cell, typed?: string) => {
+    if (!editable) return;
+    const reason = blocker(page, pending, cell.r, cell.c);
+    if (reason) {
+      toast.info(t(`table.notEditable.${reason}`), { id: "not-editable", duration: 2200 });
+      return;
+    }
+    const initial = cellValue(page, pending, cell.r, cell.c) ?? "";
+    setEditing({ ...cell, text: typed ?? initial, initial: typed === undefined ? initial : "\u0000" });
   };
 
-  const copy = (text: string) =>
-    void navigator.clipboard.writeText(text).then(() => toast.success(t("common.copied"), { duration: 1200 }));
-  const copyCell = () => active && copy(page.rows[active.r]?.[active.c] ?? "");
-  const copyRow = () => active && copy((page.rows[active.r] ?? []).map((v) => v ?? "").join("\t"));
+  const finishEdit = (commit: boolean, move?: [number, number]) => {
+    const e = editing;
+    if (!e) return;
+    setEditing(null);
+    if (commit && e.text !== e.initial) {
+      onChange(setCells(page, pending, [{ r: e.r, c: e.c, value: typedValue(page.columns[e.c]!, e.text) }]).pending);
+    }
+    if (move) moveTo(clampCell(e.r + move[0], e.c + move[1]));
+    scrollRef.current?.focus({ preventScroll: true });
+  };
+
+  const clearSelection = () => {
+    if (!range || !editable) return;
+    const cells = [];
+    for (let r = range.top; r <= range.bottom; r++) {
+      for (let c = range.left; c <= range.right; c++) cells.push({ r, c, value: clearedValue(page.columns[c]!) });
+    }
+    onChange(setCells(page, pending, cells).pending);
+  };
+
+  const setNull = () => {
+    if (!range || !editable) return;
+    const cells = [];
+    for (let r = range.top; r <= range.bottom; r++) {
+      for (let c = range.left; c <= range.right; c++) if (page.columns[c]!.nullable) cells.push({ r, c, value: null });
+    }
+    onChange(setCells(page, pending, cells).pending);
+  };
+
+  const toggleDeleteRows = () => {
+    if (!editable || selectedRows.length === 0) return;
+    onChange(setDeleted(page, pending, selectedRows, !allSelectedDeleted));
+    // New rows vanish when deleted, so the old selection may point past the end.
+    if (selectedRows.some((r) => isInserted(page, r))) onSelect(null);
+  };
+
+  const appendRow = () => {
+    if (!editable) return;
+    onChange(addRows(page, pending));
+    const first = page.columns.findIndex((c) => c.editable);
+    moveTo({ r: rows, c: Math.max(0, first) });
+  };
+
+  // ---- clipboard -------------------------------------------------------------------
+
+  const copy = () => {
+    if (!range) return;
+    const matrix = [];
+    for (let r = range.top; r <= range.bottom; r++) {
+      const line = [];
+      for (let c = range.left; c <= range.right; c++) line.push(cellValue(page, pending, r, c) ?? "");
+      matrix.push(line);
+    }
+    clipboard
+      .write(toClipboardTable(matrix))
+      .then(() => toast.success(t("common.copied"), { id: "copied", duration: 1200 }))
+      .catch((e: unknown) => toast.error(errorMessage(e)));
+  };
+
+  const paste = async () => {
+    if (!range || !editable) return;
+    let text: string;
+    try {
+      text = await clipboard.read();
+    } catch {
+      return; // an empty or non-text clipboard is not an error worth a message
+    }
+    const matrix = parseClipboardTable(text);
+    if (matrix.length === 0) return;
+    const result = pasteMatrix(page, pending, matrix, { r: range.top, c: range.left }, { r: range.bottom, c: range.right });
+    onChange(result.pending);
+    const single = matrix.length === 1 && matrix[0]!.length === 1;
+    onSelect({
+      anchor: { r: range.top, c: range.left },
+      focus: {
+        r: single ? range.bottom : range.top + matrix.length - 1,
+        c: Math.min(cols - 1, single ? range.right : range.left + matrix[0]!.length - 1),
+      },
+    });
+    const parts = [t("table.pasted", { count: result.applied })];
+    if (result.addedRows) parts.push(t("table.pastedRows", { count: result.addedRows }));
+    if (result.skipped) parts.push(t("table.pastedSkipped", { count: result.skipped }));
+    if (result.droppedColumns) parts.push(t("table.pastedDropped", { count: result.droppedColumns }));
+    (result.skipped || result.droppedColumns ? toast.warning : toast.success)(parts.join(" · "), { id: "paste" });
+  };
+
+  // ---- keyboard --------------------------------------------------------------------
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    const rows = page.rows.length;
-    const cols = page.columns.length;
-    if (!rows || !cols) return;
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
-      if (!active) return;
+    if (editing || !rows || !cols) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const key = e.key.toLowerCase();
+
+    if (mod) {
+      const commands: Record<string, () => void> = {
+        c: copy,
+        v: () => void paste(),
+        z: e.shiftKey ? props.onRedo : props.onUndo,
+        y: props.onRedo,
+        s: props.onSave,
+        a: () => onSelect({ anchor: { r: 0, c: 0 }, focus: { r: rows - 1, c: cols - 1 } }),
+        backspace: toggleDeleteRows,
+      };
+      const command = commands[key];
+      if (!command) return;
       e.preventDefault();
-      return e.shiftKey ? copyRow() : copyCell();
+      command();
+      return;
     }
-    const cur = active ?? { r: 0, c: 0 };
-    const pageRows = Math.max(1, Math.floor(((scrollRef.current?.clientHeight ?? 300) - HEADER_HEIGHT) / ROW_HEIGHT) - 1);
+
+    const cur = selection?.focus ?? { r: 0, c: 0 };
+    const visible = Math.max(1, Math.floor(((scrollRef.current?.clientHeight ?? 300) - HEADER_HEIGHT) / ROW_HEIGHT) - 1);
     const moves: Record<string, [number, number]> = {
       ArrowUp: [-1, 0],
       ArrowDown: [1, 0],
       ArrowLeft: [0, -1],
       ArrowRight: [0, 1],
-      PageUp: [-pageRows, 0],
-      PageDown: [pageRows, 0],
+      PageUp: [-visible, 0],
+      PageDown: [visible, 0],
       Home: [0, -cols],
       End: [0, cols],
+      Tab: [0, e.shiftKey ? -1 : 1],
     };
     const move = moves[e.key];
-    if (!move) return;
-    e.preventDefault();
-    const next = active
-      ? { r: Math.min(rows - 1, Math.max(0, cur.r + move[0])), c: Math.min(cols - 1, Math.max(0, cur.c + move[1])) }
-      : cur;
-    setActive(next);
-    reveal(next.r, next.c);
+    if (move) {
+      e.preventDefault();
+      moveTo(selection ? clampCell(cur.r + move[0], cur.c + move[1]) : cur, e.shiftKey && e.key !== "Tab");
+    } else if (e.key === "Enter" || e.key === "F2") {
+      e.preventDefault();
+      if (selection && editable) startEdit(cur);
+      else if (selection) moveTo(clampCell(cur.r + 1, cur.c));
+    } else if (e.key === "Backspace" || e.key === "Delete") {
+      e.preventDefault();
+      clearSelection();
+    } else if (e.key === "Escape") {
+      if (selection) onSelect({ anchor: selection.focus, focus: selection.focus });
+    } else if (e.key.length === 1 && !e.altKey && selection && editable) {
+      // Typing replaces the cell, as in a spreadsheet.
+      e.preventDefault();
+      startEdit(cur, e.key);
+    }
   };
 
   const startResize = (e: PointerEvent<HTMLSpanElement>, c: number) => {
@@ -157,6 +360,9 @@ export function DataGrid({ page, sort, onSort }: Props) {
     handle.addEventListener("pointerup", onUp);
   };
 
+  const inRange = (r: number, c: number) =>
+    !!range && r >= range.top && r <= range.bottom && c >= range.left && c <= range.right;
+
   return (
     <ContextMenu.Root>
       <ContextMenu.Trigger asChild>
@@ -164,13 +370,14 @@ export function DataGrid({ page, sort, onSort }: Props) {
           ref={scrollRef}
           role="grid"
           tabIndex={0}
-          aria-rowcount={page.rows.length}
-          aria-colcount={page.columns.length}
+          aria-rowcount={rows}
+          aria-colcount={cols}
+          aria-readonly={!editable}
           onKeyDown={onKeyDown}
           className="h-full overflow-auto outline-none"
         >
           <div style={{ width: totalWidth, minWidth: "100%" }}>
-            <div role="row" style={{ height: HEADER_HEIGHT }} className="sticky top-0 z-20 flex border-b border-border bg-sunken">
+            <div role="row" style={{ height: HEADER_HEIGHT }} className="sticky top-0 z-30 flex border-b border-border bg-sunken">
               <div style={{ width: GUTTER }} className="sticky left-0 z-10 shrink-0 border-r border-border bg-sunken" />
               {page.columns.map((col, c) => (
                 <HeaderCell
@@ -178,6 +385,8 @@ export function DataGrid({ page, sort, onSort }: Props) {
                   column={col}
                   width={widths[c] ?? MIN_WIDTH}
                   sort={sort?.column === col.name ? sort : null}
+                  sortDisabled={sortDisabled}
+                  showLock={editable && !col.editable}
                   onSort={() => onSort(nextSort(sort, col.name))}
                   onResizeStart={(e) => startResize(e, c)}
                 />
@@ -187,48 +396,85 @@ export function DataGrid({ page, sort, onSort }: Props) {
 
             <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
               {virtualizer.getVirtualItems().map((v) => {
-                const row = page.rows[v.index]!;
-                const selectedRow = active?.r === v.index;
+                const r = v.index;
+                const inserted = isInserted(page, r);
+                const deleted = !!pending.deletes[r];
+                const rowSelected = !!range && r >= range.top && r <= range.bottom;
+                const editingHere = editing?.r === r;
                 return (
                   <div
-                    key={v.index}
+                    key={r}
                     role="row"
-                    aria-rowindex={v.index + 1}
+                    aria-rowindex={r + 1}
+                    data-row-state={deleted ? "deleted" : inserted ? "inserted" : undefined}
                     style={{ height: ROW_HEIGHT, transform: `translateY(${v.start}px)` }}
                     className={cn(
                       "group absolute top-0 left-0 flex w-full border-b border-border",
-                      selectedRow ? "bg-accent-soft/60" : "hover:bg-sunken/70",
+                      deleted && "bg-danger-soft/60 text-fg-muted line-through decoration-danger/50",
+                      inserted && "bg-ok-soft/50",
+                      !deleted && !inserted && "hover:bg-sunken/70",
+                      editingHere && "z-20",
                     )}
                   >
                     <div
                       style={{ width: GUTTER }}
+                      onMouseDown={(e) => {
+                        const anchor = e.shiftKey && selection ? { r: selection.anchor.r, c: 0 } : { r, c: 0 };
+                        onSelect({ anchor, focus: { r, c: cols - 1 } });
+                      }}
                       className={cn(
-                        "sticky left-0 z-10 flex shrink-0 items-center justify-end border-r border-border pr-2 font-mono text-[11px] text-fg-subtle tabular-nums",
-                        selectedRow ? "bg-accent-soft font-semibold text-accent-text" : "bg-surface group-hover:bg-sunken",
+                        "sticky left-0 z-10 flex shrink-0 items-center justify-end border-r border-border pr-2 font-mono text-[11px] tabular-nums no-underline",
+                        rowSelected ? "bg-accent-soft font-semibold text-accent-text" : "bg-surface text-fg-subtle group-hover:bg-sunken",
+                        inserted && !rowSelected && "bg-ok-soft text-ok",
+                        deleted && !rowSelected && "bg-danger-soft text-danger",
                       )}
                     >
-                      {page.offset + v.index + 1}
+                      {inserted ? <Plus aria-label={t("table.newRow")} className="size-3" /> : page.offset + r + 1}
                     </div>
-                    {row.map((value, c) => {
-                      const col = page.columns[c]!;
-                      const isActive = selectedRow && active?.c === c;
-                      const cut = truncated.has(v.index * page.columns.length + c);
+                    {page.columns.map((col, c) => {
+                      const value = cellValue(page, pending, r, c);
+                      const isActive = focus?.r === r && focus.c === c;
+                      const selected = inRange(r, c);
+                      const edited = !inserted && !deleted && isEdited(pending, r, c);
+                      const cut = !inserted && !edited && isTruncated(page, r, c);
+                      const isEditing = editingHere && editing.c === c;
                       return (
                         <div
                           key={c}
                           role="gridcell"
-                          aria-selected={isActive}
-                          onMouseDown={() => setActive({ r: v.index, c })}
-                          onContextMenu={() => setActive({ r: v.index, c })}
+                          aria-selected={selected}
+                          data-edited={edited || undefined}
+                          title={edited ? t("table.was", { value: page.rows[r]![c] ?? t("table.null") }) : undefined}
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            dragging.current = true;
+                            moveTo({ r, c }, e.shiftKey);
+                          }}
+                          onMouseEnter={() => dragging.current && moveTo({ r, c }, true)}
+                          onDoubleClick={() => startEdit({ r, c })}
+                          onContextMenu={() => !selected && moveTo({ r, c })}
                           style={{ width: widths[c] ?? MIN_WIDTH }}
                           className={cn(
-                            "flex shrink-0 items-center overflow-hidden border-r border-border px-2 text-[12.5px]",
+                            "relative flex shrink-0 items-center border-r border-border px-2 text-[12.5px]",
+                            !isEditing && "overflow-hidden",
                             col.kind === "number" && "justify-end font-mono tabular-nums",
                             (col.kind === "binary" || col.kind === "json") && "font-mono text-fg-muted",
-                            isActive && "bg-surface ring-2 ring-accent ring-inset",
+                            selected && !edited && "bg-accent-soft/70",
+                            edited && "bg-warn-soft",
+                            edited && selected && "ring-1 ring-accent/50 ring-inset",
+                            isActive && "ring-2 ring-accent ring-inset",
                           )}
                         >
-                          {value === null ? (
+                          {isEditing ? (
+                            <CellEditor
+                              editing={editing}
+                              numeric={col.kind === "number"}
+                              onText={(text) => setEditing({ ...editing, text })}
+                              onDone={finishEdit}
+                            />
+                          ) : value === undefined ? (
+                            <span className="truncate text-[11px] text-fg-subtle italic">{col.default ?? t("table.defaultValue")}</span>
+                          ) : value === null ? (
                             <span className="text-[11px] tracking-wide text-fg-subtle italic">{t("table.null")}</span>
                           ) : (
                             <span className="truncate whitespace-pre">{value}</span>
@@ -250,17 +496,96 @@ export function DataGrid({ page, sort, onSort }: Props) {
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
         <ContextMenu.Content className={menuContentClass}>
-          <ContextMenu.Item className={menuItemClass} disabled={!active} onSelect={copyCell}>
-            <Copy className="size-3.5" /> {t("table.copyCell")}
-            <span className="ml-auto pl-4 text-xs text-fg-subtle">⌘C</span>
+          <ContextMenu.Item className={menuItemClass} disabled={!range} onSelect={copy}>
+            <Copy className="size-3.5" /> {t("common.copy")}
+            <Shortcut>⌘C</Shortcut>
           </ContextMenu.Item>
-          <ContextMenu.Item className={menuItemClass} disabled={!active} onSelect={copyRow}>
-            <Rows3 className="size-3.5" /> {t("table.copyRow")}
-            <span className="ml-auto pl-4 text-xs text-fg-subtle">⇧⌘C</span>
-          </ContextMenu.Item>
+          {editable && (
+            <>
+              <ContextMenu.Item className={menuItemClass} disabled={!range} onSelect={() => void paste()}>
+                <ClipboardPaste className="size-3.5" /> {t("table.paste")}
+                <Shortcut>⌘V</Shortcut>
+              </ContextMenu.Item>
+              <ContextMenu.Item className={menuItemClass} disabled={!range} onSelect={setNull}>
+                <CircleSlash className="size-3.5" /> {t("table.setNull")}
+              </ContextMenu.Item>
+              <ContextMenu.Separator className={menuSeparatorClass} />
+              <ContextMenu.Item className={menuItemClass} onSelect={appendRow}>
+                <Plus className="size-3.5" /> {t("table.addRow")}
+              </ContextMenu.Item>
+              {allSelectedDeleted ? (
+                <ContextMenu.Item className={menuItemClass} onSelect={toggleDeleteRows}>
+                  <RotateCcw className="size-3.5" /> {t("table.restoreRows", { count: selectedRows.length })}
+                </ContextMenu.Item>
+              ) : (
+                <ContextMenu.Item className={cn(menuItemClass, menuDangerClass)} disabled={!range} onSelect={toggleDeleteRows}>
+                  <Trash2 className="size-3.5" /> {t("table.deleteRows", { count: selectedRows.length })}
+                  <Shortcut>⌘⌫</Shortcut>
+                </ContextMenu.Item>
+              )}
+            </>
+          )}
         </ContextMenu.Content>
       </ContextMenu.Portal>
     </ContextMenu.Root>
+  );
+}
+
+function Shortcut({ children }: { children: string }) {
+  return <span className="ml-auto pl-4 text-xs text-fg-subtle">{children}</span>;
+}
+
+interface CellEditorProps {
+  editing: Editing;
+  numeric: boolean;
+  onText: (text: string) => void;
+  onDone: (commit: boolean, move?: [number, number]) => void;
+}
+
+/** In-cell editor. Values with line breaks get a taller box; Alt+Enter adds a line. */
+function CellEditor({ editing, numeric, onText, onDone }: CellEditorProps) {
+  const multiline = editing.text.includes("\n");
+  const ref = useRef<HTMLTextAreaElement & HTMLInputElement>(null);
+
+  // Put the caret at the end once, instead of selecting everything (typing has already begun).
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [multiline]);
+
+  const shared = {
+    ref,
+    value: editing.text,
+    spellCheck: false,
+    "aria-label": "Edit cell",
+    onChange: (e: { target: { value: string } }) => onText(e.target.value),
+    onBlur: () => onDone(true),
+    onMouseDown: (e: { stopPropagation: () => void }) => e.stopPropagation(),
+    onDoubleClick: (e: { stopPropagation: () => void }) => e.stopPropagation(),
+    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      e.stopPropagation(); // the grid's own shortcuts must not fire while typing
+      if (e.key === "Escape") onDone(false);
+      else if (e.key === "Tab") {
+        e.preventDefault();
+        onDone(true, [0, e.shiftKey ? -1 : 1]);
+      } else if (e.key === "Enter" && e.altKey) {
+        e.preventDefault();
+        const el = e.currentTarget as HTMLTextAreaElement;
+        onText(`${el.value.slice(0, el.selectionStart)}\n${el.value.slice(el.selectionEnd)}`);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        onDone(true, [e.shiftKey ? -1 : 1, 0]);
+      }
+    },
+  };
+  const look = "absolute top-0 left-0 z-30 bg-surface px-2 text-[12.5px] text-fg outline-none ring-2 ring-accent ring-inset";
+
+  return multiline ? (
+    <textarea {...shared} className={cn(look, "h-28 w-full min-w-64 resize-none py-1.5 leading-snug shadow-pop")} />
+  ) : (
+    <input {...shared} className={cn(look, "h-full w-full", numeric && "text-right font-mono tabular-nums")} />
   );
 }
 
@@ -268,11 +593,14 @@ interface HeaderCellProps {
   column: ColumnMeta;
   width: number;
   sort: SortSpec | null;
+  sortDisabled: boolean;
+  showLock: boolean;
   onSort: () => void;
   onResizeStart: (e: PointerEvent<HTMLSpanElement>) => void;
 }
 
-function HeaderCell({ column, width, sort, onSort, onResizeStart }: HeaderCellProps) {
+function HeaderCell({ column, width, sort, sortDisabled, showLock, onSort, onResizeStart }: HeaderCellProps) {
+  const { t } = useTranslation();
   const Icon = column.primaryKey ? KeyRound : KIND_ICON[column.kind];
   return (
     <div
@@ -284,11 +612,13 @@ function HeaderCell({ column, width, sort, onSort, onResizeStart }: HeaderCellPr
       <button
         type="button"
         onClick={onSort}
-        title={`${column.name} · ${column.dataType}`}
-        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left text-xs font-semibold text-fg hover:bg-border/50 focus-visible:outline-offset-[-2px]"
+        disabled={sortDisabled}
+        title={sortDisabled ? t("table.dirtyLocked") : `${column.name} · ${column.dataType}`}
+        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left text-xs font-semibold text-fg enabled:hover:bg-border/50 focus-visible:outline-offset-[-2px]"
       >
         <Icon className={cn("size-3.5 shrink-0", column.primaryKey ? "text-accent-text" : "text-fg-subtle")} />
         <span className="truncate">{column.name}</span>
+        {showLock && <Lock aria-label={t("table.notEditable.column")} className="size-3 shrink-0 text-fg-subtle" />}
         {sort && (sort.descending ? <ArrowDown className="size-3 shrink-0 text-accent-text" /> : <ArrowUp className="size-3 shrink-0 text-accent-text" />)}
       </button>
       <span
