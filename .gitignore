@@ -1,0 +1,19 @@
+# dependencies / build output
+node_modules/
+dist/
+target/
+src-tauri/gen/
+
+# local artefacts
+.DS_Store
+*.log
+screenshots/
+branding/*-options.png
+.env
+.env.*
+!.env.example
+
+# editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
