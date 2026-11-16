@@ -37,6 +37,21 @@ const MIGRATIONS: &[&str] = &[
         started_at    INTEGER NOT NULL
      );
      CREATE INDEX query_history_recent ON query_history (connection_id, id DESC);",
+    // 3 — what the AI did on a database and what the user decided. It keeps the
+    //     connection's name, so an entry still says where it happened after the connection
+    //     is deleted.
+    "CREATE TABLE agent_audit (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        at              INTEGER NOT NULL,
+        connection_id   TEXT NOT NULL,
+        connection_name TEXT NOT NULL,
+        database_name   TEXT NOT NULL,
+        provider        TEXT NOT NULL,
+        model           TEXT,
+        event           TEXT NOT NULL,
+        sql             TEXT NOT NULL,
+        detail          TEXT NOT NULL
+     );",
 ];
 
 /// Entries kept; older ones are dropped as new ones arrive.
@@ -54,6 +69,28 @@ pub struct HistoryEntry {
     pub elapsed_ms: i64,
     pub started_at: i64,
 }
+
+/// One line of the AI activity log. `event` is one of `read` (rows were read), `read_failed`
+/// (a reading query was refused or failed), `proposed`,
+/// `approved`, `rejected`, `executed`, `blocked` (rolled back by the impact guard) and
+/// `failed`. SQL is stored with password literals masked.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    pub id: i64,
+    pub at: i64,
+    pub connection_id: String,
+    pub connection_name: String,
+    pub database: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub event: String,
+    pub sql: String,
+    pub detail: String,
+}
+
+/// Audit entries kept; older ones are dropped as new ones arrive.
+const AUDIT_LIMIT: i64 = 5000;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -273,6 +310,71 @@ impl Store {
         Ok(())
     }
 
+    // ---- AI activity log ------------------------------------------------------------------
+
+    /// Append an entry. `id` and `at` are assigned here.
+    pub async fn add_audit(&self, entry: &AuditEntry) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_audit
+               (at, connection_id, connection_name, database_name, provider, model, event, sql, detail)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(now_ms())
+        .bind(&entry.connection_id)
+        .bind(&entry.connection_name)
+        .bind(&entry.database)
+        .bind(&entry.provider)
+        .bind(&entry.model)
+        .bind(&entry.event)
+        .bind(&entry.sql)
+        .bind(&entry.detail)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        sqlx::query("DELETE FROM agent_audit WHERE id <= (SELECT MAX(id) FROM agent_audit) - ?")
+            .bind(AUDIT_LIMIT)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
+    /// Most recent first.
+    pub async fn list_audit(&self, limit: u32) -> Result<Vec<AuditEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, at, connection_id, connection_name, database_name, provider, model, event, sql, detail
+             FROM agent_audit ORDER BY id DESC LIMIT ?",
+        )
+        .bind(limit.min(1000))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        rows.iter()
+            .map(|r| {
+                Ok(AuditEntry {
+                    id: r.try_get(0).map_err(Error::store)?,
+                    at: r.try_get(1).map_err(Error::store)?,
+                    connection_id: r.try_get(2).map_err(Error::store)?,
+                    connection_name: r.try_get(3).map_err(Error::store)?,
+                    database: r.try_get(4).map_err(Error::store)?,
+                    provider: r.try_get(5).map_err(Error::store)?,
+                    model: r.try_get(6).map_err(Error::store)?,
+                    event: r.try_get(7).map_err(Error::store)?,
+                    sql: r.try_get(8).map_err(Error::store)?,
+                    detail: r.try_get(9).map_err(Error::store)?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn clear_audit(&self) -> Result<()> {
+        sqlx::query("DELETE FROM agent_audit")
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
     // ---- settings ----------------------------------------------------------------------
 
     pub async fn settings(&self) -> Result<HashMap<String, String>> {
@@ -396,6 +498,40 @@ mod tests {
             store.save_connection(p).await,
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn audit_log_keeps_what_happened_newest_first() {
+        let store = Store::open_in_memory().await.unwrap();
+        let entry = |event: &str, sql: &str| AuditEntry {
+            id: 0,
+            at: 0,
+            connection_id: "c1".into(),
+            connection_name: "Shop (prod)".into(),
+            database: "shop".into(),
+            provider: "claude".into(),
+            model: Some("haiku".into()),
+            event: event.into(),
+            sql: sql.into(),
+            detail: "3 rows".into(),
+        };
+        store.add_audit(&entry("read", "SELECT 1")).await.unwrap();
+        store
+            .add_audit(&entry("proposed", "UPDATE t SET a = 1"))
+            .await
+            .unwrap();
+        let log = store.list_audit(10).await.unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].event, "proposed");
+        assert_eq!(log[1].sql, "SELECT 1");
+        assert!(log[0].id > log[1].id && log[0].at > 0);
+        assert_eq!(log[0].connection_name, "Shop (prod)");
+        assert_eq!(log[0].model.as_deref(), Some("haiku"));
+        // Deleting the connection's history does not touch the audit log.
+        store.clear_history("c1").await.unwrap();
+        assert_eq!(store.list_audit(1).await.unwrap().len(), 1);
+        store.clear_audit().await.unwrap();
+        assert!(store.list_audit(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

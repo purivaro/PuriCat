@@ -30,6 +30,20 @@ impl ConsoleSlot {
     }
 }
 
+/// SQL the AI proposed and the user has not decided on (or that the impact guard stopped).
+#[derive(Clone)]
+pub struct Proposal {
+    pub connection_id: String,
+    pub database: String,
+    pub sql: String,
+    pub provider: String,
+    pub model: Option<String>,
+    /// After the impact guard rolled a statement back: that statement and what follows it.
+    pub resume: Option<String>,
+    /// Being run right now; a second approval is refused.
+    pub running: bool,
+}
+
 pub struct AppState {
     pub store: Store,
     pub secrets: Arc<dyn SecretStore>,
@@ -41,6 +55,9 @@ pub struct AppState {
     pub jobs: std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
     /// An empty directory the AI CLIs are started in, so they have no files to look at.
     pub agent_scratch: std::path::PathBuf,
+    /// Undecided AI proposals, by id. What is approved is what is stored here, not text
+    /// the web view sends back.
+    pub proposals: std::sync::Mutex<HashMap<String, Proposal>>,
 }
 
 impl AppState {
@@ -52,6 +69,7 @@ impl AppState {
             consoles: Default::default(),
             jobs: Default::default(),
             agent_scratch: data_dir.join("agent-scratch"),
+            proposals: Default::default(),
         })
     }
 

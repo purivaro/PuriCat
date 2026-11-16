@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use puricat_core::agent::{self, AgentEvent, ChatRequest, ModelChoice};
+use puricat_core::agent::{self, AgentEvent, ChatRequest, ModelChoice, ToolSetup};
 use puricat_core::ai_detect::{self, CliStatus, Provider};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,13 +20,13 @@ use puricat_core::db::{
 };
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
-use puricat_core::store::HistoryEntry;
+use puricat_core::store::{AuditEntry, HistoryEntry};
 use puricat_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::state::{AppState, ConsoleSlot};
+use crate::state::{AppState, ConsoleSlot, Proposal};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -414,29 +414,20 @@ pub async fn run_sql(
     sql: String,
     options: RunOptions,
 ) -> Result<RunOutcome> {
-    let slot = console_slot(&state, &id, &tab, database.clone()).await?;
-    let mut console = slot.console.lock().await;
-    slot.stop.store(false, Ordering::Relaxed);
-    let outcome = console.run(&sql, &options, &slot.stop).await?;
-    drop(console);
-    if outcome.connection_lost {
-        // Forget the dead connection; the tab's next run opens a new one.
-        let mut consoles = state.consoles.lock().await;
-        if consoles
-            .get(&tab)
-            .is_some_and(|current| Arc::ptr_eq(current, &slot))
-        {
-            consoles.remove(&tab);
-        }
-    }
+    run_on_console(&state, &id, &tab, database, &sql, &options).await
+}
 
-    let worst = outcome.statements.last().map(|s| s.status);
-    let status = match worst {
+/// How a run ended, in a word: the status of the last statement that was reached.
+fn run_status(outcome: &RunOutcome) -> &'static str {
+    match outcome.statements.last().map(|s| s.status) {
         Some(Status::Error) => "error",
         Some(Status::Blocked) => "blocked",
         Some(Status::Cancelled) => "cancelled",
         _ => "ok",
-    };
+    }
+}
+
+fn run_summary(outcome: &RunOutcome) -> String {
     let rows: usize = outcome
         .statements
         .iter()
@@ -448,19 +439,47 @@ pub async fn run_sql(
         .iter()
         .filter_map(|s| s.rows_affected)
         .sum();
-    let summary = format!(
+    format!(
         "{} statements, {rows} rows, {affected} affected",
         outcome.statements.len()
-    );
+    )
+}
+
+/// Run a script on the console registered under `tab` (opened on first use) and record it
+/// in the local history.
+async fn run_on_console(
+    state: &AppState,
+    id: &str,
+    tab: &str,
+    database: Option<String>,
+    sql: &str,
+    options: &RunOptions,
+) -> Result<RunOutcome> {
+    let slot = console_slot(state, id, tab, database.clone()).await?;
+    let mut console = slot.console.lock().await;
+    slot.stop.store(false, Ordering::Relaxed);
+    let outcome = console.run(sql, options, &slot.stop).await?;
+    drop(console);
+    if outcome.connection_lost {
+        // Forget the dead connection; the tab's next run opens a new one.
+        let mut consoles = state.consoles.lock().await;
+        if consoles
+            .get(tab)
+            .is_some_and(|current| Arc::ptr_eq(current, &slot))
+        {
+            consoles.remove(tab);
+        }
+    }
+
     // History is a convenience: failing to write it must not fail the query.
     let _ = state
         .store
         .add_history(
-            &id,
+            id,
             database.as_deref(),
-            &script::redact(&sql),
-            status,
-            &summary,
+            &script::redact(sql),
+            run_status(&outcome),
+            &run_summary(&outcome),
             outcome.elapsed_ms,
         )
         .await;
@@ -589,8 +608,49 @@ pub async fn agent_context(
     ))
 }
 
-/// One chat turn through the user's CLI. The answer streams over `on_event`; the return
-/// value is the complete answer. `cancel_job` stops the CLI.
+/// Append to the AI activity log. The log is a record, not a gate: failing to write it does
+/// not fail what was done.
+#[allow(clippy::too_many_arguments)]
+async fn audit(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    provider: &str,
+    model: Option<&str>,
+    event: &str,
+    sql: &str,
+    detail: &str,
+) {
+    let connection_name = state
+        .store
+        .get_connection(connection_id)
+        .await
+        .map(|profile| profile.name)
+        .unwrap_or_default();
+    let _ = state
+        .store
+        .add_audit(&AuditEntry {
+            id: 0,
+            at: 0,
+            connection_id: connection_id.to_string(),
+            connection_name,
+            database: database.to_string(),
+            provider: provider.to_string(),
+            model: model.map(str::to_string),
+            event: event.to_string(),
+            // Password literals are masked, as in the query history.
+            sql: script::redact(sql),
+            detail: detail.chars().take(300).collect(),
+        })
+        .await;
+}
+
+/// One chat turn through the user's CLI. The answer streams over `on_event`, together with
+/// what the tools did; the return value is the complete answer. `cancel_job` stops the CLI.
+///
+/// With `request.tools` the CLI gets PuriCat's tools for the named database of an open
+/// connection: catalogue lookups, a read-only query when `readRows` is set, and proposals.
+/// A proposal is stored here and run only by `agent_proposal_run`.
 #[tauri::command]
 pub async fn agent_send(
     state: State<'_, AppState>,
@@ -598,14 +658,251 @@ pub async fn agent_send(
     request: ChatRequest,
     on_event: Channel<AgentEvent>,
 ) -> Result<String> {
+    let tools = match &request.tools {
+        Some(scope) => Some(ToolSetup {
+            session: state.session(&scope.connection_id).await?,
+            database: scope.database.clone(),
+            schema: scope.schema.clone(),
+            read_rows: scope.read_rows,
+            // The CLI starts this same executable as its MCP server; it only relays.
+            bridge: vec![
+                std::env::current_exe()?.to_string_lossy().into_owned(),
+                "--mcp-bridge".into(),
+            ],
+        }),
+        None => None,
+    };
     let stop = Arc::new(AtomicBool::new(false));
     state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
-    let result = agent::chat(&request, &state.agent_scratch, &stop, |event| {
+
+    let provider = request.provider.binary();
+    let mut model = request.model.clone();
+    let mut calls: HashMap<String, (String, String)> = HashMap::new();
+    // (event, sql, detail) for the activity log, written once the turn is over.
+    let mut log: Vec<(&str, String, String)> = Vec::new();
+    let result = agent::chat(&request, &state.agent_scratch, tools, &stop, |event| {
+        match &event {
+            AgentEvent::Started { model: Some(used) } => model = Some(used.clone()),
+            AgentEvent::ToolStarted { id, name, input } => {
+                calls.insert(id.clone(), (name.clone(), input.clone()));
+            }
+            AgentEvent::ToolFinished { id, ok, output } => {
+                // Reading rows is what gets logged; catalogue lookups are not.
+                if let Some((name, input)) = calls.remove(id) {
+                    if name == "run_select" {
+                        // A query that was refused or failed read nothing: it is logged as such.
+                        let event = if *ok { "read" } else { "read_failed" };
+                        let first = output.lines().next().unwrap_or("");
+                        log.push((event, input, first.to_string()));
+                    }
+                }
+            }
+            AgentEvent::Proposal {
+                id, sql, reason, ..
+            } => {
+                if let Some(scope) = &request.tools {
+                    state.proposals.lock().unwrap().insert(
+                        id.clone(),
+                        Proposal {
+                            connection_id: scope.connection_id.clone(),
+                            database: scope.database.clone(),
+                            sql: sql.clone(),
+                            provider: provider.to_string(),
+                            model: model.clone(),
+                            resume: None,
+                            running: false,
+                        },
+                    );
+                    log.push(("proposed", sql.clone(), reason.clone().unwrap_or_default()));
+                }
+            }
+            _ => {}
+        }
         let _ = on_event.send(event);
     })
     .await;
     state.jobs.lock().unwrap().remove(&job);
+    if let Some(scope) = &request.tools {
+        for (event, sql, detail) in log {
+            audit(
+                &state,
+                &scope.connection_id,
+                &scope.database,
+                provider,
+                model.as_deref(),
+                event,
+                &sql,
+                &detail,
+            )
+            .await;
+        }
+    }
     result
+}
+
+/// The user approved a proposal: PuriCat runs it, on a connection of its own, with the
+/// console's impact guard. `lift_limit` runs what the guard held back, without the limit.
+#[tauri::command]
+pub async fn agent_proposal_run(
+    state: State<'_, AppState>,
+    id: String,
+    lift_limit: bool,
+) -> Result<RunOutcome> {
+    let proposal = {
+        let mut proposals = state.proposals.lock().unwrap();
+        let proposal = proposals.get_mut(&id).ok_or_else(|| {
+            Error::NotFound(
+                "That proposal (it was already decided, or the app was restarted)".into(),
+            )
+        })?;
+        if proposal.running {
+            return Err(Error::Conflict("This proposal is already running".into()));
+        }
+        proposal.running = true;
+        proposal.clone()
+    };
+    let result = run_proposal(&state, &id, &proposal, lift_limit).await;
+    let mut proposals = state.proposals.lock().unwrap();
+    match &result {
+        // Held back by the guard: it stays, so the user can run the rest without the limit.
+        Ok(outcome) if outcome.resume.is_some() => {
+            if let Some(kept) = proposals.get_mut(&id) {
+                kept.running = false;
+                kept.resume = outcome.resume.clone();
+            }
+        }
+        // It ran (wholly or up to an error): it cannot be run again.
+        Ok(_) => {
+            proposals.remove(&id);
+        }
+        // Nothing ran (connection closed, read-only): it can be approved again.
+        Err(_) => {
+            if let Some(kept) = proposals.get_mut(&id) {
+                kept.running = false;
+            }
+        }
+    }
+    result
+}
+
+async fn run_proposal(
+    state: &AppState,
+    id: &str,
+    proposal: &Proposal,
+    lift_limit: bool,
+) -> Result<RunOutcome> {
+    let profile = state.store.get_connection(&proposal.connection_id).await?;
+    if profile.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to run this.".into(),
+        ));
+    }
+    let sql = if lift_limit {
+        proposal
+            .resume
+            .clone()
+            .ok_or_else(|| Error::Invalid("Nothing of this proposal was held back".into()))?
+    } else {
+        proposal.sql.clone()
+    };
+    let options = RunOptions {
+        max_rows: 200,
+        change_limit: (!lift_limit).then_some(profile.bulk_review_rows as u64),
+    };
+    let log = |event: &'static str, detail: String| {
+        let sql = sql.clone();
+        async move {
+            audit(
+                state,
+                &proposal.connection_id,
+                &proposal.database,
+                &proposal.provider,
+                proposal.model.as_deref(),
+                event,
+                &sql,
+                &detail,
+            )
+            .await
+        }
+    };
+    let approval = if lift_limit {
+        "Approved by the user, without the row limit"
+    } else {
+        "Approved by the user"
+    };
+    log("approved", approval.into()).await;
+
+    // A console of its own, registered like a query tab's so `cancel_sql` can stop it.
+    let tab = format!("proposal:{id}");
+    let result = run_on_console(
+        state,
+        &proposal.connection_id,
+        &tab,
+        Some(proposal.database.clone()),
+        &sql,
+        &options,
+    )
+    .await;
+    // Closing it rolls back a transaction the script may have left open.
+    if let Some(slot) = state.consoles.lock().await.remove(&tab) {
+        slot.abandon().await;
+    }
+    match &result {
+        Ok(outcome) => {
+            let event = match run_status(outcome) {
+                "ok" => "executed",
+                "blocked" => "blocked",
+                _ => "failed",
+            };
+            let mut detail = run_summary(outcome);
+            if let Some(message) = outcome.statements.last().and_then(|s| s.message.as_ref()) {
+                detail.push_str(&format!(" — {message}"));
+            }
+            if outcome.in_transaction {
+                detail.push_str(" — a transaction was left open and rolled back");
+            }
+            log(event, detail).await;
+        }
+        Err(e) => log("failed", e.to_string()).await,
+    }
+    result
+}
+
+/// The user turned a proposal down (or cleared the conversation it belonged to).
+#[tauri::command]
+pub async fn agent_proposal_reject(state: State<'_, AppState>, id: String) -> Result<()> {
+    let proposal = {
+        let mut proposals = state.proposals.lock().unwrap();
+        if proposals.get(&id).is_some_and(|p| p.running) {
+            return Err(Error::Conflict("This proposal is running".into()));
+        }
+        proposals.remove(&id)
+    };
+    if let Some(proposal) = proposal {
+        audit(
+            &state,
+            &proposal.connection_id,
+            &proposal.database,
+            &proposal.provider,
+            proposal.model.as_deref(),
+            "rejected",
+            &proposal.sql,
+            "",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// The AI activity log, most recent first.
+#[tauri::command]
+pub async fn agent_audit(state: State<'_, AppState>, limit: u32) -> Result<Vec<AuditEntry>> {
+    state.store.list_audit(limit).await
+}
+
+#[tauri::command]
+pub async fn clear_agent_audit(state: State<'_, AppState>) -> Result<()> {
+    state.store.clear_audit().await
 }
 
 /// Lets an injected end-to-end script hand its findings to the test runner.

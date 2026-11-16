@@ -4,9 +4,11 @@
 //! without a window and reused later by helper binaries (backup runner, MCP bridge).
 
 pub mod agent;
+pub mod agent_tools;
 pub mod ai_detect;
 pub mod db;
 pub mod error;
+pub mod mcp;
 pub mod model;
 pub mod secrets;
 pub mod store;

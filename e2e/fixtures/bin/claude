@@ -8,6 +8,11 @@ case "$1" in
   auth) echo '{"loggedIn": true, "authMethod": "stand-in", "email": "nobody@example.com"}'; exit 0 ;;
 esac
 
+# Given an MCP server, it has to be a real MCP client: that part is written in Python.
+for argument in "$@"; do
+  [ "$argument" = "--mcp-config" ] && exec /usr/bin/env python3 "$(dirname "$0")/claude-tools.py" "$@"
+done
+
 model=stand-in-default
 previous=
 for argument in "$@"; do

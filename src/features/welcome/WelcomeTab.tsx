@@ -7,8 +7,8 @@ import { nodeKey, useConnections } from "../../stores/connections";
 import { useSettings } from "../../stores/settings";
 import { useUi } from "../../stores/ui";
 
-const READY = ["connections", "engines", "browse", "grid", "editing", "sql", "themes"] as const;
-const NEXT = ["sqlserver", "ai", "backup"] as const;
+const READY = ["connections", "engines", "browse", "grid", "editing", "sql", "ai", "themes"] as const;
+const NEXT = ["sqlserver", "backup"] as const;
 
 export function WelcomeTab() {
   const { t, i18n } = useTranslation();

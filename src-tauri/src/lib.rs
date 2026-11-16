@@ -51,6 +51,10 @@ pub fn run() {
             commands::agent_models,
             commands::agent_context,
             commands::agent_send,
+            commands::agent_proposal_run,
+            commands::agent_proposal_reject,
+            commands::agent_audit,
+            commands::clear_agent_audit,
             commands::e2e_report,
         ]);
 
@@ -77,6 +81,8 @@ mod e2e {
         };
         builder.on_page_load(move |webview, payload| {
             if payload.event() == PageLoadEvent::Finished {
+                // A covered WKWebView pauses its timers and animations, which stalls the test.
+                let _ = webview.window().set_always_on_top(true);
                 let _ = webview.eval(&script);
             }
         })

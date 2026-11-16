@@ -505,6 +505,67 @@ impl Console {
         }
     }
 
+    /// Run one reading statement for a caller that must not be able to change anything
+    /// (the AI's query tool). Returns the rows and whether they were cut at `max_rows`.
+    ///
+    /// Three things hold it, none of which the statement can switch off:
+    /// - the text must read as a single reading statement ([`script::single_read`]);
+    /// - the server prepares it first, and neither engine prepares more than one statement,
+    ///   so nothing can follow it that would leave the transaction;
+    /// - it runs in a `READ ONLY` transaction that is rolled back.
+    ///
+    /// A function with effects outside the transaction (terminating a session, sleeping) can
+    /// still be called: an account without write privileges remains the strong control.
+    pub async fn read_only(
+        &mut self,
+        sql: &str,
+        max_rows: u32,
+        stop: &AtomicBool,
+    ) -> Result<(ResultSet, bool)> {
+        if self.lost {
+            return Err(Error::Database("The connection was lost".into()));
+        }
+        let engine = self.engine();
+        let statement =
+            script::single_read(engine, sql).map_err(|why| Error::Invalid(why.into()))?;
+        let begin = if engine == Engine::Mysql {
+            "START TRANSACTION READ ONLY"
+        } else {
+            "BEGIN TRANSACTION READ ONLY"
+        };
+        self.control(begin).await.map_err(Error::Database)?;
+        let prepared = match &mut self.conn {
+            Conn::MySql(conn) => (&mut *conn).prepare(&statement.text).await.map(|_| ()),
+            Conn::Postgres(conn) => (&mut *conn).prepare(&statement.text).await.map(|_| ()),
+        };
+        let result = match prepared {
+            Err(e) => Err(Error::Database(message_of(&e))),
+            Ok(()) => {
+                let mut executed = self.execute(&statement.text, max_rows, true, stop).await;
+                if let Some(error) = executed.error.take() {
+                    Err(Error::Database(error))
+                } else if executed.cancelled {
+                    Err(Error::Conflict("Cancelled".into()))
+                } else if executed.sets.is_empty() {
+                    // No rows: the stream carried no column names.
+                    Ok((
+                        ResultSet {
+                            columns: self.describe(&statement.text).await,
+                            rows: Vec::new(),
+                        },
+                        false,
+                    ))
+                } else {
+                    Ok(executed.sets.remove(0))
+                }
+            }
+        };
+        if !self.lost {
+            let _ = self.control("ROLLBACK").await;
+        }
+        result
+    }
+
     /// Run a script statement by statement, stopping at the first one that fails, is
     /// blocked by the impact guard, or is cancelled through `stop`.
     pub async fn run(

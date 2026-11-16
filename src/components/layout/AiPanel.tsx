@@ -1,7 +1,8 @@
-import { CircleCheck, CircleHelp, CircleX, MessageSquarePlus, RefreshCw, Sparkles } from "lucide-react";
+import { CircleCheck, CircleHelp, CircleX, History, MessageSquarePlus, RefreshCw, Sparkles } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ActivityLog } from "../../features/agent/ActivityLog";
 import { AgentChat } from "../../features/agent/AgentChat";
 import { cn } from "../../lib/cn";
 import { ipc } from "../../lib/ipc";
@@ -39,6 +40,7 @@ export function AiPanel() {
   const running = useAgent((s) => s.running !== null);
   const [statuses, setStatuses] = useState<CliStatus[] | null>(null);
   const [checking, setChecking] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
 
   const check = useCallback(() => {
     setChecking(true);
@@ -62,6 +64,9 @@ export function AiPanel() {
         <h2 className="ml-1 flex-1 truncate text-[13px] font-semibold">{t("ai.title")}</h2>
         <IconButton label={t("ai.newChat")} disabled={!hasTurns} onClick={() => useAgent.getState().reset()}>
           <MessageSquarePlus className="size-4" />
+        </IconButton>
+        <IconButton label={t("ai.log.open")} onClick={() => setLogOpen(true)}>
+          <History className="size-4" />
         </IconButton>
         <IconButton label={t("ai.recheck")} disabled={checking} onClick={check}>
           <RefreshCw className={cn("size-3.5", checking && "animate-spin")} />
@@ -127,6 +132,7 @@ export function AiPanel() {
           </ul>
         </div>
       )}
+      <ActivityLog open={logOpen} onOpenChange={setLogOpen} />
     </div>
   );
 }

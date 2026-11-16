@@ -226,6 +226,72 @@ pub fn classify(engine: Engine, statement: &str) -> (Kind, Option<&'static str>)
     }
 }
 
+/// Functions a read-only transaction does not hold back: ending other sessions, running
+/// SQL over another connection, reading or writing files on the server.
+const OUTSIDE_EFFECTS: &[&str] = &[
+    "pg_terminate_backend",
+    "pg_cancel_backend",
+    "dblink",
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_ls_dir",
+    "lo_export",
+    "lo_import",
+    "pg_reload_conf",
+    "load_file",
+];
+
+/// The one statement a read-only tool may run, or why the text is refused.
+///
+/// This reads the text, so it is a first filter and not the guarantee: the caller also has
+/// the server confirm that the text is a single statement, and runs it in a read-only
+/// transaction on a connection that is closed afterwards.
+pub fn single_read(engine: Engine, sql: &str) -> std::result::Result<Statement, &'static str> {
+    // MySQL and MariaDB execute what is inside these comments; a reader skips it.
+    if engine == Engine::Mysql && (sql.contains("/*!") || sql.contains("/*M!")) {
+        return Err("Version comments (/*! ... */) are not accepted here");
+    }
+    let mut statements = split(engine, sql);
+    if statements.len() != 1 {
+        return Err("Exactly one statement is accepted");
+    }
+    let statement = statements.remove(0);
+    if statement.kind != Kind::Read {
+        return Err(
+            "Only a statement that reads is accepted (SELECT, WITH, SHOW, EXPLAIN, DESCRIBE, TABLE, VALUES)",
+        );
+    }
+    // Locking reads hold locks other sessions wait on.
+    let mut words: Vec<String> = Vec::new();
+    scan(
+        engine,
+        &statement.text,
+        |w, _, _| words.push(w.to_ascii_uppercase()),
+        |_| {},
+    );
+    let follows = |first: &str, next: &[&str]| {
+        words
+            .windows(2)
+            .any(|pair| pair[0] == first && next.contains(&pair[1].as_str()))
+    };
+    if follows("FOR", &["UPDATE", "SHARE", "NO", "KEY"]) || follows("LOCK", &["IN"]) {
+        return Err("Locking reads (FOR UPDATE, FOR SHARE) are not accepted here");
+    }
+    // INTO writes somewhere: a table, a variable, or a file on the server (`TABLE t INTO
+    // OUTFILE` is not a SELECT, and a read-only transaction does not stop it).
+    if words.iter().any(|w| w == "INTO") {
+        return Err("INTO is not accepted here");
+    }
+    // Functions that act outside the transaction or read the server's files. This catches
+    // the plain spelling only (an escaped identifier gets past it), so it is a courtesy
+    // and not a boundary: what the account may do is decided by the server.
+    let lowered = statement.text.to_ascii_lowercase();
+    if OUTSIDE_EFFECTS.iter().any(|name| lowered.contains(name)) {
+        return Err("That function acts outside the query and is not accepted here");
+    }
+    Ok(statement)
+}
+
 /// Is this `CREATE TEMPORARY …` / `DROP TEMPORARY …`? Judged by position, so a table that
 /// happens to be called `temporary` is not mistaken for one.
 pub fn is_temporary_ddl(engine: Engine, statement: &str) -> bool {
@@ -323,6 +389,68 @@ mod tests {
 
     fn texts(engine: Engine, sql: &str) -> Vec<String> {
         split(engine, sql).into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn a_read_tool_accepts_one_reading_statement_only() {
+        for (engine, sql) in [
+            (
+                Engine::Mysql,
+                "SELECT id, total FROM orders WHERE total > 10 LIMIT 5",
+            ),
+            (Engine::Mysql, "SELECT 1; -- trailing comment"),
+            (Engine::Mysql, "SHOW CREATE TABLE orders"),
+            (Engine::Mysql, "EXPLAIN SELECT * FROM orders"),
+            (
+                Engine::Postgres,
+                "WITH t AS (SELECT 1 AS n) SELECT n FROM t",
+            ),
+            (Engine::Postgres, "/* why */ SELECT 'for update' AS words"),
+            (Engine::Postgres, "TABLE orders"),
+        ] {
+            assert!(single_read(engine, sql).is_ok(), "{sql}");
+        }
+        for (engine, sql) in [
+            (Engine::Mysql, ""),
+            (Engine::Mysql, "-- nothing"),
+            (Engine::Mysql, "SELECT 1; SELECT 2"),
+            (Engine::Mysql, "SELECT 1; DELETE FROM orders"),
+            (Engine::Mysql, "DELETE FROM orders"),
+            (Engine::Mysql, "UPDATE orders SET total = 0 WHERE id = 1"),
+            (Engine::Mysql, "SELECT * FROM orders INTO OUTFILE '/tmp/x'"),
+            (Engine::Mysql, "TABLE orders INTO OUTFILE '/tmp/x'"),
+            (Engine::Mysql, "SELECT COUNT(*) FROM orders INTO @n"),
+            (Engine::Mysql, "SELECT LOAD_FILE('/etc/passwd')"),
+            (
+                Engine::Postgres,
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity",
+            ),
+            (Engine::Postgres, "SELECT \"pg_read_file\"('/etc/passwd')"),
+            (
+                Engine::Postgres,
+                "SELECT * FROM dblink('dbname=x', 'DELETE FROM orders') AS t(n int)",
+            ),
+            (Engine::Mysql, "SELECT 1 /*! ; DELETE FROM orders */"),
+            (Engine::Mysql, "SELECT 1 /*M!100100 ; DELETE FROM orders */"),
+            (Engine::Mysql, "SELECT * FROM orders FOR UPDATE"),
+            (Engine::Mysql, "SELECT * FROM orders LOCK IN SHARE MODE"),
+            (Engine::Mysql, "SET SESSION TRANSACTION READ WRITE"),
+            (Engine::Mysql, "CALL refresh_totals()"),
+            (Engine::Postgres, "COMMIT; DELETE FROM orders"),
+            (
+                Engine::Postgres,
+                "WITH gone AS (DELETE FROM orders RETURNING id) SELECT * FROM gone",
+            ),
+            (Engine::Postgres, "SELECT * INTO copy FROM orders"),
+            (Engine::Postgres, "SELECT * FROM orders FOR NO KEY UPDATE"),
+            (Engine::Postgres, "SELECT * FROM orders FOR SHARE"),
+            (Engine::Postgres, "EXPLAIN ANALYZE DELETE FROM orders"),
+            (Engine::Postgres, "SET default_transaction_read_only = off"),
+            (Engine::Postgres, "DO $$ BEGIN DELETE FROM orders; END $$"),
+            (Engine::Postgres, "COPY orders TO PROGRAM 'sh'"),
+        ] {
+            assert!(single_read(engine, sql).is_err(), "{sql}");
+        }
     }
 
     #[test]

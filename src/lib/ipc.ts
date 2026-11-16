@@ -5,6 +5,7 @@ import type {
   AiProvider,
   AppError,
   ApplyResult,
+  AuditEntry,
   ChangeSet,
   ChatRequest,
   CliStatus,
@@ -105,4 +106,9 @@ export const ipc = {
     channel.onmessage = onEvent;
     return invoke<string>("agent_send", { job, request, onEvent: channel });
   },
+  /** The user approved a proposal: PuriCat runs it. `liftLimit` runs what the row limit held back. */
+  agentProposalRun: (id: string, liftLimit: boolean) => invoke<RunOutcome>("agent_proposal_run", { id, liftLimit }),
+  agentProposalReject: (id: string) => invoke<void>("agent_proposal_reject", { id }),
+  agentAudit: (limit: number) => invoke<AuditEntry[]>("agent_audit", { limit }),
+  clearAgentAudit: () => invoke<void>("clear_agent_audit"),
 };

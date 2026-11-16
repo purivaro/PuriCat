@@ -242,7 +242,41 @@ export interface CliStatus {
 export type AgentEvent =
   | { type: "started"; model: string | null }
   | { type: "delta"; text: string }
-  | { type: "message"; text: string };
+  | { type: "message"; text: string }
+  /** The model called a tool; `input` is the SQL or the name it asked about. */
+  | { type: "toolStarted"; id: string; name: string; input: string }
+  /** `output` is exactly the text the model was given. */
+  | { type: "toolFinished"; id: string; ok: boolean; output: string }
+  /** SQL the model wants run. Nothing has run: the user decides. */
+  | { type: "proposal"; id: string; sql: string; reason: string | null; statements: SqlStatement[] };
+
+/** What the AI may do with the database in front: nothing, look at its structure, or also read rows. */
+export type AgentAccess = "none" | "schema" | "data";
+
+/** The database a turn's tools are bound to. */
+export interface ToolScope {
+  connectionId: string;
+  database: string;
+  schema: string | null;
+  /** The model may read rows, not only the catalogue. */
+  readRows: boolean;
+}
+
+export type AuditEvent = "read" | "read_failed" | "proposed" | "approved" | "rejected" | "executed" | "blocked" | "failed";
+
+/** One line of the AI activity log. */
+export interface AuditEntry {
+  id: number;
+  at: number;
+  connectionId: string;
+  connectionName: string;
+  database: string;
+  provider: AiProvider;
+  model: string | null;
+  event: AuditEvent;
+  sql: string;
+  detail: string;
+}
 
 export interface ModelChoice {
   id: string;
@@ -262,6 +296,8 @@ export interface ChatRequest {
   /** The schema context, exactly as shown in the context inspector. */
   context: string | null;
   messages: ChatMessage[];
+  /** `null`: the model gets no tools at all. */
+  tools: ToolScope | null;
 }
 
 export interface AppError {

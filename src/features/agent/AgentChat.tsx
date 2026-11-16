@@ -1,4 +1,4 @@
-import { ArrowUp, Check, CircleAlert, Copy, Database, Eye, RotateCcw, Sparkles, Square, TerminalSquare } from "lucide-react";
+import { ArrowUp, Check, CircleAlert, Copy, Database, Eye, RotateCcw, Sparkles, Square, TerminalSquare, TriangleAlert, Wrench } from "lucide-react";
 import { Popover } from "radix-ui";
 import { Fragment, type KeyboardEvent, memo, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -8,10 +8,11 @@ import { Button, IconButton, Spinner, Switch } from "../../components/ui/primiti
 import { clipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { ipc } from "../../lib/ipc";
-import type { AiProvider, ModelChoice } from "../../lib/types";
-import { type ChatTarget, type ChatTurn, useAgent } from "../../stores/agent";
+import type { AgentAccess, AiProvider, ModelChoice } from "../../lib/types";
+import { type ChatProposal, type ChatTarget, type ChatTurn, type ToolStep, useAgent } from "../../stores/agent";
 import { sessionOf, useConnections } from "../../stores/connections";
 import { sqlEditors, useWorkspace } from "../../stores/workspace";
+import { ProposalCard, ToolSteps } from "./AgentActivity";
 import { type Block, type Inline, isSql, parseMarkdown } from "./markdown";
 
 const MODEL_NAME = /^(?!-)[A-Za-z0-9._:/@[\]-]{1,100}$/;
@@ -213,6 +214,44 @@ function SentContext({ context }: { context: string | null | undefined }) {
   );
 }
 
+/**
+ * An answer with what the model did where it did it: text, the tools it called, the SQL it
+ * proposed. A proposal that was not accepted shows as a failed step; an accepted one is
+ * its card.
+ */
+function AnswerBody({ turn, target }: { turn: ChatTurn; target: ChatTarget | null }) {
+  const marks: ({ at: number; step: ToolStep } | { at: number; proposal: ChatProposal })[] = [
+    ...(turn.steps ?? []).filter((s) => s.name !== "propose_sql" || s.status === "error").map((step) => ({ at: step.at, step })),
+    ...(turn.proposals ?? []).map((proposal) => ({ at: proposal.at, proposal })),
+  ].sort((a, b) => a.at - b.at);
+
+  const parts: ReactNode[] = [];
+  let from = 0;
+  let group: ToolStep[] = [];
+  const flush = () => {
+    if (group.length > 0) parts.push(<ToolSteps key={`steps-${group[0]!.id}`} steps={group} />);
+    group = [];
+  };
+  const text = (to: number) => {
+    const piece = turn.text.slice(from, to);
+    from = to;
+    if (piece.trim() === "") return;
+    flush();
+    parts.push(<Answer key={`text-${parts.length}`} text={piece} target={target} />);
+  };
+  for (const mark of marks) {
+    text(Math.min(mark.at, turn.text.length));
+    if ("step" in mark) group.push(mark.step);
+    else {
+      flush();
+      parts.push(<ProposalCard key={mark.proposal.id} proposal={mark.proposal} target={target} />);
+    }
+  }
+  flush();
+  text(turn.text.length);
+  return <>{parts}</>;
+}
+
 function Turn({ turn, target, last, busy }: { turn: ChatTurn; target: ChatTarget | null; last: boolean; busy: boolean }) {
   const { t } = useTranslation();
   if (turn.role === "user") {
@@ -225,7 +264,8 @@ function Turn({ turn, target, last, busy }: { turn: ChatTurn; target: ChatTarget
       </div>
     );
   }
-  const waiting = turn.status === "streaming" && turn.text === "";
+  const acted = (turn.steps?.length ?? 0) + (turn.proposals?.length ?? 0) > 0;
+  const waiting = turn.status === "streaming" && turn.text === "" && !acted;
   return (
     <div data-agent-turn="assistant" data-status={turn.status} className="flex min-w-0 flex-col gap-2">
       <div className="flex items-center gap-1.5 text-[11px] text-fg-subtle">
@@ -238,7 +278,7 @@ function Turn({ turn, target, last, busy }: { turn: ChatTurn; target: ChatTarget
           <Spinner className="size-3.5" /> {t("ai.thinking")}
         </div>
       ) : (
-        turn.text !== "" && <Answer text={turn.text} target={target} />
+        <AnswerBody turn={turn} target={target} />
       )}
       {turn.status === "streaming" && !waiting && <span aria-hidden className="h-3.5 w-1.5 animate-pulse rounded-sm bg-accent" />}
       {turn.status === "stopped" && <div className="text-xs text-fg-subtle">{t("ai.stopped")}</div>}
@@ -324,7 +364,7 @@ function ModelSelect({ provider, disabled }: { provider: AiProvider; disabled: b
         setDraft(model);
         setTyping(true);
       }}
-      className={cn(fieldClass, "max-w-44 min-w-0")}
+      className={cn(fieldClass, "max-w-36 min-w-0")}
     >
       <option value="">{t("ai.modelDefault")}</option>
       {choices?.map((c) => (
@@ -405,12 +445,75 @@ function ContextButton({ scope }: { scope: Scope }) {
   );
 }
 
+/** What the AI may do with the database in front: nothing, look at its structure, or also read rows. */
+function AccessButton({ scope, provider }: { scope: Scope; provider: AiProvider }) {
+  const { t } = useTranslation();
+  const access = useAgent((s) => s.access);
+  const production = useConnections((s) => !!scope.target && s.connections.find((c) => c.id === scope.target!.connectionId)?.environment === "production");
+  const active = access !== "none" && scope.target !== null;
+  return (
+    <Popover.Root>
+      <Popover.Trigger
+        data-agent-access={access}
+        title={t("ai.access.hint")}
+        aria-label={`${t("ai.access.title")}: ${t(`ai.access.${access}.label`)}`}
+        className={cn(
+          "flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
+          active ? "border-accent/40 bg-accent-soft text-accent-text" : "border-border-strong text-fg-muted hover:border-fg-subtle",
+        )}
+      >
+        <Wrench className="size-3.5 shrink-0" />
+        <span className="whitespace-nowrap">{t(`ai.access.short.${access}`)}</span>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content align="start" side="top" sideOffset={8} collisionPadding={12} className={cn(popoverClass, "w-[min(92vw,400px)]")}>
+          <div className="font-semibold">{t("ai.access.title")}</div>
+          <p className="mt-0.5 text-xs leading-relaxed text-fg-muted">{t("ai.access.body")}</p>
+          <div role="radiogroup" aria-label={t("ai.access.title")} className="mt-3 flex flex-col gap-1.5">
+            {(["none", "schema", "data"] as AgentAccess[]).map((level) => (
+              <button
+                key={level}
+                type="button"
+                role="radio"
+                aria-checked={access === level}
+                data-agent-access-option={level}
+                onClick={() => useAgent.getState().setAccess(level)}
+                className={cn(
+                  "flex items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors",
+                  access === level ? "border-accent bg-accent-soft" : "border-border hover:border-fg-subtle",
+                )}
+              >
+                <span className={cn("mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-full border", access === level ? "border-accent" : "border-border-strong")}>
+                  {access === level && <span className="size-1.5 rounded-full bg-accent" />}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[13px] font-medium">{t(`ai.access.${level}.label`)}</span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-fg-muted">{t(`ai.access.${level}.body`)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          {access !== "none" && !scope.target && <p className="mt-3 rounded-lg bg-sunken px-3 py-2 text-xs text-fg-muted">{t("ai.access.noTab")}</p>}
+          {access === "data" && production && (
+            <p role="alert" className="mt-3 flex items-start gap-2 rounded-lg bg-danger-soft px-3 py-2 text-xs font-medium text-danger">
+              <TriangleAlert className="mt-px size-3.5 shrink-0" />
+              {t("ai.access.production")}
+            </p>
+          )}
+          {access !== "none" && provider === "codex" && <p className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn">{t("ai.access.codex")}</p>}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
 // ---- the chat ----------------------------------------------------------------------------
 
 export function AgentChat({ provider }: { provider: AiProvider }) {
   const { t } = useTranslation();
   const turns = useAgent((s) => s.turns);
   const running = useAgent((s) => s.running);
+  const access = useAgent((s) => s.access);
   const scope = useScope();
   const [draft, setDraft] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -486,10 +589,10 @@ export function AgentChat({ provider }: { provider: AiProvider }) {
                 </button>
               ))}
             </div>
-            <ul className="flex list-disc flex-col gap-1.5 rounded-xl bg-sunken py-3 pr-3 pl-7 text-xs leading-relaxed text-fg-muted">
-              <li>{t("ai.policy1")}</li>
-              <li>{t("ai.policy2")}</li>
-              <li>{t("ai.policy3")}</li>
+            <ul data-agent-policy className="flex list-disc flex-col gap-1.5 rounded-xl bg-sunken py-3 pr-3 pl-7 text-xs leading-relaxed text-fg-muted">
+              <li>{t(access === "none" ? "ai.policy1" : `ai.policyAccess.${access}`)}</li>
+              <li>{t(access === "none" ? "ai.policy2" : "ai.policyApprove")}</li>
+              <li>{t(access === "data" ? "ai.policyShareRows" : "ai.policy3")}</li>
             </ul>
           </div>
         ) : (
@@ -500,6 +603,7 @@ export function AgentChat({ provider }: { provider: AiProvider }) {
       <div className="shrink-0 border-t border-border p-2.5">
         <div className="flex items-center gap-1.5">
           <ContextButton scope={scope} />
+          <AccessButton scope={scope} provider={provider} />
           <ModelSelect provider={provider} disabled={running !== null} />
         </div>
         <div className="mt-2 flex items-end gap-1.5 rounded-xl border border-border-strong bg-surface p-1.5 focus-within:border-accent">

@@ -156,7 +156,7 @@
       "editing": "Excel-style editing with staged changes, plus Smart Paste: previewed INSERT / UPDATE / UPSERT from a spreadsheet, matched on a key",
       "sql": "SQL editor with completion and formatting, cancellable runs, history, and CSV / JSON / XLSX export",
       "sqlserver": "SQL Server and SSH tunnels",
-      "ai": "Claude Code and Codex agent with approval for every change",
+      "ai": "AI agent through your own Claude Code CLI (Codex not yet verified): it can look things up when you allow it, and every change waits for your approval",
       "backup": "Manual and scheduled backups"
     }
   },
@@ -314,7 +314,124 @@
     "contextSentTitle": "Sent with this message",
     "policy1": "The AI cannot touch your database: it has no tools here and only writes text.",
     "policy2": "SQL it suggests runs only when you open it in a query tab and run it yourself.",
-    "policy3": "Only schema names and types, and the active query, are shared. Never rows, hosts, user names or passwords."
+    "policy3": "Only schema names and types, and the active query, are shared. Never rows, hosts, user names or passwords.",
+    "policyAccess": {
+      "schema": "The AI can look at the structure of the database in front of you: tables, columns, types and keys. It cannot read rows.",
+      "data": "The AI can look at the structure of the database in front of you and run read-only queries on it."
+    },
+    "policyApprove": "It cannot change anything by itself. A change is a proposal: you read the SQL and decide, and PuriCat runs it only if you approve.",
+    "policyShareRows": "What it reads, rows included, is sent to the provider under your own account. Hosts, user names and passwords never are.",
+    "access": {
+      "hint": "What the AI may do with your database",
+      "title": "Database tools",
+      "body": "The AI can be given tools for the database of the tab in front. It can never change anything by itself: changes are proposals that you approve.",
+      "short": {
+        "none": "Off",
+        "schema": "Structure",
+        "data": "Rows"
+      },
+      "none": {
+        "label": "Off",
+        "body": "The AI only writes text. It sees what the context shares and looks at nothing itself."
+      },
+      "schema": {
+        "label": "Structure",
+        "body": "It can list tables and read their columns, types, defaults and keys, and propose changes for you to approve."
+      },
+      "data": {
+        "label": "Structure and rows",
+        "body": "It can also run read-only queries. The rows it reads are sent to the provider: at most 200 per query, in a read-only transaction."
+      },
+      "noTab": "Open a table or a query tab: the tools work on the database of the tab in front.",
+      "production": "The tab in front is a Production connection. Rows the AI reads from it are sent to the provider.",
+      "codex": "Not yet verified with Codex: its tool calls could not be tested on a working account. Claude Code is verified."
+    },
+    "tool": {
+      "list_schemas": "Listed the schemas",
+      "list_tables": "Listed the tables",
+      "describe_table": "Looked at the structure of",
+      "run_select": "Ran a read-only query",
+      "propose_sql": "Proposed a change",
+      "failed": {
+        "list_schemas": "Could not list the schemas",
+        "list_tables": "Could not list the tables",
+        "describe_table": "Could not read the structure of",
+        "run_select": "Read-only query failed",
+        "propose_sql": "Proposal not accepted",
+        "other": "Failed: {{name}}"
+      },
+      "asked": "What it asked",
+      "answered": "What the AI was given",
+      "answeredError": "The error the AI was given",
+      "running": "Running…",
+      "noAnswer": "It did not get an answer."
+    },
+    "proposal": {
+      "title": "Proposed change",
+      "state": {
+        "pending": "Needs your decision",
+        "running": "Running",
+        "done": "Done",
+        "blocked": "Rolled back",
+        "failed": "Failed",
+        "rejected": "Rejected",
+        "notRun": "Not run"
+      },
+      "review": "Review and run…",
+      "reject": "Reject",
+      "dontRun": "Don't run it",
+      "lift": "Run without the limit…",
+      "rejectedNote": "You rejected this. Nothing was run.",
+      "noTarget": "This was proposed without a database tab in front, so it cannot be run from here.",
+      "closed": "“{{name}}” is not connected. Connect to it to run this.",
+      "notRun": "Nothing was run: {{message}}",
+      "affected_one": "{{count}} row affected",
+      "affected_other": "{{count}} rows affected",
+      "ran": "Done",
+      "failedStatement": "Failed",
+      "heldBack_one": "Rolled back: it would have changed {{count}} row, more than this connection's limit.",
+      "heldBack_other": "Rolled back: it would have changed {{count}} rows, more than this connection's limit.",
+      "skipped_one": "{{count}} statement after it was not run.",
+      "skipped_other": "{{count}} statements after it were not run.",
+      "leftOpen": "The script left a transaction open. It was rolled back.",
+      "reviewTitle": "Run the AI's proposed change?",
+      "reviewBody": "Read the SQL. If you approve, PuriCat runs exactly this on the connection below. The AI does not run it.",
+      "runsOn": "Runs on",
+      "production": "This is a Production connection.",
+      "guardNote_one": "A statement that changes more than {{count}} row is rolled back, and you are asked again.",
+      "guardNote_other": "A statement that changes more than {{count}} rows is rolled back, and you are asked again.",
+      "orderNote": "Statements run one after another, each committed on its own. The first error stops the rest.",
+      "approve": "Approve and run",
+      "liftTitle": "Run it without the row limit?",
+      "liftBody_one": "This statement changes {{count}} row. It was rolled back because that is more than this connection's limit.",
+      "liftBody_other": "This statement changes {{count}} rows. It was rolled back because that is more than this connection's limit.",
+      "liftRest_one": "The {{count}} statement after it runs too, also without the row limit.",
+      "liftRest_other": "The {{count}} statements after it run too, also without the row limit.",
+      "liftRun": "Run anyway"
+    },
+    "log": {
+      "open": "AI activity log",
+      "title": "AI activity log",
+      "body": "Every query the AI ran to read rows, every change it proposed and what you decided. Kept on this computer only; password literals are masked.",
+      "empty": "Nothing yet",
+      "emptyBody": "When the AI reads rows or proposes a change, it is recorded here.",
+      "failed": "The log could not be read",
+      "deletedConnection": "(deleted connection)",
+      "clear": "Clear log",
+      "clearConfirm": "Delete every entry of the log? This cannot be undone.",
+      "count_one": "{{count}} entry",
+      "count_other": "{{count}} entries",
+      "event": {
+        "read": "Read rows",
+        "read_failed": "Read failed",
+        "proposed": "Proposed",
+        "approved": "Approved",
+        "rejected": "Rejected",
+        "executed": "Run",
+        "blocked": "Rolled back",
+        "failed": "Failed"
+      }
+    }
   },
   "status": {
     "ready": "Ready",

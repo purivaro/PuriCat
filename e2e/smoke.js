@@ -446,7 +446,8 @@
     await waitFor(() => {
       const menu = document.querySelector("[data-sql-history]");
       menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      return !menu;
+      // Closing counts: the exit animation does not always run when the window is covered.
+      return !menu || menu.dataset.state === "closed";
     }, "history closed");
 
     // exports are written by the backend from the full result
@@ -502,7 +503,7 @@
     await waitFor(() => {
       const preview = document.querySelector("[data-agent-context-preview]");
       preview?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      return !preview;
+      return !preview || preview.closest("[data-state]")?.dataset.state === "closed";
     }, "context closed");
 
     const ask = async (text) => {
@@ -524,6 +525,171 @@
     };
     if (answer.code !== "SELECT COUNT(*) AS orders\nFROM orders;" || answer.bold !== "อ่านอย่างเดียว") throw new Error(`answer rendered wrongly: ${JSON.stringify(answer)}`);
     await stage("agent-chat", { claude, claudeModels, contextLabel, contextPreview: contextPreview.slice(0, 500), answer });
+
+    // ---- database tools: the AI looks things up itself, and changes need approval --------
+    // The stand-in is a real MCP client: it starts the app's own bridge and calls the tools.
+    const accessButton = () => aiCard().querySelector("[data-agent-access]");
+    let accessShown = false;
+    const setAccess = async (level) => {
+      await click(accessButton(), "access");
+      await click(await waitFor(() => document.querySelector(`[data-agent-access-option="${level}"]`), "access options"), `access ${level}`);
+      if (level === "data" && !accessShown) {
+        accessShown = true;
+        await waitFor(() => document.querySelector('[data-agent-access-option="data"]')?.getAttribute("aria-checked") === "true", "access chosen");
+        const options = all("[data-agent-access-option]").map((o) => `${o.getAttribute("aria-checked") === "true" ? "●" : "○"} ${flat(o)}`);
+        if (options.length !== 3 || !options[2].startsWith("● Structure and rows")) throw new Error(`unexpected access options: ${options}`);
+        await stage("agent-access", { options, button: flat(accessButton()) });
+      }
+      await waitFor(() => {
+        const option = document.querySelector("[data-agent-access-option]");
+        option?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        return !option || option.closest("[data-state]")?.dataset.state === "closed";
+      }, "access closed");
+      await waitFor(() => accessButton().dataset.agentAccess === level, `access is ${level}`);
+    };
+    const accessDefault = accessButton().dataset.agentAccess;
+    if (accessDefault !== "none") throw new Error(`database tools are on by default: ${accessDefault}`);
+    await setAccess("data");
+
+    const pgId = (await invoke("list_connections")).find((c) => c.engine === "postgres").id;
+    const readOne = async (sql) => {
+      const outcome = await invoke("run_sql", { id: pgId, tab: "e2e-check", database: "puricat_e2e", sql, options: { maxRows: 10, changeLimit: null } });
+      return outcome.statements[0].results[0].rows[0][0];
+    };
+    const firstTotal = () => readOne("SELECT total_amount FROM shop.orders WHERE id = 1").then(Number);
+    const orderCount = () => readOne("SELECT COUNT(*) FROM shop.orders").then(Number);
+    const lastProposal = () => all("aside [data-agent-proposal]").at(-1);
+    const proposalIs = (state, what) => waitFor(() => lastProposal()?.dataset.state === state, what, 20000);
+
+    const totalBefore = await firstTotal();
+    await ask("ดูตาราง orders แล้วเสนอแก้ยอดของรายการแรกให้หน่อย");
+    await answered("done", "answer with tools");
+    const steps = [...lastAnswer().querySelectorAll("[data-agent-step]")].map((s) => `${s.dataset.agentStep}:${s.dataset.status}`);
+    if (steps.join() !== "list_tables:ok,describe_table:ok,run_select:ok,run_select:error") throw new Error(`unexpected tool steps: ${steps}`);
+    // every step opens to show exactly what the AI was given
+    await click(lastAnswer().querySelector('[data-agent-step="run_select"][data-status="ok"] button'), "open query step");
+    const rowsGiven = (await waitFor(() => lastAnswer().querySelector("[data-agent-step-output]"), "step output")).textContent;
+    if (!/^4 rows\. /.test(rowsGiven) || !rowsGiven.includes("Completed | ")) throw new Error(`unexpected query output: ${rowsGiven}`);
+    await click(lastAnswer().querySelector('[data-agent-step="run_select"][data-status="error"] button'), "open refused step");
+    const refusal = (await waitFor(() => lastAnswer().querySelector('[data-agent-step="run_select"][data-status="error"] [data-agent-step-output]'), "refusal")).textContent;
+    await proposalIs("pending", "a proposal that waits");
+    const proposed = { sql: lastProposal().querySelector("pre").textContent, card: flat(lastProposal()), answer: flat(lastAnswer()).slice(-90) };
+    if ((await firstTotal()) !== totalBefore) throw new Error("the proposal ran before it was approved");
+    await stage("agent-tools", { accessDefault, steps, rowsGiven: rowsGiven.slice(0, 160), refusal, proposed });
+
+    // approving is a second, deliberate step: the whole SQL and where it runs
+    await click(withText("aside [data-agent-proposal] button", "Review and run"), "review");
+    const reviewDialog = flat(await waitFor(() => document.querySelector("[data-agent-review]"), "review dialog"));
+    await stage("agent-review", { reviewDialog });
+    await click(exact("[data-agent-review] button", "Approve and run"), "approve");
+    await proposalIs("done", "proposal run");
+    const approved = { card: flat(lastProposal().querySelector("[data-agent-outcome]")), total: await firstTotal() };
+    if (Math.abs(approved.total - totalBefore - 1) > 0.001) throw new Error(`approval did not change the row as proposed: ${totalBefore} -> ${approved.total}`);
+
+    // a proposal that touches more rows than the connection's limit is rolled back, and can be left
+    await ask("ลบคำสั่งซื้อทั้งหมดเลย");
+    await answered("done", "second answer with tools");
+    await proposalIs("pending", "delete proposal");
+    const warned = flat(lastProposal());
+    await click(withText("aside [data-agent-proposal][data-state=pending] button", "Review and run"), "review delete");
+    await click(exact("[data-agent-review] button", "Approve and run"), "approve delete");
+    await proposalIs("blocked", "delete held back");
+    const held = { card: flat(lastProposal().querySelector("[data-agent-outcome]")), orders: await orderCount() };
+    if (held.orders !== 1250) throw new Error(`the row limit did not hold: ${held.orders} orders left`);
+    await stage("agent-held", { warned: warned.slice(0, 200), held });
+    await click(exact("aside [data-agent-proposal][data-state=blocked] button", "Don't run it"), "leave it");
+    await proposalIs("rejected", "delete not run");
+
+    // what the limit held back runs after a third, separate confirmation that shows all of it:
+    // the held statement and the one after it. The statement that ran before is not run again.
+    const secondTotal = () => readOne("SELECT total_amount FROM shop.orders WHERE id = 2").then(Number);
+    const thirdTotal = () => readOne("SELECT total_amount FROM shop.orders WHERE id = 3").then(Number);
+    const secondBefore = await secondTotal();
+    const thirdBefore = await thirdTotal();
+    await ask("แก้หลายแถวพร้อมกัน");
+    await answered("done", "answer with a wide update");
+    await proposalIs("pending", "wide proposal");
+    await click(withText("aside [data-agent-proposal][data-state=pending] button", "Review and run"), "review wide");
+    await click(exact("[data-agent-review] button", "Approve and run"), "approve wide");
+    await proposalIs("blocked", "wide update held back");
+    const partly = { card: flat(lastProposal().querySelector("[data-agent-outcome]")), total: await secondTotal(), third: await thirdTotal() };
+    if (Math.abs(partly.total - secondBefore - 1) > 0.001) throw new Error(`the statement before the limit did not run once: ${secondBefore} -> ${partly.total}`);
+    if (partly.third !== thirdBefore) throw new Error(`a statement after the held one ran: ${thirdBefore} -> ${partly.third}`);
+    await click(withText("aside [data-agent-proposal][data-state=blocked] button", "Run without the limit"), "lift");
+    const liftButton = await waitFor(() => exact("[data-agent-review] button", "Run anyway"), "lift dialog");
+    const liftDialog = flat(document.querySelector("[data-agent-review]"));
+    const liftSql = document.querySelector("[data-agent-review] pre").textContent;
+    // the dialog shows exactly what will run, and says that the statement after it runs too
+    if (liftSql !== "UPDATE shop.orders SET meta = meta WHERE id <= 20;\nUPDATE shop.orders SET total_amount = total_amount + 1 WHERE id = 3" || !document.querySelector("[data-agent-lift-rest]")) {
+      throw new Error(`the confirmation does not show everything that will run: ${liftDialog}`);
+    }
+    await stage("agent-lift", { partly, liftDialog });
+    await click(liftButton, "run anyway");
+    await proposalIs("done", "wide update run");
+    const lifted = { card: flat(lastProposal().querySelector("[data-agent-outcome]")), total: await secondTotal(), third: await thirdTotal() };
+    const outcomes = all("aside [data-agent-proposal]").at(-1).querySelectorAll("[data-agent-outcome] > li").length;
+    if (lifted.total !== partly.total || Math.abs(lifted.third - thirdBefore - 1) > 0.001 || outcomes !== 3 || !lifted.card.includes("20 rows affected")) {
+      throw new Error(`running what was held back went wrong: ${JSON.stringify(lifted)}`);
+    }
+
+    // MySQL, at the "Structure" level: the AI can look at tables but there is no query tool,
+    // and an approved proposal runs on that connection
+    const mysqlId = (await invoke("list_connections")).find((c) => c.engine === "mysql").id;
+    const mysqlTotal = async () => {
+      const outcome = await invoke("run_sql", { id: mysqlId, tab: "e2e-check-mysql", database: "puricat_e2e", sql: "SELECT total_amount FROM orders WHERE id = 1", options: { maxRows: 10, changeLimit: null } });
+      return Number(outcome.statements[0].results[0].rows[0][0]);
+    };
+    const contextButton = () => aiCard().querySelector("[data-agent-context]").textContent.trim();
+    await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("customers") && x.textContent.includes("Demo MySQL")), "mysql tab");
+    await waitFor(() => contextButton().startsWith("Demo MySQL"), "mysql context");
+    await setAccess("schema");
+    const mysqlBefore = await mysqlTotal();
+    await ask("ดูโครงสร้างแล้วเสนอแก้ยอดของรายการแรก");
+    await answered("done", "answer on mysql");
+    const mysqlSteps = [...lastAnswer().querySelectorAll("[data-agent-step]")].map((s) => `${s.dataset.agentStep}:${s.dataset.status}`);
+    // no query step: at this level the reading tool is not offered at all
+    if (mysqlSteps.join() !== "list_tables:ok,describe_table:ok") throw new Error(`unexpected tool steps on mysql: ${mysqlSteps}`);
+    await click(lastAnswer().querySelector('[data-agent-step="describe_table"] button'), "open structure step");
+    const structureGiven = (await waitFor(() => lastAnswer().querySelector("[data-agent-step-output]"), "structure output")).textContent;
+    if (!/^orders\b/.test(structureGiven) || !structureGiven.includes("total_amount decimal(14,2) NOT NULL")) throw new Error(`unexpected structure: ${structureGiven}`);
+    await proposalIs("pending", "mysql proposal");
+    await click(withText("aside [data-agent-proposal][data-state=pending] button", "Review and run"), "review mysql");
+    const mysqlReview = flat(await waitFor(() => document.querySelector("[data-agent-review]"), "mysql review"));
+    if (!mysqlReview.includes("Runs onDemo MySQL")) throw new Error(`the review names the wrong connection: ${mysqlReview}`);
+    await click(exact("[data-agent-review] button", "Approve and run"), "approve mysql");
+    await proposalIs("done", "mysql proposal run");
+    const mysqlAfter = await mysqlTotal();
+    if (Math.abs(mysqlAfter - mysqlBefore - 1) > 0.001) throw new Error(`the MySQL proposal did not change the row as proposed: ${mysqlBefore} -> ${mysqlAfter}`);
+    await invoke("close_console", { tab: "e2e-check-mysql" });
+    await stage("agent-mysql", { context: contextButton(), mysqlSteps, structureGiven: structureGiven.slice(0, 200), mysqlReview: mysqlReview.slice(0, 160), total: [mysqlBefore, mysqlAfter] });
+    await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("orders") && x.textContent.includes("Demo Postgr")), "back to postgres");
+    await waitFor(() => contextButton().startsWith("Demo PostgreSQL"), "postgres context");
+    await setAccess("data");
+
+    // rejecting runs nothing
+    await ask("เสนอแก้ยอดอีกครั้ง");
+    await answered("done", "third answer with tools");
+    await proposalIs("pending", "third proposal");
+    await click(exact("aside [data-agent-proposal][data-state=pending] button", "Reject"), "reject");
+    await proposalIs("rejected", "rejected");
+    const rejected = { badge: flat(lastProposal().querySelector("[data-agent-proposal-state]")), total: await firstTotal(), orders: await orderCount() };
+    if (rejected.total !== approved.total || rejected.orders !== 1250) throw new Error(`a rejected proposal changed data: ${JSON.stringify(rejected)}`);
+    await invoke("close_console", { tab: "e2e-check" });
+
+    // everything the AI read or proposed, and what was decided, is in the activity log
+    await click(aiCard().querySelector('button[aria-label="AI activity log"]'), "activity log");
+    await waitFor(() => document.querySelector("[data-agent-log-entry]"), "log entries", 20000);
+    const logged = all("[data-agent-log-entry]").map((e) => e.dataset.agentLogEntry).reverse();
+    for (const event of ["read", "read_failed", "proposed", "approved", "executed", "blocked", "rejected"]) {
+      if (!logged.includes(event)) throw new Error(`the activity log has no "${event}" entry: ${logged}`);
+    }
+    await stage("agent-log", { logged, approved, lifted, rejected });
+    await click(document.querySelector('[data-agent-log] button[aria-label="Close"]'), "close log");
+    await waitFor(() => {
+      const dialogEl = document.querySelector("[data-agent-log]");
+      return !dialogEl || dialogEl.dataset.state === "closed";
+    }, "log closed");
+    await setAccess("none");
 
     // SQL from an answer opens in a new query tab on that connection; it is not run
     const tabsBefore = all('[role="tablist"] [role="tab"]').length;
