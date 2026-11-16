@@ -184,7 +184,7 @@ impl MySqlSession {
                 nullable: text(r, 3)?.as_deref() == Some("YES"),
                 default: text(r, 4)?,
                 primary_key: primary_key.contains(&name),
-                generated: extra.contains("auto_increment") || extra.contains("generated"),
+                generated: is_generated(&extra),
                 data_type: column_type,
                 name,
             });
@@ -285,6 +285,14 @@ fn page_sql(table: &TableRef, meta: &TableMeta, order: &Order) -> Result<String>
     Ok(sql)
 }
 
+/// `EXTRA` also says `DEFAULT_GENERATED` for plain expression defaults such as
+/// `DEFAULT CURRENT_TIMESTAMP`; those columns are still writable.
+fn is_generated(extra: &str) -> bool {
+    extra.contains("auto_increment")
+        || extra.contains("stored generated")
+        || extra.contains("virtual generated")
+}
+
 fn value_kind(data_type: &str, column_type: &str) -> ValueKind {
     if column_type.eq_ignore_ascii_case("tinyint(1)") {
         return ValueKind::Bool;
@@ -355,6 +363,18 @@ mod tests {
              HEX(LEFT(`photo`, 25)), CAST(`flags` + 0 AS CHAR), LEFT(ST_AsText(`area`), 1001) \
              FROM `shop`.`items` ORDER BY `id` DESC LIMIT ? OFFSET ?"
         );
+    }
+
+    #[test]
+    fn default_expressions_are_not_generated_columns() {
+        assert!(is_generated("auto_increment"));
+        assert!(is_generated("stored generated"));
+        assert!(is_generated("virtual generated"));
+        assert!(!is_generated("default_generated"));
+        assert!(!is_generated(
+            "default_generated on update current_timestamp"
+        ));
+        assert!(!is_generated(""));
     }
 
     #[test]

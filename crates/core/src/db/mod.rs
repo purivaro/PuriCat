@@ -142,6 +142,10 @@ pub struct RowPage {
     pub truncated: Vec<[u32; 2]>,
     pub offset: u64,
     pub has_more: bool,
+    /// Primary key columns in key order. Empty when the table has none.
+    pub primary_key: Vec<String>,
+    /// Planner statistics, not an exact count.
+    pub estimated_rows: Option<i64>,
     /// Columns the page is ordered by. Empty means the server's arbitrary order.
     pub ordered_by: Vec<String>,
     pub elapsed_ms: u64,
@@ -350,6 +354,8 @@ fn finish_page(
         columns: meta.columns,
         rows,
         truncated,
+        primary_key: meta.primary_key,
+        estimated_rows: meta.estimated_rows,
         offset: req.offset,
         has_more,
         ordered_by: order.into_iter().map(|(c, _)| c).collect(),

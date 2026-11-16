@@ -40,6 +40,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ -z "${APP:-}" ] && lsof -ti tcp:1420 >/dev/null 2>&1; then
+  echo "✗ port 1420 is already in use; stop the other dev server first" >&2
+  exit 1
+fi
+
 # APP=<binary> tests a bundled debug build (`pnpm tauri build --debug`): embedded assets and the
 # production Content-Security-Policy instead of the Vite dev server.
 cd "$ROOT"

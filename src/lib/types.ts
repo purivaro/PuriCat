@@ -78,12 +78,6 @@ export interface ColumnMeta {
   generated: boolean;
 }
 
-export interface TableMeta {
-  columns: ColumnMeta[];
-  primaryKey: string[];
-  estimatedRows: number | null;
-}
-
 export interface SortSpec {
   column: string;
   descending: boolean;
@@ -93,6 +87,8 @@ export interface RowPage {
   columns: ColumnMeta[];
   rows: (string | null)[][];
   truncated: [number, number][];
+  primaryKey: string[];
+  estimatedRows: number | null;
   offset: number;
   hasMore: boolean;
   orderedBy: string[];

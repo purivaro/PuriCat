@@ -6,9 +6,7 @@
 use std::collections::HashMap;
 
 use puricat_core::ai_detect::{self, CliStatus};
-use puricat_core::db::{
-    DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta, TableRef,
-};
+use puricat_core::db::{DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableRef};
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
 use puricat_core::{Error, Result};
@@ -221,15 +219,6 @@ pub async fn list_objects(
         .await?
         .list_objects(&database, schema.as_deref())
         .await
-}
-
-#[tauri::command]
-pub async fn describe_table(
-    state: State<'_, AppState>,
-    id: String,
-    table: TableRef,
-) -> Result<TableMeta> {
-    state.session(&id).await?.describe_table(&table).await
 }
 
 #[tauri::command]

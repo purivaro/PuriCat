@@ -28,7 +28,6 @@ pub fn run() {
             commands::list_databases,
             commands::list_schemas,
             commands::list_objects,
-            commands::describe_table,
             commands::fetch_rows,
             commands::get_settings,
             commands::set_setting,

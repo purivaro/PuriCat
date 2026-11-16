@@ -273,6 +273,16 @@ async fn mysql_body(t: Target, db: String) {
         session.describe_table(&pairs).await.unwrap().primary_key,
         vec!["b", "a"]
     );
+    // Views are readable through the same path.
+    let view = TableRef {
+        name: "v_items".into(),
+        ..items.clone()
+    };
+    let v = session.fetch_rows(&view, &page(0, 10, None)).await.unwrap();
+    assert_eq!(v.rows.len(), 3);
+    assert!(v.primary_key.is_empty() && p.primary_key == vec!["id"]);
+    // An expression default is not a server-generated column.
+    assert!(!col("flag").generated && col("flag").default.as_deref() == Some("0"));
     let odd = TableRef {
         name: "odd `name".into(),
         ..items.clone()

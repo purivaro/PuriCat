@@ -18,7 +18,7 @@ import { EngineTag, EnvBadge } from "../../components/Brand";
 import { Button, IconButton, Segmented, Spinner, StateMessage, Tooltip } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
-import type { RowPage, SortSpec, TableMeta } from "../../lib/types";
+import type { RowPage, SortSpec } from "../../lib/types";
 import { sessionOf, useConnections } from "../../stores/connections";
 import type { TableTab } from "../../stores/workspace";
 import { DataGrid } from "./DataGrid";
@@ -42,7 +42,6 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<SortSpec | null>(null);
   const [page, setPage] = useState<RowPage | null>(null);
-  const [meta, setMeta] = useState<TableMeta | null>(null);
   const [load, setLoad] = useState<Load>({ status: "idle" });
   const [reloads, setReloads] = useState(0);
   const request = useRef(0);
@@ -54,14 +53,11 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     if (!wanted) return;
     const id = ++request.current;
     setLoad({ status: "loading" });
-    Promise.all([
-      ipc.fetchRows(tab.connectionId, tab.table, { offset, limit, sort }),
-      ipc.describeTable(tab.connectionId, tab.table),
-    ])
-      .then(([rows, described]) => {
+    ipc
+      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort })
+      .then((rows) => {
         if (id !== request.current) return; // a newer request superseded this one
         setPage(rows);
-        setMeta(described);
         setLoad({ status: "ready" });
       })
       .catch((e: unknown) => {
@@ -76,7 +72,6 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     if (!connected) {
       request.current++;
       setPage(null);
-      setMeta(null);
       setLoad({ status: "idle" });
     }
   }, [connected]);
@@ -188,7 +183,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
             <Spinner /> {t("common.loading")}
           </div>
         ) : view === "structure" ? (
-          <Structure page={page} meta={meta} />
+          <Structure page={page} />
         ) : (
           <>
             <DataGrid page={page} sort={sort} onSort={changeSort} />
@@ -225,8 +220,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
                       to: number.format(page.offset + page.rows.length),
                     })}
               </span>
-              {meta?.estimatedRows != null && (
-                <span className="shrink-0">· {t("table.estimated", { total: number.format(meta.estimatedRows) })}</span>
+              {page.estimatedRows != null && (
+                <span className="shrink-0">· {t("table.estimated", { total: number.format(page.estimatedRows) })}</span>
               )}
               <span className="shrink-0 tabular-nums">· {t("table.elapsed", { ms: page.elapsedMs })}</span>
               {page.orderedBy.length > 0 ? (
@@ -274,9 +269,9 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   );
 }
 
-function Structure({ page, meta }: { page: RowPage; meta: TableMeta | null }) {
+function Structure({ page }: { page: RowPage }) {
   const { t } = useTranslation();
-  const columns = meta?.columns ?? page.columns;
+  const columns = page.columns;
   const th = "sticky top-0 z-10 border-b border-border bg-sunken px-3 py-2 text-left text-xs font-semibold";
   const td = "border-b border-border px-3 py-1.5 align-top";
   return (

@@ -11,7 +11,6 @@ import type {
   RowPage,
   ServerInfo,
   SortSpec,
-  TableMeta,
   TableRef,
 } from "./types";
 
@@ -40,7 +39,6 @@ export const ipc = {
   listSchemas: (id: string, database: string) => invoke<Namespace[]>("list_schemas", { id, database }),
   listObjects: (id: string, database: string, schema: string | null) =>
     invoke<DbObject[]>("list_objects", { id, database, schema }),
-  describeTable: (id: string, table: TableRef) => invoke<TableMeta>("describe_table", { id, table }),
   fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null }) =>
     invoke<RowPage>("fetch_rows", { id, table, page }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
