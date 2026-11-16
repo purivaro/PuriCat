@@ -6,12 +6,17 @@
 use std::collections::HashMap;
 
 use puricat_core::ai_detect::{self, CliStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use puricat_core::db::smart::{Analysis, Counts, PasteRequest, UniqueKey};
 use puricat_core::db::write::{ApplyResult, ChangeSet, Statement};
 use puricat_core::db::{DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableRef};
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
 use puricat_core::{Error, Result};
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::state::AppState;
@@ -267,6 +272,76 @@ pub async fn apply_changes(
         .await?
         .apply_changes(&table, &changes)
         .await
+}
+
+/// Keys a pasted row can be matched on (primary key first, then unique indexes).
+#[tauri::command]
+pub async fn unique_keys(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+) -> Result<Vec<UniqueKey>> {
+    state.session(&id).await?.unique_keys(&table).await
+}
+
+/// Smart Paste preview: what running it would do, row by row. Reads only.
+#[tauri::command]
+pub async fn analyze_paste(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    request: PasteRequest,
+) -> Result<Analysis> {
+    state
+        .session(&id)
+        .await?
+        .analyze_paste(&table, &request)
+        .await
+}
+
+/// Smart Paste run. `expected` is the outcome the user approved in the preview; if a fresh
+/// analysis disagrees, nothing runs. Progress is streamed; `cancel_job` rolls it back.
+#[tauri::command]
+pub async fn apply_paste(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    request: PasteRequest,
+    expected: Counts,
+    job: String,
+    on_progress: Channel<u32>,
+) -> Result<ApplyResult> {
+    if state.store.get_connection(&id).await?.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to edit data.".into(),
+        ));
+    }
+    let session = state.session(&id).await?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    state
+        .jobs
+        .lock()
+        .unwrap()
+        .insert(job.clone(), cancelled.clone());
+    let keep_going = move |done: usize| {
+        if done % 20 == 0 {
+            let _ = on_progress.send(done as u32);
+        }
+        !cancelled.load(Ordering::Relaxed)
+    };
+    let result = session
+        .apply_paste(&table, &request, &expected, &keep_going)
+        .await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
+}
+
+/// Ask a running job to stop. It rolls back at the next statement boundary.
+#[tauri::command]
+pub fn cancel_job(state: State<'_, AppState>, job: String) {
+    if let Some(flag) = state.jobs.lock().unwrap().get(&job) {
+        flag.store(true, Ordering::Relaxed);
+    }
 }
 
 #[tauri::command]

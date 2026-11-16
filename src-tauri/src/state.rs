@@ -13,6 +13,8 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     /// Open sessions by connection id.
     sessions: RwLock<HashMap<String, Arc<Session>>>,
+    /// Cancel flags of running long jobs, by job id.
+    pub jobs: std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 impl AppState {
@@ -21,6 +23,7 @@ impl AppState {
             store: Store::open(&data_dir.join("puricat.db")).await?,
             secrets: secret_store(),
             sessions: RwLock::new(HashMap::new()),
+            jobs: Default::default(),
         })
     }
 

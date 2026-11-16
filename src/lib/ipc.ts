@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AppError,
@@ -9,12 +9,16 @@ import type {
   ConnectionView,
   DbObject,
   Namespace,
+  PasteAnalysis,
+  PasteCounts,
+  PasteRequest,
   PasswordChange,
   RowPage,
   ServerInfo,
   SortSpec,
   Statement,
   TableRef,
+  UniqueKey,
 } from "./types";
 
 /** Backend errors arrive as `{ kind, message }`; anything else is normalised to that shape. */
@@ -48,6 +52,23 @@ export const ipc = {
     invoke<Statement[]>("plan_changes", { id, table, changes }),
   applyChanges: (id: string, table: TableRef, changes: ChangeSet) =>
     invoke<ApplyResult>("apply_changes", { id, table, changes }),
+  uniqueKeys: (id: string, table: TableRef) => invoke<UniqueKey[]>("unique_keys", { id, table }),
+  analyzePaste: (id: string, table: TableRef, request: PasteRequest) =>
+    invoke<PasteAnalysis>("analyze_paste", { id, table, request }),
+  /** Runs a previewed paste. `onProgress` receives the number of statements done so far. */
+  applyPaste: (
+    id: string,
+    table: TableRef,
+    request: PasteRequest,
+    expected: PasteCounts,
+    job: string,
+    onProgress: (done: number) => void,
+  ) => {
+    const channel = new Channel<number>();
+    channel.onmessage = onProgress;
+    return invoke<ApplyResult>("apply_paste", { id, table, request, expected, job, onProgress: channel });
+  },
+  cancelJob: (job: string) => invoke<void>("cancel_job", { job }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),

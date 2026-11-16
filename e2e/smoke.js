@@ -289,6 +289,62 @@
     await waitFor(() => document.querySelector(`${panelSel} h1`)?.textContent === "order_totals" && editState(), "view");
     log.push({ stage: "read-only-objects", keyless, view: editState() });
 
+    // 8b. Smart Paste (MySQL): upsert on the unique order number, with a header row
+    await click(treeRow("orders"), "mysql orders for smart paste");
+    await waitFor(() => document.querySelector(`${panelSel} h1`)?.textContent === "orders" && editState() === "editable", "orders tab");
+    await invoke("plugin:clipboard-manager|write_text", {
+      text: [
+        "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\tremark",
+        "SO-10001\tCompleted\t999.99\t3\t2026-01-10 12:41:31\tignored",
+        "SO-10002\tPending\t278.38\t5\t2026-01-10 14:58:31\tignored",
+        "SO-99001\tPending\t10\t1\t2026-11-16 09:00:00\tignored",
+        "SO-99002\tPending\tlots\t1\t2026-11-16 09:05:00\tignored",
+        "\t\t\t\t\t",
+      ].join("\r\n") + "\r\n",
+    });
+    const smart = () => document.querySelector("[data-smart-paste]");
+    const smartButton = (label) => all("[data-smart-paste] button").find((b) => b.textContent.trim().startsWith(label));
+    const smartCounts = () => Object.fromEntries(all("[data-smart-count]").map((e) => [e.dataset.smartCount, Number(e.querySelector("b").textContent)]));
+    const smartRows = () => all("[data-smart-preview] tbody tr").map((tr) => [...tr.children].map((td) => td.textContent.trim()).join(" | "));
+
+    await click(panelButton("Smart Paste…"), "open smart paste");
+    await waitFor(() => document.querySelector("[data-smart-source]"), "clipboard parsed");
+    const smartSetup = {
+      source: document.querySelector("[data-smart-source]").textContent.trim(),
+      headersDetected: all('[data-smart-paste] input[type="checkbox"]')[0].checked,
+      mapping: all('[data-smart-paste] select[aria-label^="Table column"]').map((el) => el.value),
+      key: document.querySelector("[data-smart-key]").selectedOptions[0]?.textContent,
+    };
+    await click(smartButton("Preview"), "preview");
+    await waitFor(() => document.querySelector("[data-smart-preview]"), "preview result", 15000);
+    const badPreview = { counts: smartCounts(), rows: smartRows() };
+    if (!smartButton("Run").disabled) throw new Error("Run must be disabled while a row has a problem");
+    await stage("smart-paste-problem", { smartSetup, badPreview });
+
+    // fix the source and read the clipboard again
+    await invoke("plugin:clipboard-manager|write_text", {
+      text:
+        "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\r\n" +
+        "SO-10001\tCompleted\t999.99\t3\t2026-01-10 12:41:31\r\n" +
+        "SO-10002\tPending\t278.38\t5\t2026-01-10 14:58:31\r\n" +
+        "SO-99001\tPending\t10\t1\t2026-11-16 09:00:00\r\n",
+    });
+    await click(smartButton("Read clipboard"), "re-read clipboard");
+    await sleep(300);
+    await click(smartButton("Preview"), "preview again");
+    await waitFor(() => smartCounts().problems === 0 && smartCounts().insert === 1, "clean preview", 15000);
+    const goodPreview = { counts: smartCounts(), rows: smartRows() };
+    await stage("smart-paste-preview", { goodPreview });
+    await click(smartButton("Run"), "run smart paste");
+    await waitFor(() => !smart(), "smart paste finished", 20000);
+    // this tab was left sorted and on page 2: sort by id to find the rows that were touched
+    const idHeader = () => all(`${panelSel} [role="columnheader"] button`).find((b) => b.textContent.trim() === "id");
+    await click(idHeader(), "sort id ascending");
+    await waitFor(() => cellText(0, 1) === "SO-10001" && cellText(0, 4) === "Completed" && cellText(0, 5) === "999.99", "updated row visible");
+    await click(idHeader(), "sort id descending");
+    await waitFor(() => cellText(0, 1) === "SO-99001", "inserted row visible");
+    log.push({ stage: "smart-paste-done", updated: ["Completed", "999.99"], inserted: [cellText(0, 1), cellText(0, 4), cellText(0, 5)] });
+
     // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
     await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
     await waitFor(() => cellText(0, 1) === "SO-10001" && editState() === "editable", "postgres orders tab");

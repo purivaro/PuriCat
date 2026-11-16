@@ -122,6 +122,47 @@ export interface ApplyResult {
   elapsedMs: number;
 }
 
+export type PasteMode = "insert" | "update" | "upsert";
+
+export interface PasteRequest {
+  mode: PasteMode;
+  columns: string[];
+  key: string[];
+  update: string[];
+  rows: (string | null)[][];
+}
+
+export interface UniqueKey {
+  name: string;
+  columns: string[];
+  primary: boolean;
+}
+
+export type PasteRowStatus =
+  | "insert"
+  | "update"
+  | "unchanged"
+  | "unmatched"
+  | "missing_key"
+  | "duplicate"
+  | "exists"
+  | "invalid";
+
+export interface PasteCounts {
+  insert: number;
+  update: number;
+  unchanged: number;
+  unmatched: number;
+  problems: number;
+}
+
+export interface PasteAnalysis {
+  rows: { status: PasteRowStatus; message: string | null; changed: string[] }[];
+  counts: PasteCounts;
+  problems: string[];
+  elapsedMs: number;
+}
+
 export type AiProvider = "claude" | "codex";
 
 export interface CliStatus {

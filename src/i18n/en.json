@@ -153,12 +153,11 @@
       "browse": "Explore databases, schemas, tables and views across several servers at once",
       "grid": "Fast virtualized data grid with sorting, paging and exact server-side values",
       "themes": "Light and dark themes, English and Thai",
-      "editing": "Excel-style editing: range selection, typing, paste from a spreadsheet, undo, and a reviewed, transactional save",
+      "editing": "Excel-style editing with staged changes, plus Smart Paste: previewed INSERT / UPDATE / UPSERT from a spreadsheet, matched on a key",
       "sql": "SQL editor, history and export",
       "sqlserver": "SQL Server and SSH tunnels",
       "ai": "Claude Code and Codex agent with approval for every change",
-      "backup": "Manual and scheduled backups",
-      "smartPaste": "Smart Paste wizard: guided INSERT / UPDATE / UPSERT with key matching"
+      "backup": "Manual and scheduled backups"
     }
   },
   "table": {
@@ -309,5 +308,75 @@
     "body": "This tab has edits that have not been saved to the database.",
     "keep": "Keep editing",
     "discard": "Discard and close"
+  },
+  "smart": {
+    "open": "Smart Paste…",
+    "openHint": "Insert, update or upsert rows pasted from a spreadsheet",
+    "title": "Smart Paste into {{name}}",
+    "emptyTitle": "Nothing to paste yet",
+    "emptyBody": "Copy a range of cells in Excel, Google Sheets or Numbers, then press “Read clipboard”.",
+    "reread": "Read clipboard",
+    "source": "{{rows}} data rows · {{columns}} columns from the clipboard",
+    "blankRows_one": "{{count}} empty row ignored",
+    "blankRows_other": "{{count}} empty rows ignored",
+    "headers": "First row contains column names",
+    "nullText": "Read the text NULL as an empty (NULL) value",
+    "mode": {
+      "insert": "Insert",
+      "update": "Update",
+      "upsert": "Upsert"
+    },
+    "modeHint": {
+      "insert": "Add every pasted row as a new row.",
+      "update": "Change rows that already exist. Pasted rows without a match are skipped.",
+      "upsert": "Change rows that already exist and add the rest as new rows."
+    },
+    "columns": "Columns",
+    "pastedColumn": "Pasted column",
+    "tableColumn": "Table column",
+    "skip": "— skip —",
+    "matchOnly": "match only",
+    "updateIt": "Update",
+    "column": "Column {{letter}}",
+    "key": "Match rows by",
+    "keyNone": "Do not check for existing rows",
+    "keyPrimary": "Primary key ({{columns}})",
+    "keyUnique": "Unique index ({{columns}})",
+    "noKey": "To match existing rows, map every column of the primary key or of a unique index.",
+    "generatedKey": "Rows with an empty key are added as new rows; rows whose key is not found are skipped.",
+    "semantics": "PuriCat matches the rows itself, then runs plain INSERT and UPDATE statements in one transaction. It does not use ON DUPLICATE KEY UPDATE, ON CONFLICT or MERGE, so only the key chosen here decides which row is the same.",
+    "preview": "Preview",
+    "previewing": "Checking…",
+    "stale": "The set-up changed. Preview again before running.",
+    "count": {
+      "insert": "to insert",
+      "update": "to update",
+      "unchanged": "already identical",
+      "unmatched": "no match, skipped",
+      "problems": "with problems"
+    },
+    "status": {
+      "insert": "Insert",
+      "update": "Update",
+      "unchanged": "Same",
+      "unmatched": "No match",
+      "missing_key": "No key",
+      "duplicate": "Duplicate",
+      "exists": "Exists",
+      "invalid": "Invalid"
+    },
+    "row": "Row",
+    "result": "Result",
+    "detail": "Detail",
+    "changes": "changes {{columns}}",
+    "rowsShown": "Showing the first {{shown}} of {{total}} rows. All of them are checked.",
+    "run": "Run",
+    "runProd": "Run on production",
+    "running": "{{done}} of {{total}} statements…",
+    "stop": "Stop and roll back",
+    "fixFirst": "Fix the rows marked in red in the spreadsheet, copy again and re-read the clipboard.",
+    "nothing": "Nothing to do: no pasted row would be inserted or changed.",
+    "done": "Smart Paste: {{inserted}} inserted · {{updated}} updated",
+    "previewFirst": "Preview first"
   }
 }

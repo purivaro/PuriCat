@@ -112,7 +112,7 @@ impl Params {
     }
 }
 
-fn quote(engine: Engine, name: &str) -> Result<String> {
+pub(crate) fn quote(engine: Engine, name: &str) -> Result<String> {
     match engine {
         Engine::Mysql => ident::mysql(name),
         Engine::Postgres => ident::postgres(name),
@@ -120,7 +120,7 @@ fn quote(engine: Engine, name: &str) -> Result<String> {
     }
 }
 
-fn table_name(engine: Engine, table: &TableRef) -> Result<String> {
+pub(crate) fn table_name(engine: Engine, table: &TableRef) -> Result<String> {
     let parent = match engine {
         Engine::Postgres => super::require_schema(table.schema.as_deref())?,
         _ => &table.database,
@@ -147,7 +147,7 @@ fn value_expr(engine: Engine, col: &ColumnMeta, placeholder: &str) -> String {
 
 /// A key value in WHERE. Typed, so the primary-key index is used and 64-bit integers
 /// are never compared as floating point.
-fn key_expr(engine: Engine, col: &ColumnMeta, placeholder: &str) -> String {
+pub(crate) fn key_expr(engine: Engine, col: &ColumnMeta, placeholder: &str) -> String {
     if engine == Engine::Postgres {
         return format!("{placeholder}::{}", col.base_type);
     }
@@ -162,6 +162,15 @@ fn key_expr(engine: Engine, col: &ColumnMeta, placeholder: &str) -> String {
         }
         "decimal" => format!("CAST({placeholder} AS DECIMAL(65,30))"),
         _ => placeholder.to_string(),
+    }
+}
+
+/// The server-side text rendering of a column: what the grid shows and compares.
+pub(crate) fn rendered(engine: Engine, col: &ColumnMeta, quoted: &str) -> String {
+    match engine {
+        Engine::Postgres => format!("{quoted}::text"),
+        _ if col.base_type == "bit" => format!("CAST({quoted} + 0 AS CHAR)"),
+        _ => format!("CAST({quoted} AS CHAR)"),
     }
 }
 
@@ -181,7 +190,7 @@ fn unchanged_expr(engine: Engine, col: &ColumnMeta, quoted: &str, placeholder: &
     }
 }
 
-fn column<'a>(meta: &'a TableMeta, name: &str) -> Result<&'a ColumnMeta> {
+pub(crate) fn column<'a>(meta: &'a TableMeta, name: &str) -> Result<&'a ColumnMeta> {
     meta.columns
         .iter()
         .find(|c| c.name == name)
@@ -212,17 +221,18 @@ fn no_duplicates<'a>(names: impl Iterator<Item = &'a str>) -> Result<()> {
 fn key_clause(
     engine: Engine,
     meta: &TableMeta,
+    key_columns: &[String],
     key: &[CellValue],
     params: &mut Params,
 ) -> Result<(String, String)> {
-    if key.len() != meta.primary_key.len() {
+    if key.len() != key_columns.len() {
         return Err(Error::Invalid(
             "A row must be identified by its complete primary key".into(),
         ));
     }
     let mut parts = Vec::with_capacity(key.len());
     let mut label = Vec::with_capacity(key.len());
-    for pk in &meta.primary_key {
+    for pk in key_columns {
         let cell = key
             .iter()
             .find(|k| &k.column == pk)
@@ -257,6 +267,18 @@ pub fn plan(
     meta: &TableMeta,
     changes: &ChangeSet,
 ) -> Result<Vec<Statement>> {
+    plan_keyed(engine, table, meta, &meta.primary_key, changes)
+}
+
+/// `plan`, addressing rows by `key_columns`. The caller guarantees these columns form a
+/// unique key of the table (the primary key, or a unique index validated against the catalogue).
+pub(crate) fn plan_keyed(
+    engine: Engine,
+    table: &TableRef,
+    meta: &TableMeta,
+    key_columns: &[String],
+    changes: &ChangeSet,
+) -> Result<Vec<Statement>> {
     let total = changes.updates.len() + changes.inserts.len() + changes.deletes.len();
     if total == 0 {
         return Err(Error::Invalid("There is nothing to save".into()));
@@ -266,7 +288,7 @@ pub fn plan(
             "{total} row changes in one save exceeds the limit of {MAX_STATEMENTS}"
         )));
     }
-    if meta.primary_key.is_empty() && (!changes.updates.is_empty() || !changes.deletes.is_empty()) {
+    if key_columns.is_empty() && (!changes.updates.is_empty() || !changes.deletes.is_empty()) {
         return Err(Error::Unsupported(
             "This table has no primary key, so existing rows cannot be changed or deleted safely"
                 .into(),
@@ -280,7 +302,7 @@ pub fn plan(
             engine,
             values: Vec::new(),
         };
-        let (where_key, row) = key_clause(engine, meta, &delete.key, &mut params)?;
+        let (where_key, row) = key_clause(engine, meta, key_columns, &delete.key, &mut params)?;
         out.push(Statement {
             kind: StatementKind::Delete,
             sql: format!("DELETE FROM {target} WHERE {where_key}"),
@@ -308,7 +330,7 @@ pub fn plan(
                 value_expr(engine, col, &placeholder)
             ));
         }
-        let (where_key, row) = key_clause(engine, meta, &update.key, &mut params)?;
+        let (where_key, row) = key_clause(engine, meta, key_columns, &update.key, &mut params)?;
         let mut conditions = vec![where_key];
         for change in &update.changes {
             let col = column(meta, &change.column)?;

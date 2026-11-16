@@ -3,6 +3,7 @@ use std::time::Duration;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::{ConnectOptions, Executor, Row};
 
+use super::smart::UniqueKey;
 use super::write::{self, Statement};
 use super::{
     ident, Capabilities, ColumnMeta, DbObject, Namespace, ObjectKind, Order, PageRequest,
@@ -254,10 +255,60 @@ impl MySqlSession {
         Ok(out)
     }
 
+    /// The primary key and every unique index a row can be matched on. Indexes over
+    /// expressions or column prefixes are left out: equality on them is not row identity.
+    pub async fn unique_keys(&self, table: &TableRef) -> Result<Vec<UniqueKey>> {
+        let rows = sqlx::query(
+            "SELECT INDEX_NAME, COLUMN_NAME, CAST(SUB_PART AS CHAR)
+             FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND NON_UNIQUE = 0
+             ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+        )
+        .bind(&table.database)
+        .bind(&table.name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::database)?;
+        let mut keys: Vec<UniqueKey> = Vec::new();
+        let mut unusable = std::collections::HashSet::new();
+        for r in &rows {
+            let name = text(r, 0)?.unwrap_or_default();
+            let (column, prefix) = (text(r, 1)?, text(r, 2)?);
+            let Some(column) = column.filter(|_| prefix.is_none()) else {
+                unusable.insert(name);
+                continue;
+            };
+            match keys.iter_mut().find(|k| k.name == name) {
+                Some(key) => key.columns.push(column),
+                None => keys.push(UniqueKey {
+                    primary: name == "PRIMARY",
+                    name,
+                    columns: vec![column],
+                }),
+            }
+        }
+        keys.retain(|k| !unusable.contains(&k.name));
+        keys.sort_by_key(|k| !k.primary);
+        Ok(keys)
+    }
+
     /// Run planned statements in one transaction; each must touch exactly one row.
-    pub async fn apply(&self, statements: &[Statement]) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(Error::database)?;
-        for statement in statements {
+    /// `keep_going` is called before every statement with the number already done;
+    /// returning `false` cancels and rolls everything back.
+    pub async fn apply(
+        &self,
+        statements: &[Statement],
+        keep_going: &(dyn Fn(usize) -> bool + Send + Sync),
+    ) -> Result<()> {
+        let pool = self.pool.clone();
+        let mut tx = pool.begin().await.map_err(Error::database)?;
+        for (done, statement) in statements.iter().enumerate() {
+            if !keep_going(done) {
+                let _ = tx.rollback().await;
+                return Err(Error::Invalid(
+                    "Cancelled. Nothing was saved — the transaction was rolled back.".into(),
+                ));
+            }
             let mut query = sqlx::query(&statement.sql);
             for param in &statement.params {
                 query = query.bind(param.as_deref());
@@ -275,6 +326,29 @@ impl MySqlSession {
             }
         }
         tx.commit().await.map_err(Error::database)
+    }
+
+    /// Run a read-only query whose columns are all text.
+    pub async fn query_text(
+        &self,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<Vec<Vec<Option<String>>>> {
+        let pool = self.pool.clone();
+        let mut query = sqlx::query(sql);
+        for param in params {
+            query = query.bind(param.as_deref());
+        }
+        let rows = query.fetch_all(&pool).await.map_err(Error::database)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let mut cells = Vec::with_capacity(r.len());
+            for i in 0..r.len() {
+                cells.push(text(r, i)?);
+            }
+            out.push(cells);
+        }
+        Ok(out)
     }
 
     pub async fn close(&self) {

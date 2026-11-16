@@ -2,6 +2,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  ClipboardPaste,
   Eye,
   KeyRound,
   Lock,
@@ -46,6 +47,7 @@ import {
   undo,
 } from "./pending";
 import { ReviewDialog } from "./ReviewDialog";
+import { SmartPasteDialog } from "./SmartPasteDialog";
 
 const PAGE_SIZES = [100, 200, 500, 1000];
 
@@ -74,6 +76,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [history, setHistory] = useState(NO_HISTORY);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [reviewing, setReviewing] = useState(false);
+  const [smartPaste, setSmartPaste] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const pending = current(history);
@@ -266,6 +269,13 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
 
         {editable && (
           <div className="flex shrink-0 items-center gap-1">
+            <Tooltip label={dirty ? t("table.dirtyLocked") : t("smart.openHint")}>
+              <span>
+                <Button size="sm" disabled={dirty || saving} icon={<ClipboardPaste className="size-3.5" />} onClick={() => setSmartPaste(true)}>
+                  {t("smart.open")}
+                </Button>
+              </span>
+            </Tooltip>
             <Button size="sm" variant="primary" disabled={saving} icon={<Plus className="size-3.5" />} onClick={addRow}>
               {t("table.addRow")}
             </Button>
@@ -476,6 +486,20 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
         </IconButton>
       </div>
 
+      {page && (
+        <SmartPasteDialog
+          open={smartPaste}
+          onClose={() => setSmartPaste(false)}
+          connection={connection}
+          table={tab.table}
+          columns={page.columns}
+          onDone={(result) => {
+            setSmartPaste(false);
+            toast.success(t("smart.done", { ...result }));
+            refresh();
+          }}
+        />
+      )}
       {page && (
         <ReviewDialog
           open={reviewing}

@@ -5,6 +5,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use sqlx::{ConnectOptions, Executor, Row};
 use tokio::sync::Mutex;
 
+use super::smart::UniqueKey;
 use super::write::{self, Statement};
 use super::{
     ident, Capabilities, ColumnMeta, DbObject, Namespace, ObjectKind, Order, PageRequest,
@@ -305,11 +306,61 @@ impl PgSession {
         Ok(out)
     }
 
+    /// The primary key and every plain unique index a row can be matched on. Partial and
+    /// expression indexes are left out: equality on them is not row identity.
+    pub async fn unique_keys(&self, table: &TableRef) -> Result<Vec<UniqueKey>> {
+        let schema = super::require_schema(table.schema.as_deref())?;
+        let rows = sqlx::query(
+            "SELECT ic.relname::text, i.indisprimary, a.attname::text
+             FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_class ic ON ic.oid = i.indexrelid
+             JOIN unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON k.ord <= i.indnkeyatts
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+             WHERE n.nspname = $1 AND c.relname = $2
+               AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL
+             ORDER BY i.indisprimary DESC, ic.relname, k.ord",
+        )
+        .bind(schema)
+        .bind(&table.name)
+        .fetch_all(&self.pool(&table.database).await?)
+        .await
+        .map_err(Error::database)?;
+        let mut keys: Vec<UniqueKey> = Vec::new();
+        for r in &rows {
+            let name: String = r.try_get(0).map_err(Error::database)?;
+            let column: String = r.try_get(2).map_err(Error::database)?;
+            match keys.iter_mut().find(|k| k.name == name) {
+                Some(key) => key.columns.push(column),
+                None => keys.push(UniqueKey {
+                    primary: r.try_get(1).map_err(Error::database)?,
+                    name,
+                    columns: vec![column],
+                }),
+            }
+        }
+        Ok(keys)
+    }
+
     /// Run planned statements in one transaction; each must touch exactly one row.
-    pub async fn apply(&self, database: &str, statements: &[Statement]) -> Result<()> {
+    /// `keep_going` is called before every statement with the number already done;
+    /// returning `false` cancels and rolls everything back.
+    pub async fn apply(
+        &self,
+        database: &str,
+        statements: &[Statement],
+        keep_going: &(dyn Fn(usize) -> bool + Send + Sync),
+    ) -> Result<()> {
         let pool = self.pool(database).await?;
         let mut tx = pool.begin().await.map_err(Error::database)?;
-        for statement in statements {
+        for (done, statement) in statements.iter().enumerate() {
+            if !keep_going(done) {
+                let _ = tx.rollback().await;
+                return Err(Error::Invalid(
+                    "Cancelled. Nothing was saved — the transaction was rolled back.".into(),
+                ));
+            }
             let mut query = sqlx::query(&statement.sql);
             for param in &statement.params {
                 query = query.bind(param.as_deref());
@@ -327,6 +378,30 @@ impl PgSession {
             }
         }
         tx.commit().await.map_err(Error::database)
+    }
+
+    /// Run a read-only query whose columns are all text.
+    pub async fn query_text(
+        &self,
+        database: &str,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<Vec<Vec<Option<String>>>> {
+        let pool = self.pool(database).await?;
+        let mut query = sqlx::query(sql);
+        for param in params {
+            query = query.bind(param.as_deref());
+        }
+        let rows = query.fetch_all(&pool).await.map_err(Error::database)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let mut cells = Vec::with_capacity(r.len());
+            for i in 0..r.len() {
+                cells.push(r.try_get::<Option<String>, _>(i).map_err(Error::database)?);
+            }
+            out.push(cells);
+        }
+        Ok(out)
     }
 
     pub async fn close(&self) {

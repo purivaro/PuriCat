@@ -8,7 +8,7 @@ import { useSettings } from "../../stores/settings";
 import { useUi } from "../../stores/ui";
 
 const READY = ["connections", "engines", "browse", "grid", "editing", "themes"] as const;
-const NEXT = ["smartPaste", "sql", "sqlserver", "ai", "backup"] as const;
+const NEXT = ["sql", "sqlserver", "ai", "backup"] as const;
 
 export function WelcomeTab() {
   const { t, i18n } = useTranslation();

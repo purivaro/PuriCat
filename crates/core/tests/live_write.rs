@@ -611,3 +611,358 @@ async fn postgres_body(t: Target, db: String) {
     assert_eq!(rows(&session, &log).await.rows.len(), 2);
     session.close().await;
 }
+
+// ---- Smart Paste ---------------------------------------------------------------------
+
+use puricat_core::db::smart::{Counts, PasteRequest, RowStatus};
+
+fn paste(value: serde_json::Value) -> PasteRequest {
+    serde_json::from_value(value).expect("valid paste request")
+}
+
+fn counts(insert: u32, update: u32, unchanged: u32, unmatched: u32, problems: u32) -> Counts {
+    serde_json::from_value(json!({
+        "insert": insert, "update": update, "unchanged": unchanged,
+        "unmatched": unmatched, "problems": problems
+    }))
+    .unwrap()
+}
+
+const GO: &(dyn Fn(usize) -> bool + Send + Sync) = &|_| true;
+
+/// The same scenario on either engine. `stock` has a generated `id` (primary key), a unique
+/// `sku`, `name`, `price`, `qty` (NOT NULL DEFAULT 0) and `day`; rows A1, B2 and C3 exist.
+async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensitive_keys: bool) {
+    let keys = session.unique_keys(stock).await.unwrap();
+    assert!(keys[0].primary && keys[0].columns == vec!["id"]);
+    assert!(keys.iter().any(|k| !k.primary && k.columns == vec!["sku"]));
+    assert!(
+        keys.iter().any(|k| k.columns == vec!["sku", "day"]),
+        "composite unique index: {keys:?}"
+    );
+    assert!(
+        keys.iter().all(|k| k.columns != vec!["name"]),
+        "non-unique index is not a key"
+    );
+
+    // UPSERT on the unique sku: one change, one identical row, one new row.
+    let upsert = paste(json!({
+        "mode": "upsert", "columns": ["sku", "name", "price", "qty"], "key": ["sku"],
+        "update": ["name", "price", "qty"],
+        "rows": [
+            ["A1", "แอปเปิล \"ฟูจิ\"", "12345678901234.123456", "5"],
+            ["B2", "Pear", "2.500000", "2"],
+            ["N9", "ใหม่", null, null]
+        ]
+    }));
+    let preview = session.analyze_paste(stock, &upsert).await.unwrap();
+    assert!(preview.problems.is_empty(), "{:?}", preview.problems);
+    let statuses: Vec<_> = preview.rows.iter().map(|r| r.status).collect();
+    assert_eq!(
+        statuses,
+        vec![RowStatus::Update, RowStatus::Unchanged, RowStatus::Insert]
+    );
+    assert_eq!(preview.rows[0].changed, vec!["name", "price"]);
+    assert_eq!(preview.counts, counts(1, 1, 1, 0, 0));
+    assert_eq!(
+        rows(session, stock).await.rows.len(),
+        3,
+        "the preview writes nothing"
+    );
+
+    let done = session
+        .apply_paste(stock, &upsert, &preview.counts, GO)
+        .await
+        .unwrap();
+    assert_eq!((done.inserted, done.updated, done.deleted), (1, 1, 0));
+    let page = rows(session, stock).await;
+    let by_sku = |sku: &str, column: &str| {
+        let c = page.columns.iter().position(|c| c.name == column).unwrap();
+        page.rows
+            .iter()
+            .find(|r| r[1].as_deref() == Some(sku))
+            .unwrap_or_else(|| panic!("{sku}"))[c]
+            .clone()
+    };
+    assert_eq!(by_sku("A1", "name").as_deref(), Some("แอปเปิล \"ฟูจิ\""));
+    assert_eq!(
+        by_sku("A1", "price").as_deref(),
+        Some("12345678901234.123456")
+    );
+    assert_eq!(by_sku("N9", "name").as_deref(), Some("ใหม่"));
+    assert_eq!(
+        by_sku("N9", "qty").as_deref(),
+        Some("0"),
+        "an empty cell takes the column default"
+    );
+    assert_eq!(by_sku("N9", "price"), None);
+    assert!(by_sku("N9", "id").is_some(), "the server assigned the id");
+
+    // Running the approved paste again would now do something else: refused.
+    match session
+        .apply_paste(stock, &upsert, &preview.counts, GO)
+        .await
+    {
+        Err(Error::Conflict(message)) => assert!(message.contains("Preview again"), "{message}"),
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+
+    // INSERT of rows that already exist is refused up front, as a whole.
+    let insert = paste(json!({
+        "mode": "insert", "columns": ["sku", "name"], "key": ["sku"],
+        "rows": [["Z1", "fine"], ["A1", "already there"]]
+    }));
+    let preview = session.analyze_paste(stock, &insert).await.unwrap();
+    assert_eq!(preview.rows[1].status, RowStatus::Exists);
+    assert!(matches!(
+        session
+            .apply_paste(stock, &insert, &preview.counts, GO)
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(rows(session, stock).await.rows.len(), 4);
+
+    // UPDATE by the generated id: unknown ids are skipped, never inserted.
+    let id_of_b2 = by_sku("B2", "id").unwrap();
+    let update = paste(json!({
+        "mode": "update", "columns": ["id", "qty"], "key": ["id"], "update": ["qty"],
+        "rows": [[id_of_b2, "42"], ["999999", "1"]]
+    }));
+    let preview = session.analyze_paste(stock, &update).await.unwrap();
+    assert_eq!(preview.counts, counts(0, 1, 0, 1, 0));
+    session
+        .apply_paste(stock, &update, &preview.counts, GO)
+        .await
+        .unwrap();
+    let page = rows(session, stock).await;
+    assert_eq!(page.rows.len(), 4);
+    assert!(page
+        .rows
+        .iter()
+        .any(|r| r[1].as_deref() == Some("B2") && r[4].as_deref() == Some("42")));
+
+    // Problems the pre-check catches, row by row.
+    let messy = paste(json!({
+        "mode": "upsert", "columns": ["sku", "name", "qty"], "key": ["sku"], "update": ["name", "qty"],
+        "rows": [["D1", "x", "1"], ["D1", "y", "1"], [null, "no key", "1"], ["E1", "bad", "lots"], ["TOO-LONG-SKU", "z", "1"]]
+    }));
+    let preview = session.analyze_paste(stock, &messy).await.unwrap();
+    let statuses: Vec<_> = preview.rows.iter().map(|r| r.status).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            RowStatus::Duplicate,
+            RowStatus::Duplicate,
+            RowStatus::MissingKey,
+            RowStatus::Invalid,
+            RowStatus::Invalid
+        ]
+    );
+    assert!(session
+        .apply_paste(stock, &messy, &preview.counts, GO)
+        .await
+        .is_err());
+
+    // The database decides what "the same key" means.
+    let spelled = paste(json!({
+        "mode": "update", "columns": ["sku", "qty"], "key": ["sku"], "update": ["qty"],
+        "rows": [["c3", "7"], ["C3", "8"]]
+    }));
+    let preview = session.analyze_paste(stock, &spelled).await.unwrap();
+    let statuses: Vec<_> = preview.rows.iter().map(|r| r.status).collect();
+    if case_insensitive_keys {
+        assert_eq!(statuses, vec![RowStatus::Duplicate, RowStatus::Duplicate]);
+    } else {
+        assert_eq!(statuses, vec![RowStatus::Unmatched, RowStatus::Update]);
+    }
+
+    // A set-up that cannot identify a row.
+    let bad_key = paste(json!({
+        "mode": "update", "columns": ["name", "qty"], "key": ["name"], "update": ["qty"], "rows": [["Pear", "1"]]
+    }));
+    let preview = session.analyze_paste(stock, &bad_key).await.unwrap();
+    assert!(preview.problems[0].contains("not a primary key or unique index"));
+    assert!(session
+        .apply_paste(stock, &bad_key, &preview.counts, GO)
+        .await
+        .is_err());
+
+    // A value only the server can judge: everything is rolled back, earlier rows included.
+    let before = rows(session, stock).await.rows.len();
+    let impossible = paste(json!({
+        "mode": "insert", "columns": ["sku", "day"], "rows": [["OK1", "2026-02-28"], ["BAD1", "2026-02-30"]]
+    }));
+    let preview = session.analyze_paste(stock, &impossible).await.unwrap();
+    assert_eq!(preview.counts, counts(2, 0, 0, 0, 0));
+    match session
+        .apply_paste(stock, &impossible, &preview.counts, GO)
+        .await
+    {
+        Err(Error::Database(message)) => {
+            assert!(message.contains("Nothing was saved"), "{message}")
+        }
+        other => panic!("expected a database error, got {other:?}"),
+    }
+    assert_eq!(rows(session, stock).await.rows.len(), before);
+
+    // Cancelling part-way rolls back what was already done.
+    let many: Vec<_> = (0..130)
+        .map(|i| json!([format!("M{i:03}"), format!("bulk {i}")]))
+        .collect();
+    let bulk = paste(json!({
+        "mode": "upsert", "columns": ["sku", "name"], "key": ["sku"], "update": ["name"], "rows": many
+    }));
+    let preview = session.analyze_paste(stock, &bulk).await.unwrap();
+    assert_eq!(preview.counts, counts(130, 0, 0, 0, 0));
+    let stop_at_50: &(dyn Fn(usize) -> bool + Send + Sync) = &|done| done < 50;
+    match session
+        .apply_paste(stock, &bulk, &preview.counts, stop_at_50)
+        .await
+    {
+        Err(Error::Invalid(message)) => assert!(message.contains("Cancelled"), "{message}"),
+        other => panic!("expected a cancellation, got {other:?}"),
+    }
+    assert_eq!(rows(session, stock).await.rows.len(), before);
+
+    // The same paste run to completion, then pasted again with edits: several lookup
+    // chunks, all rows matched correctly.
+    session
+        .apply_paste(stock, &bulk, &preview.counts, GO)
+        .await
+        .unwrap();
+    let edited: Vec<_> = (0..130)
+        .map(|i| {
+            json!([
+                format!("M{i:03}"),
+                if i % 2 == 0 {
+                    format!("bulk {i}")
+                } else {
+                    format!("edited {i}")
+                }
+            ])
+        })
+        .collect();
+    let again = paste(json!({
+        "mode": "upsert", "columns": ["sku", "name"], "key": ["sku"], "update": ["name"], "rows": edited
+    }));
+    let preview = session.analyze_paste(stock, &again).await.unwrap();
+    assert_eq!(preview.counts, counts(0, 65, 65, 0, 0));
+    let done = session
+        .apply_paste(stock, &again, &preview.counts, GO)
+        .await
+        .unwrap();
+    assert_eq!(done.updated, 65);
+    let page = rows(session, stock).await;
+    assert!(page
+        .rows
+        .iter()
+        .any(|r| r[1].as_deref() == Some("M129") && r[2].as_deref() == Some("edited 129")));
+    assert!(page
+        .rows
+        .iter()
+        .any(|r| r[1].as_deref() == Some("M128") && r[2].as_deref() == Some("bulk 128")));
+}
+
+#[tokio::test]
+async fn mysql_smart_paste() {
+    let Some(t) = target(Engine::Mysql, "PURICAT_TEST_MYSQL") else {
+        eprintln!("skipped: PURICAT_TEST_MYSQL is not set");
+        return;
+    };
+    let db = scratch_name();
+    let mut admin = mysql_admin(&t).await;
+    admin
+        .execute(format!("CREATE DATABASE `{db}` CHARACTER SET utf8mb4").as_str())
+        .await
+        .unwrap();
+    let name = db.clone();
+    let outcome = tokio::spawn(async move {
+        let mut admin = mysql_admin(&t).await;
+        admin.execute(format!("USE `{name}`").as_str()).await.unwrap();
+        admin
+            .execute(
+                "CREATE TABLE stock (
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    sku VARCHAR(8) NOT NULL,
+                    name VARCHAR(100),
+                    price DECIMAL(24,6),
+                    qty INT NOT NULL DEFAULT 0,
+                    day DATE,
+                    UNIQUE KEY uq_sku (sku),
+                    UNIQUE KEY uq_sku_day (sku, day),
+                    KEY ix_name (name),
+                    UNIQUE KEY uq_prefix (name(3), day)
+                 )",
+            )
+            .await
+            .unwrap();
+        admin
+            .execute("INSERT INTO stock (sku, name, price, qty) VALUES ('A1', 'Apple', 1.5, 5), ('B2', 'Pear', 2.5, 2), ('C3', 'Fig', NULL, 0)")
+            .await
+            .unwrap();
+        let session = Session::connect(&t.profile, t.password.as_deref()).await.unwrap();
+        let stock = TableRef { database: name, schema: None, name: "stock".into() };
+        // A unique index over a column prefix does not identify a row by full value.
+        let keys = session.unique_keys(&stock).await.unwrap();
+        assert!(keys.iter().all(|k| k.name != "uq_prefix"), "{keys:?}");
+        smart_paste_scenario(&session, &stock, true).await;
+        session.close().await;
+    })
+    .await;
+    admin
+        .execute(format!("DROP DATABASE `{db}`").as_str())
+        .await
+        .unwrap();
+    outcome.expect("test body");
+}
+
+#[tokio::test]
+async fn postgres_smart_paste() {
+    let Some(t) = target(Engine::Postgres, "PURICAT_TEST_POSTGRES") else {
+        eprintln!("skipped: PURICAT_TEST_POSTGRES is not set");
+        return;
+    };
+    let db = scratch_name();
+    let mut admin = pg_admin(&t, "postgres").await;
+    admin
+        .execute(format!("CREATE DATABASE \"{db}\"").as_str())
+        .await
+        .unwrap();
+    let name = db.clone();
+    let outcome = tokio::spawn(async move {
+        let mut admin = pg_admin(&t, &name).await;
+        admin
+            .execute(
+                "CREATE TABLE stock (
+                    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    sku varchar(8) NOT NULL UNIQUE,
+                    name text,
+                    price numeric(24,6),
+                    qty integer NOT NULL DEFAULT 0,
+                    day date,
+                    UNIQUE (sku, day)
+                 );
+                 CREATE INDEX ix_name ON stock (name);
+                 CREATE UNIQUE INDEX uq_lower ON stock (lower(name));
+                 CREATE UNIQUE INDEX uq_partial ON stock (name) WHERE qty > 100;
+                 INSERT INTO stock (sku, name, price, qty) VALUES ('A1', 'Apple', 1.5, 5), ('B2', 'Pear', 2.5, 2), ('C3', 'Fig', NULL, 0);",
+            )
+            .await
+            .unwrap();
+        let mut profile = t.profile.clone();
+        profile.database = Some(name.clone());
+        let session = Session::connect(&profile, t.password.as_deref()).await.unwrap();
+        let stock = TableRef { database: name, schema: Some("public".into()), name: "stock".into() };
+        // Expression and partial unique indexes do not identify a row.
+        let keys = session.unique_keys(&stock).await.unwrap();
+        assert!(keys.iter().all(|k| k.name != "uq_lower" && k.name != "uq_partial"), "{keys:?}");
+        smart_paste_scenario(&session, &stock, false).await;
+        session.close().await;
+    })
+    .await;
+    admin
+        .execute(format!("DROP DATABASE \"{db}\" WITH (FORCE)").as_str())
+        .await
+        .unwrap();
+    outcome.expect("test body");
+}

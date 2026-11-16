@@ -6,6 +6,7 @@
 pub mod ident;
 mod mysql;
 mod postgres;
+pub mod smart;
 pub mod write;
 
 use std::time::Instant;
@@ -294,8 +295,112 @@ impl Session {
         let started = Instant::now();
         let statements = self.plan_changes(table, changes).await?;
         match self {
-            Session::MySql(s) => s.apply(&statements).await?,
-            Session::Postgres(s) => s.apply(&table.database, &statements).await?,
+            Session::MySql(s) => s.apply(&statements, &|_| true).await?,
+            Session::Postgres(s) => s.apply(&table.database, &statements, &|_| true).await?,
+        }
+        Ok(write::tally(
+            &statements,
+            started.elapsed().as_millis() as u64,
+        ))
+    }
+
+    fn engine(&self) -> Engine {
+        match self {
+            Session::MySql(_) => Engine::Mysql,
+            Session::Postgres(_) => Engine::Postgres,
+        }
+    }
+
+    /// Keys a pasted row can be matched on: the primary key first, then unique indexes.
+    pub async fn unique_keys(&self, table: &TableRef) -> Result<Vec<smart::UniqueKey>> {
+        match self {
+            Session::MySql(s) => s.unique_keys(table).await,
+            Session::Postgres(s) => s.unique_keys(table).await,
+        }
+    }
+
+    async fn query_text(
+        &self,
+        database: &str,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<Vec<Vec<Option<String>>>> {
+        match self {
+            Session::MySql(s) => s.query_text(sql, params).await,
+            Session::Postgres(s) => s.query_text(database, sql, params).await,
+        }
+    }
+
+    /// Smart Paste, read-only half: match the pasted rows against the table and say exactly
+    /// what running it would do. Also returns the statements, for `apply_paste`.
+    async fn prepare_paste(
+        &self,
+        table: &TableRef,
+        request: &smart::PasteRequest,
+    ) -> Result<(smart::Analysis, Vec<write::Statement>)> {
+        let started = Instant::now();
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let keys = self.unique_keys(table).await?;
+        let engine = self.engine();
+        let mut draft = smart::Draft::new(engine, &meta, &keys, request)?;
+        for (sql, params, rows) in draft.lookups(table)? {
+            let found = self.query_text(&table.database, &sql, &params).await?;
+            draft.matched(&rows, found);
+        }
+        let (mut analysis, changes) = draft.finish();
+        let blocked = !analysis.problems.is_empty() || analysis.counts.problems > 0;
+        let nothing = changes.updates.is_empty() && changes.inserts.is_empty();
+        let statements = if blocked || nothing {
+            Vec::new()
+        } else {
+            write::plan_keyed(engine, table, &meta, &request.key, &changes)?
+        };
+        analysis.elapsed_ms = started.elapsed().as_millis() as u64;
+        Ok((analysis, statements))
+    }
+
+    pub async fn analyze_paste(
+        &self,
+        table: &TableRef,
+        request: &smart::PasteRequest,
+    ) -> Result<smart::Analysis> {
+        Ok(self.prepare_paste(table, request).await?.0)
+    }
+
+    /// Smart Paste, write half. The table is analysed again; if the outcome no longer matches
+    /// what the user approved (`expected`), nothing runs. Every UPDATE also carries the
+    /// optimistic check on the values seen by this fresh analysis.
+    pub async fn apply_paste(
+        &self,
+        table: &TableRef,
+        request: &smart::PasteRequest,
+        expected: &smart::Counts,
+        keep_going: &(dyn Fn(usize) -> bool + Send + Sync),
+    ) -> Result<write::ApplyResult> {
+        let started = Instant::now();
+        let (analysis, statements) = self.prepare_paste(table, request).await?;
+        if let Some(problem) = analysis.problems.first() {
+            return Err(Error::Invalid(problem.clone()));
+        }
+        if &analysis.counts != expected {
+            return Err(Error::Conflict(
+                "The table changed since the preview, so the result would be different. Preview again before running.".into(),
+            ));
+        }
+        if analysis.counts.problems > 0 {
+            return Err(Error::Invalid(
+                "Some pasted rows have problems. Fix them and preview again.".into(),
+            ));
+        }
+        if statements.is_empty() {
+            return Err(Error::Invalid("There is nothing to save".into()));
+        }
+        match self {
+            Session::MySql(s) => s.apply(&statements, keep_going).await?,
+            Session::Postgres(s) => s.apply(&table.database, &statements, keep_going).await?,
         }
         Ok(write::tally(
             &statements,
