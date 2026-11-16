@@ -102,7 +102,7 @@ pnpm check          # ตรวจชนิดข้อมูล unit test, carg
 
 การทดสอบกับเซิร์ฟเวอร์ MySQL และ PostgreSQL จริง และการทดสอบแบบ end-to-end ที่ขับหน้าต่างจริง อธิบายไว้ใน [TESTING.md](TESTING.md)
 
-การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มีจะเซ็นแบบ ad-hoc เท่านั้น **ตอนนี้ยังไม่ได้ตั้ง** หลัง push tag จึงต้องแทนไฟล์จาก workflow ด้วยไฟล์ที่เซ็นแล้ว โดยรัน [`scripts/release-mac.sh`](scripts/release-mac.sh) บน Mac ที่มี Developer ID ใน Keychain แล้วใช้ `gh release upload <tag> target/release-download/* --clobber` (v0.1.0 ออกด้วยวิธีนี้)
+การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มี (เช่นใน fork) จะเซ็นแบบ ad-hoc เท่านั้น ส่วน [`scripts/release-mac.sh`](scripts/release-mac.sh) ใช้สร้างไฟล์แบบเดียวกันด้วยมือบน Mac ที่มี Developer ID ใน Keychain (v0.1.0 ออกด้วยวิธีนี้ ก่อนจะตั้ง secrets)
 
 เอกสารทั้งหมด (ภาษาอังกฤษ) อยู่ในตารางท้าย [README.md](README.md#documentation)
 
