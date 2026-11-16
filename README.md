@@ -33,13 +33,8 @@ All versions and checksums are on the [Releases](https://github.com/purivaro/Pur
 ### Install on a Mac
 
 1. Open `PuriCat-mac.dmg` and drag **PuriCat** into Applications.
-2. Open PuriCat. This build is **not yet signed with an Apple Developer ID**, so macOS stops it the first time:
-   - macOS 15 or newer: open **System Settings › Privacy & Security**, scroll down to the message about PuriCat and choose **Open Anyway**.
-   - macOS 12 to 14: right-click PuriCat in Applications and choose **Open**, then **Open** again.
-   - Or in the Terminal: `xattr -dr com.apple.quarantine /Applications/PuriCat.app`
-
-   You only do this once.
-3. Passwords you save are kept in the **macOS Keychain**, never in a file. Because the build is unsigned, macOS may ask again for permission to read them after an update.
+2. Open PuriCat. The app is **signed with a Developer ID and notarized by Apple**, so it opens like any other downloaded app: macOS asks once whether to open an app downloaded from the internet.
+3. Passwords you save are kept in the **macOS Keychain**, never in a file.
 
 ## What it does
 
@@ -107,7 +102,7 @@ pnpm check          # type-check, unit tests, cargo fmt, clippy, cargo test
 
 Tests against real MySQL and PostgreSQL servers, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
 
-A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain.
+A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them it is only ad-hoc signed. **They are not set yet**, so after a tag the workflow's file has to be replaced with a signed one: [`scripts/release-mac.sh`](scripts/release-mac.sh) builds, signs and notarizes the same download on a Mac that has the Developer ID in its keychain, and `gh release upload <tag> target/release-download/* --clobber` puts it on the release. v0.1.0 was published that way.
 
 ```
 crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the SQL console,

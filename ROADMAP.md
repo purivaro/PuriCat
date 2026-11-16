@@ -203,7 +203,7 @@ Remaining:
 | Decision | Needed for | Why it blocks |
 |---|---|---|
 | The pricing model | Decided on 2026-11-16: PuriCat is free for anyone to use, and open source under MIT ([LICENSE](LICENSE), [LICENSES.md](LICENSES.md)) | No longer open |
-| An Apple Developer ID for PuriCat's builds | Signing and notarization, so the download opens without a Gatekeeper warning | The release workflow signs and notarizes when the repository has the six `APPLE_*` secrets; without them the build is ad-hoc signed. The bundle identifier was set to `com.purivaro.puricat` for the first public release (2026-11-16), following the owner's other app; changing it later orphans users' settings |
+| Signing secrets on the repository | Releases that are signed and notarized by the workflow itself | v0.1.0 was signed with the owner's Developer ID and notarized by hand (`scripts/release-mac.sh`), then uploaded over the workflow's ad-hoc signed file. Until the six `APPLE_*` secrets are added to the repository, every release needs that step. The bundle identifier was set to `com.purivaro.puricat` for the first public release (2026-11-16), following the owner's other app; changing it later orphans users' settings |
 | AG Grid Enterprise licence, or stay with the custom grid | Only if the remaining Phase 3 grid validation fails | Editing, single-range selection and paste are now built on the custom grid; the question returns only if its performance or multi-range validation fails ([ADR 0006](docs/adr/0006-data-grid.md)) |
 | A way to run a disposable SQL Server (Docker or a test server) | Phase 2b | No adapter work can be verified without one |
 | Hosting for the update channel | Phase 7 | The signed-update design depends on where artifacts and manifests are served |

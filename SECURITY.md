@@ -1,6 +1,6 @@
 # Security
 
-Describes the security posture of the code on 2026-11-16. PuriCat is in early development: the downloadable build is ad-hoc signed, not signed with a Developer ID or notarized, there has been no external review, and it should not be used with production data yet.
+Describes the security posture of the code on 2026-11-16. PuriCat is in early development: the v0.1.0 download is signed with a Developer ID and notarized, but there has been no external review, and it should not be used with production data yet.
 
 Labels: **Implemented & verified**, **Implemented, not yet verified**, **Planned (Phase N)**. Evidence is in [TESTING.md](TESTING.md).
 

@@ -33,13 +33,8 @@
 ### ติดตั้งบน Mac
 
 1. เปิด `PuriCat-mac.dmg` แล้วลาก **PuriCat** ไปใส่โฟลเดอร์ Applications
-2. เปิด PuriCat รุ่นนี้ **ยังไม่ได้เซ็นด้วย Apple Developer ID** macOS จึงกันไว้ในครั้งแรก
-   - macOS 15 ขึ้นไป: เปิด **System Settings › Privacy & Security** เลื่อนลงไปที่ข้อความเกี่ยวกับ PuriCat แล้วกด **Open Anyway**
-   - macOS 12 ถึง 14: คลิกขวาที่ PuriCat ใน Applications เลือก **Open** แล้วกด **Open** อีกครั้ง
-   - หรือใช้ Terminal: `xattr -dr com.apple.quarantine /Applications/PuriCat.app`
-
-   ทำครั้งเดียวพอ
-3. รหัสผ่านที่บันทึกไว้เก็บใน **Keychain ของ macOS** ไม่เขียนลงไฟล์ และเพราะรุ่นนี้ยังไม่ได้เซ็น หลังอัปเดตแอป macOS อาจถามสิทธิ์อ่าน Keychain อีกครั้ง
+2. เปิด PuriCat ได้เลย แอป **เซ็นด้วย Developer ID และผ่านการตรวจ (notarize) ของ Apple แล้ว** macOS จะถามครั้งเดียวว่าต้องการเปิดแอปที่ดาวน์โหลดจากอินเทอร์เน็ตหรือไม่ เหมือนแอปทั่วไป
+3. รหัสผ่านที่บันทึกไว้เก็บใน **Keychain ของ macOS** ไม่เขียนลงไฟล์
 
 ## ทำอะไรได้บ้าง
 
@@ -107,7 +102,7 @@ pnpm check          # ตรวจชนิดข้อมูล unit test, carg
 
 การทดสอบกับเซิร์ฟเวอร์ MySQL และ PostgreSQL จริง และการทดสอบแบบ end-to-end ที่ขับหน้าต่างจริง อธิบายไว้ใน [TESTING.md](TESTING.md)
 
-การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มีจะเซ็นแบบ ad-hoc เท่านั้น
+การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มีจะเซ็นแบบ ad-hoc เท่านั้น **ตอนนี้ยังไม่ได้ตั้ง** หลัง push tag จึงต้องแทนไฟล์จาก workflow ด้วยไฟล์ที่เซ็นแล้ว โดยรัน [`scripts/release-mac.sh`](scripts/release-mac.sh) บน Mac ที่มี Developer ID ใน Keychain แล้วใช้ `gh release upload <tag> target/release-download/* --clobber` (v0.1.0 ออกด้วยวิธีนี้)
 
 เอกสารทั้งหมด (ภาษาอังกฤษ) อยู่ในตารางท้าย [README.md](README.md#documentation)
 
