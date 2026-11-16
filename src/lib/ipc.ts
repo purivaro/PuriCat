@@ -1,19 +1,23 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
+  AgentEvent,
+  AiProvider,
   AppError,
   ApplyResult,
   ChangeSet,
+  ChatRequest,
   CliStatus,
   ConnectionProfile,
   ConnectionView,
   DbObject,
   ExportFormat,
   HistoryEntry,
+  ModelChoice,
   Namespace,
+  PasswordChange,
   PasteAnalysis,
   PasteRequest,
-  PasswordChange,
   RowPage,
   RunOutcome,
   ServerInfo,
@@ -91,4 +95,14 @@ export const ipc = {
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),
+  agentModels: (provider: AiProvider) => invoke<ModelChoice[]>("agent_models", { provider }),
+  /** The context text for a chat: schema names and types, plus the active query if given. */
+  agentContext: (id: string, database: string, schema: string | null, sql: string | null) =>
+    invoke<string>("agent_context", { id, database, schema, sql }),
+  /** One chat turn. Resolves with the whole answer; `cancelJob(job)` stops it. */
+  agentSend: (job: string, request: ChatRequest, onEvent: (event: AgentEvent) => void) => {
+    const channel = new Channel<AgentEvent>();
+    channel.onmessage = onEvent;
+    return invoke<string>("agent_send", { job, request, onEvent: channel });
+  },
 };

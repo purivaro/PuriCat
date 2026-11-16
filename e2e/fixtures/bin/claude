@@ -1,0 +1,48 @@
+#!/bin/sh
+# Stand-in for the Claude Code CLI in the end-to-end test: no network, canned answers.
+# It speaks the same stream-json lines the real CLI printed when they were captured
+# (Claude Code 2.1.303), and records what it was given so the runner can check that the
+# prompt carried the schema and nothing that identifies the server.
+case "$1" in
+  --version) echo "9.9.9 (stand-in Claude Code)"; exit 0 ;;
+  auth) echo '{"loggedIn": true, "authMethod": "stand-in", "email": "nobody@example.com"}'; exit 0 ;;
+esac
+
+model=stand-in-default
+previous=
+for argument in "$@"; do
+  [ "$previous" = "--model" ] && model=$argument
+  previous=$argument
+done
+prompt=$(cat)
+if [ -n "${PURICAT_STAND_IN_DIR:-}" ]; then
+  printf '%s\n' "$prompt" >"$PURICAT_STAND_IN_DIR/claude.stdin"
+  printf '%s\n' "$@" >"$PURICAT_STAND_IN_DIR/claude.args"
+  pwd >"$PURICAT_STAND_IN_DIR/claude.cwd"
+fi
+
+printf '{"type":"system","subtype":"init","tools":[],"mcp_servers":[],"model":"%s"}\n' "$model"
+
+if [ "$model" = "broken" ]; then
+  cat <<'JSON'
+{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"There's an issue with the selected model (broken). It may not exist or you may not have access to it."}]},"error":"model_not_found"}
+{"type":"result","subtype":"success","is_error":true,"result":"There's an issue with the selected model (broken). It may not exist or you may not have access to it.","api_error_status":404}
+JSON
+  exit 1
+fi
+
+case "$prompt" in
+  *"take your time"*)
+    cat <<'JSON'
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me think about that"}}}
+JSON
+    exec sleep 60
+    ;;
+esac
+
+cat <<'JSON'
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"นับจำนวนคำสั่งซื้อด้วยคำสั่งนี้:\n\n```sql\nSELECT COUNT(*) AS"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" orders\nFROM orders;\n```\n\nคำสั่งนี้ **อ่านอย่างเดียว** ไม่แก้ข้อมูลในตาราง `orders`"}}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"นับจำนวนคำสั่งซื้อด้วยคำสั่งนี้:\n\n```sql\nSELECT COUNT(*) AS orders\nFROM orders;\n```\n\nคำสั่งนี้ **อ่านอย่างเดียว** ไม่แก้ข้อมูลในตาราง `orders`"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"นับจำนวนคำสั่งซื้อด้วยคำสั่งนี้:\n\n```sql\nSELECT COUNT(*) AS orders\nFROM orders;\n```\n\nคำสั่งนี้ **อ่านอย่างเดียว** ไม่แก้ข้อมูลในตาราง `orders`"}
+JSON

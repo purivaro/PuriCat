@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Claude,
@@ -23,7 +23,7 @@ pub enum Provider {
 }
 
 impl Provider {
-    fn binary(self) -> &'static str {
+    pub fn binary(self) -> &'static str {
         match self {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
@@ -117,7 +117,7 @@ async fn run(path: &Path, args: &[&str]) -> Option<Output> {
 
 /// Node-based CLIs start with `#!/usr/bin/env node`; make sure `node` next to the
 /// tool is reachable even when the app was launched from Finder with a bare PATH.
-fn path_with(dir: Option<&Path>) -> std::ffi::OsString {
+pub(crate) fn path_with(dir: Option<&Path>) -> std::ffi::OsString {
     let mut parts: Vec<PathBuf> = dir.map(|d| vec![d.to_path_buf()]).unwrap_or_default();
     parts.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -125,7 +125,7 @@ fn path_with(dir: Option<&Path>) -> std::ffi::OsString {
     std::env::join_paths(parts).unwrap_or_default()
 }
 
-async fn locate(binary: &str) -> Option<PathBuf> {
+pub(crate) async fn locate(binary: &str) -> Option<PathBuf> {
     if let Some(p) = find_in(candidate_dirs(), binary) {
         return Some(p);
     }

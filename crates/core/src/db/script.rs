@@ -226,6 +226,18 @@ pub fn classify(engine: Engine, statement: &str) -> (Kind, Option<&'static str>)
     }
 }
 
+/// Does the statement contain this keyword (upper case), outside strings and comments?
+pub fn mentions(engine: Engine, statement: &str, keyword: &str) -> bool {
+    let mut found = false;
+    scan(
+        engine,
+        statement,
+        |w, _, _| found |= w.eq_ignore_ascii_case(keyword),
+        |_| {},
+    );
+    found
+}
+
 /// Does a transaction-control statement leave the session inside a transaction?
 /// `None` when the statement does not change that (SAVEPOINT, ROLLBACK TO, ...).
 ///
@@ -252,8 +264,9 @@ pub fn transaction_effect(engine: Engine, statement: &str) -> Option<bool> {
 }
 
 /// Replace password literals before a statement is written to the local history.
-/// It errs on the side of hiding too much: any quoted literal shortly after the word
-/// `password` or `identified by/with` is masked.
+/// It errs on the side of hiding too much: any quoted literal (single quotes, or the double
+/// quotes MySQL also accepts) shortly after the word `password` or `identified by/with` is
+/// masked.
 pub fn redact(sql: &str) -> String {
     let lower = sql.to_ascii_lowercase();
     // Byte ranges of the literal contents to mask.
@@ -263,11 +276,12 @@ pub fn redact(sql: &str) -> String {
         while let Some(found) = lower[from..].find(marker) {
             let after = from + found + marker.len();
             from = after;
-            let Some(open) = lower[after..].find('\'').filter(|&gap| gap <= 48) else {
+            let Some(open) = lower[after..].find(['\'', '"']).filter(|&gap| gap <= 48) else {
                 continue;
             };
+            let quote = lower.as_bytes()[after + open] as char;
             let start = after + open + 1;
-            if let Some(len) = sql[start..].find('\'') {
+            if let Some(len) = sql[start..].find(quote) {
                 spans.push((start, start + len));
                 from = start + len;
             }
@@ -415,6 +429,20 @@ mod tests {
             redact("SELECT password FROM users WHERE name = 'bob'"),
             "SELECT password FROM users WHERE name = '***'"
         );
+        assert_eq!(
+            redact(r#"CREATE USER app IDENTIFIED BY "s3cret""#),
+            r#"CREATE USER app IDENTIFIED BY "***""#
+        );
         assert_eq!(redact("SELECT 1"), "SELECT 1");
+        assert!(mentions(
+            Engine::Mysql,
+            "create temporary table t (a int)",
+            "TEMPORARY"
+        ));
+        assert!(!mentions(
+            Engine::Mysql,
+            "CREATE TABLE t (a int) COMMENT 'temporary'",
+            "TEMPORARY"
+        ));
     }
 }

@@ -46,7 +46,7 @@ import type {
 } from "../../lib/types";
 import { nodeKey, sessionOf, useConnections } from "../../stores/connections";
 import { useSettings } from "../../stores/settings";
-import { type SqlTab, sqlTextKey, useWorkspace } from "../../stores/workspace";
+import { type SqlTab, sqlEditors, sqlSeed, sqlTextKey, useWorkspace } from "../../stores/workspace";
 import { DataGrid, type Selection } from "../table/DataGrid";
 import { EMPTY } from "../table/pending";
 
@@ -118,6 +118,9 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
 
   // ---- saved text ------------------------------------------------------------------
   useEffect(() => {
+    // A tab opened with text (from the agent chat) starts with it.
+    const seeded = sqlSeed(tab.id);
+    if (seeded !== undefined) return setInitial(seeded);
     let stale = false;
     ipc
       .getSettings()
@@ -137,6 +140,8 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
     },
     [tab.id],
   );
+  // A save still pending when the tab closes must not write the text back after it was cleared.
+  useEffect(() => () => window.clearTimeout(saveTimer.current), []);
 
   // ---- completion sources ----------------------------------------------------------
   const columnCache = useRef(new Map<string, Promise<string[]>>());
@@ -266,12 +271,14 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
         onRun: () => runRef.current(),
       });
       editorRef.current = editor;
+      sqlEditors.set(tab.id, () => editor?.getValue() ?? "");
       setEmpty(initial.trim() === "");
       // Lets the end-to-end test type into the real editor.
       (rootRef.current as unknown as { __editor?: Editor }).__editor = editor;
     });
     return () => {
       disposed = true;
+      sqlEditors.delete(tab.id);
       editor?.dispose();
       editorRef.current = null;
     };
@@ -329,12 +336,12 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
 
   const exportResult = async (format: ExportFormat) => {
     if (!shown) return;
-    const path = await save({
-      defaultPath: `${tab.title.replace(/\s+/g, "-").toLowerCase()}-result-${results.indexOf(shown) + 1}.${format}`,
-      filters: [{ name: format.toUpperCase(), extensions: [format] }],
-    });
-    if (!path) return;
     try {
+      const path = await save({
+        defaultPath: `${tab.title.replace(/\s+/g, "-").toLowerCase()}-result-${results.indexOf(shown) + 1}.${format}`,
+        filters: [{ name: format.toUpperCase(), extensions: [format] }],
+      });
+      if (!path) return;
       const rows = await ipc.exportResult(tab.id, shown.id, format, path);
       toast.success(t("sql.exported", { count: rows }), { description: shown.capped ? t("sql.exportedCapped") : path });
     } catch (e) {
@@ -445,7 +452,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
         {running ? (
-          <Button size="sm" variant="danger" icon={<Square className="size-3 fill-current" />} onClick={() => void ipc.cancelSql(tab.id)}>
+          <Button size="sm" variant="danger" icon={<Square className="size-3 fill-current" />} onClick={() => void ipc.cancelSql(tab.id).catch((e) => toast.error(errorMessage(e)))}>
             {t("sql.stop")}
           </Button>
         ) : (
@@ -520,7 +527,8 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
               {shown && (
                 <DropdownMenu.Root>
                   <DropdownMenu.Trigger asChild>
-                    <Button size="sm" icon={<Download className="size-3.5" />}>
+                    {/* Not during a run: the stored results are about to be replaced. */}
+                    <Button size="sm" disabled={running} icon={<Download className="size-3.5" />}>
                       {t("sql.export")}
                     </Button>
                   </DropdownMenu.Trigger>

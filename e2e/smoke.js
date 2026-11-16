@@ -475,15 +475,98 @@
     await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellText(0, 5) === "200.50", "postgres saved", 15000);
     log.push({ stage: "pg-edited", refused: pgRefused, saved: [cellText(0, 4), cellText(0, 5)] });
 
-    // ---- AI panel: real CLI detection ------------------------------------------------
+    // ---- AI panel: detection and a chat, through stand-in CLIs (e2e/fixtures/bin) ---------
+    // No account and no network are involved: the stand-ins print the stream the real CLIs print.
     await click(document.querySelector('button[aria-label="Toggle AI panel"]'), "ai toggle");
     const aiCard = () => all("aside").at(-1);
-    await waitFor(() => /Installed|Not installed/.test(aiCard()?.textContent ?? ""), "claude detection", 30000);
-    const claude = aiCard().querySelector("section").textContent.replace(/\s+/g, " ").trim();
+    const agentStatus = () => aiCard()?.querySelector("[data-agent-status]")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+    await waitFor(() => /Signed in|Not installed|Not signed in/.test(agentStatus()), "claude detection", 30000);
+    const claude = agentStatus();
+    const modelSelect = () => aiCard().querySelector("[data-agent-model]");
+    const setValue = async (el, value) => {
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLSelectElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+      el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
+      await sleep(60);
+    };
+    await waitFor(() => modelSelect()?.options.length >= 6, "claude models", 20000);
+    const claudeModels = [...modelSelect().options].map((o) => o.textContent);
+
+    // the context follows the tab in front (the PostgreSQL orders table) and is shown before it is sent
+    const contextLabel = aiCard().querySelector("[data-agent-context]").textContent.trim();
+    await click(aiCard().querySelector("[data-agent-context]"), "context");
+    const contextPreview = (await waitFor(() => document.querySelector("[data-agent-context-preview]"), "context preview", 20000)).textContent;
+    if (!contextPreview.includes("Engine: PostgreSQL") || !/\nTable orders\b/.test(contextPreview) || /127\.0\.0\.1|__PG_USER__@/.test(contextPreview)) {
+      throw new Error(`unexpected agent context: ${contextPreview.slice(0, 600)}`);
+    }
+    await waitFor(() => {
+      const preview = document.querySelector("[data-agent-context-preview]");
+      preview?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      return !preview;
+    }, "context closed");
+
+    const ask = async (text) => {
+      await setValue(aiCard().querySelector("[data-agent-input]"), text);
+      await click(aiCard().querySelector('button[aria-label="Send"]'), "send");
+    };
+    const lastAnswer = () => all('aside [data-agent-turn="assistant"]').at(-1);
+    const answered = (status, what) => waitFor(() => lastAnswer()?.dataset.status === status, what, 20000);
+    const flat = (el) => el.textContent.replace(/\s+/g, " ").trim();
+
+    await ask("นับจำนวน orders ให้หน่อย");
+    await answered("done", "agent answer");
+    const answer = {
+      text: flat(lastAnswer()),
+      code: lastAnswer().querySelector("[data-agent-code] pre")?.textContent,
+      bold: lastAnswer().querySelector("strong")?.textContent,
+      inlineCode: lastAnswer().querySelector("p code")?.textContent,
+      question: flat(aiCard().querySelector('[data-agent-turn="user"]')),
+    };
+    if (answer.code !== "SELECT COUNT(*) AS orders\nFROM orders;" || answer.bold !== "อ่านอย่างเดียว") throw new Error(`answer rendered wrongly: ${JSON.stringify(answer)}`);
+    await stage("agent-chat", { claude, claudeModels, contextLabel, contextPreview: contextPreview.slice(0, 500), answer });
+
+    // SQL from an answer opens in a new query tab on that connection; it is not run
+    const tabsBefore = all('[role="tablist"] [role="tab"]').length;
+    await click(withText("aside [data-agent-code] button", "Open in query tab"), "open in query tab");
+    await waitFor(() => all('[role="tablist"] [role="tab"]').length === tabsBefore + 1 && sqlTab()?.__editor?.getValue() === answer.code, "sql opened in a tab", 30000);
+    const opened = { tab: flat(document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]')), ran: !!document.querySelector(`${panelSel} [data-sql-summary]`) };
+    if (opened.ran) throw new Error("SQL from the agent ran without being asked to");
+
+    // a model the CLI rejects: its own words are shown, and the question can be asked again
+    await setValue(modelSelect(), "\u0000custom");
+    const modelInput = await waitFor(() => aiCard().querySelector("[data-agent-model-input]"), "model input");
+    await type(modelInput, "broken");
+    modelInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await waitFor(() => modelSelect()?.value === "broken", "custom model chosen");
+    await ask("แล้วแยกตามสถานะล่ะ");
+    await answered("error", "agent error");
+    const modelRefused = flat(lastAnswer().querySelector('[role="alert"]'));
+    await setValue(modelSelect(), "haiku");
+    await click(withText("aside button", "Try again"), "retry");
+    await answered("done", "retried answer");
+    const retried = flat(lastAnswer()).slice(0, 60);
+
+    // Stop ends a turn that is still streaming, and keeps what had arrived
+    await ask("take your time");
+    await waitFor(() => lastAnswer()?.dataset.status === "streaming" && lastAnswer().textContent.includes("Let me think"), "streaming answer", 20000);
+    await click(aiCard().querySelector('button[aria-label="Stop"]'), "stop agent");
+    await answered("stopped", "agent stopped");
+    const stopped = flat(lastAnswer());
+
+    // Codex: its model catalogue; the CLI's default is refused by the service, a listed model answers
     await click(exact('aside [role="radio"]', "Codex"), "codex");
-    await sleep(200);
-    const codex = aiCard().querySelector("section").textContent.replace(/\s+/g, " ").trim();
-    await stage("ai-panel", { claude, codex });
+    await waitFor(() => /codex-cli/.test(agentStatus()), "codex detection", 30000);
+    const codex = agentStatus();
+    await waitFor(() => [...(modelSelect()?.options ?? [])].some((o) => o.value === "stand-in-large"), "codex models", 20000);
+    const codexModels = [...modelSelect().options].map((o) => o.textContent);
+    await ask("what is in orders?");
+    await answered("error", "codex refusal");
+    const codexRefused = flat(lastAnswer().querySelector('[role="alert"]'));
+    await setValue(modelSelect(), "stand-in-large");
+    await click(withText("aside button", "Try again"), "retry codex");
+    await answered("done", "codex answer");
+    const codexAnswer = flat(lastAnswer());
+    await stage("agent-codex", { codex, codexModels, codexRefused, codexAnswer, opened, modelRefused, retried, stopped });
 
     // ---- duplicate + delete through context menus -----------------------------------
     await rightClick(treeRow("Demo MySQL"));

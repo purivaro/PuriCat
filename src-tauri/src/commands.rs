@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 
-use puricat_core::ai_detect::{self, CliStatus};
+use puricat_core::agent::{self, AgentEvent, ChatRequest, ModelChoice};
+use puricat_core::ai_detect::{self, CliStatus, Provider};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -156,6 +157,8 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result
     state.remove_session(&id).await;
     let key = password_key(&id);
     state.with_secrets(move |s| s.delete(&key)).await?;
+    // What was run on a connection goes with it.
+    state.store.clear_history(&id).await?;
     state.store.delete_connection(&id).await
 }
 
@@ -536,6 +539,70 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
 #[tauri::command]
 pub async fn detect_ai_clis() -> Vec<CliStatus> {
     ai_detect::detect_all().await
+}
+
+// ---- agent chat -------------------------------------------------------------------------
+
+/// Models offered in the chat's model selector for one provider.
+#[tauri::command]
+pub async fn agent_models(provider: Provider) -> Vec<ModelChoice> {
+    agent::models(provider).await
+}
+
+/// The schema context for a chat: exactly the text that will be sent, so the UI can show
+/// it first. Names and types only — never rows, hosts, user names or passwords.
+#[tauri::command]
+pub async fn agent_context(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    sql: Option<String>,
+) -> Result<String> {
+    let session = state.session(&id).await?;
+    let info = session.server_info().await?;
+    let objects = session.list_objects(&database, schema.as_deref()).await?;
+    let mut tables = Vec::with_capacity(objects.len());
+    for (i, object) in objects.into_iter().enumerate() {
+        let meta = if i < agent::MAX_CONTEXT_TABLES {
+            let table = TableRef {
+                database: database.clone(),
+                schema: schema.clone(),
+                name: object.name.clone(),
+            };
+            session.describe_table(&table).await.ok()
+        } else {
+            None
+        };
+        tables.push((object, meta));
+    }
+    Ok(agent::render_context(
+        info.engine,
+        &info.version,
+        &database,
+        schema.as_deref(),
+        &tables,
+        sql.as_deref(),
+    ))
+}
+
+/// One chat turn through the user's CLI. The answer streams over `on_event`; the return
+/// value is the complete answer. `cancel_job` stops the CLI.
+#[tauri::command]
+pub async fn agent_send(
+    state: State<'_, AppState>,
+    job: String,
+    request: ChatRequest,
+    on_event: Channel<AgentEvent>,
+) -> Result<String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = agent::chat(&request, &state.agent_scratch, &stop, |event| {
+        let _ = on_event.send(event);
+    })
+    .await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
 }
 
 /// Lets an injected end-to-end script hand its findings to the test runner.

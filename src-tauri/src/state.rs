@@ -39,6 +39,8 @@ pub struct AppState {
     pub consoles: tokio::sync::Mutex<HashMap<String, Arc<ConsoleSlot>>>,
     /// Cancel flags of running long jobs, by job id.
     pub jobs: std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// An empty directory the AI CLIs are started in, so they have no files to look at.
+    pub agent_scratch: std::path::PathBuf,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
             sessions: RwLock::new(HashMap::new()),
             consoles: Default::default(),
             jobs: Default::default(),
+            agent_scratch: data_dir.join("agent-scratch"),
         })
     }
 

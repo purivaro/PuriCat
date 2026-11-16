@@ -1,0 +1,43 @@
+#!/bin/sh
+# Stand-in for the Codex CLI in the end-to-end test: no network, canned answers.
+# The refusal is the real one codex-cli 0.133.0 printed; the success shape is the
+# documented one for `codex exec --json`.
+case "$1" in
+  --version) echo "codex-cli 0.0.0 (stand-in)"; exit 0 ;;
+  login) echo "Logged in using ChatGPT"; exit 0 ;;
+  debug)
+    cat <<'JSON'
+{"models":[
+ {"slug":"stand-in-large","display_name":"Stand-in Large","visibility":"list","description":"Answers in the test."},
+ {"slug":"stand-in-refused","display_name":"Stand-in Refused","visibility":"list","description":"Refused by the service."},
+ {"slug":"stand-in-hidden","display_name":"Hidden","visibility":"hide"}]}
+JSON
+    exit 0 ;;
+esac
+
+model=
+previous=
+for argument in "$@"; do
+  [ "$previous" = "-m" ] && model=$argument
+  previous=$argument
+done
+prompt=$(cat)
+if [ -n "${PURICAT_STAND_IN_DIR:-}" ]; then
+  printf '%s\n' "$prompt" >"$PURICAT_STAND_IN_DIR/codex.stdin"
+  printf '%s\n' "$@" >"$PURICAT_STAND_IN_DIR/codex.args"
+fi
+
+echo '{"type":"thread.started","thread_id":"stand-in"}'
+echo '{"type":"turn.started"}'
+if [ "$model" != "stand-in-large" ]; then
+  cat <<'JSON'
+{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'stand-in' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}"}
+{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'stand-in' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}"}}
+JSON
+  exit 1
+fi
+cat <<'JSON'
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Looking at the schema"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"The `orders` table has one row per order."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":9}}
+JSON

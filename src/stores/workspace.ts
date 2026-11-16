@@ -30,6 +30,13 @@ export type Tab = WelcomeTab | TableTab | SqlTab;
 /** Settings key holding a query tab's text, so it survives a restart. */
 export const sqlTextKey = (tabId: string) => `sql:${tabId}`;
 
+/** Text a query tab was opened with (SQL sent over from the agent chat), until it closes. */
+const seeds = new Map<string, string>();
+export const sqlSeed = (tabId: string) => seeds.get(tabId);
+
+/** What each open query tab's editor holds right now, for the agent's context. */
+export const sqlEditors = new Map<string, () => string>();
+
 const WELCOME: WelcomeTab = { id: "welcome", kind: "welcome" };
 
 export function tableTabId(connectionId: string, t: TableRef): string {
@@ -43,6 +50,7 @@ function released(before: Tab[], after: Tab[]) {
     if (t.kind === "sql" && !after.some((x) => x.id === t.id)) {
       void ipc.closeConsole(t.id);
       void ipc.setSetting(sqlTextKey(t.id), "");
+      seeds.delete(t.id);
     }
   }
 }
@@ -71,7 +79,8 @@ interface WorkspaceState {
   cancelClose: () => void;
   restore: () => Promise<void>;
   openTable: (connectionId: string, table: TableRef, objectKind: ObjectKind) => void;
-  openSql: (connectionId: string, database: string | null) => void;
+  /** Open a new query tab, optionally with `text` already in the editor. */
+  openSql: (connectionId: string, database: string | null, text?: string) => void;
   setSqlDatabase: (id: string, database: string | null) => void;
   openWelcome: () => void;
   activate: (id: string) => void;
@@ -133,13 +142,17 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       commit({ tabs: [...tabs, { id, kind: "table", connectionId, table, objectKind }], activeId: id });
     },
 
-    openSql: (connectionId, database) => {
+    openSql: (connectionId, database, text) => {
       const { tabs } = get();
       // "Query 3" is the next free number, so names stay unique while tabs are open.
       const used = new Set(tabs.flatMap((t) => (t.kind === "sql" ? [t.title] : [])));
       let n = 1;
       while (used.has(`Query ${n}`)) n++;
       const id = `sql:${crypto.randomUUID()}`;
+      if (text) {
+        seeds.set(id, text);
+        void ipc.setSetting(sqlTextKey(id), text);
+      }
       commit({ tabs: [...tabs, { id, kind: "sql", connectionId, database, title: `Query ${n}` }], activeId: id });
     },
 

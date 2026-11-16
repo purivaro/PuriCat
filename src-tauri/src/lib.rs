@@ -48,6 +48,9 @@ pub fn run() {
             commands::get_settings,
             commands::set_setting,
             commands::detect_ai_clis,
+            commands::agent_models,
+            commands::agent_context,
+            commands::agent_send,
             commands::e2e_report,
         ]);
 

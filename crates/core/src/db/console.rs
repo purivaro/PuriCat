@@ -176,7 +176,11 @@ struct Executed {
 fn value_kind(type_name: &str) -> ValueKind {
     let t = type_name.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
-    if has(&["bool"]) {
+    if has(&["interval"]) {
+        ValueKind::Temporal // before "int", which it contains
+    } else if has(&["point"]) {
+        ValueKind::Text // likewise
+    } else if has(&["bool"]) {
         ValueKind::Bool
     } else if has(&["json"]) {
         ValueKind::Json
@@ -612,8 +616,11 @@ impl Console {
                         self.in_transaction = open;
                     }
                 }
-                // MySQL commits implicitly around DDL.
-                if statement.kind == Kind::Ddl && engine == Engine::Mysql {
+                // MySQL commits implicitly around DDL, except for temporary tables.
+                if statement.kind == Kind::Ddl
+                    && engine == Engine::Mysql
+                    && !script::mentions(engine, &statement.text, "TEMPORARY")
+                {
                     self.in_transaction = false;
                 }
                 if executed.sets.is_empty() && statement.kind == Kind::Read {
@@ -726,6 +733,9 @@ mod tests {
             ("BYTEA", ValueKind::Binary),
             ("VARBINARY", ValueKind::Binary),
             ("BOOL", ValueKind::Bool),
+            ("INTERVAL", ValueKind::Temporal),
+            ("POINT", ValueKind::Text),
+            ("INT4", ValueKind::Number),
         ] {
             assert_eq!(value_kind(name), kind, "{name}");
         }

@@ -238,6 +238,32 @@ export interface CliStatus {
   authenticated: boolean | null;
 }
 
+/** What the backend streams while an agent turn runs. */
+export type AgentEvent =
+  | { type: "started"; model: string | null }
+  | { type: "delta"; text: string }
+  | { type: "message"; text: string };
+
+export interface ModelChoice {
+  id: string;
+  label: string;
+  description: string | null;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface ChatRequest {
+  provider: AiProvider;
+  /** `null` leaves the choice to the CLI. */
+  model: string | null;
+  /** The schema context, exactly as shown in the context inspector. */
+  context: string | null;
+  messages: ChatMessage[];
+}
+
 export interface AppError {
   kind: "invalid" | "not_found" | "database" | "store" | "secret" | "unsupported" | "conflict" | "io" | "unknown";
   message: string;

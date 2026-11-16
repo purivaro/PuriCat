@@ -8,6 +8,8 @@
 # Needs local servers that accept:  mysql -u$MYSQL_USER -h127.0.0.1   /   psql -U$PG_USER -h127.0.0.1
 # It creates ONE database on each server, `puricat_e2e`, and drops it again. Nothing else is touched,
 # and the app runs against a throwaway settings directory with an in-memory secret store.
+# The AI CLIs are stand-ins (e2e/fixtures/bin): the agent chat is tested without any account,
+# network or quota, and what the app hands to the CLI is checked afterwards.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -49,6 +51,8 @@ fi
 # APP=<binary> tests a bundled debug build (`pnpm tauri build --debug`): embedded assets and the
 # production Content-Security-Policy instead of the Vite dev server.
 cd "$ROOT"
+export PATH="$ROOT/e2e/fixtures/bin:$PATH"
+export PURICAT_STAND_IN_DIR="$WORK"
 if [ -n "${APP:-}" ]; then
   echo "› launching $APP"
   PURICAT_DATA_DIR="$WORK/data" PURICAT_SECRET_STORE=memory \
@@ -97,6 +101,26 @@ if [ "$last" = done ]; then
   unzip -p "$WORK/export.xlsx" xl/sharedStrings.xml | grep -q 'สมชาย ใจดี' || { echo "✗ export check failed: xlsx"; exit 1; }
   head -c 3 "$WORK/export.csv" | xxd -p | grep -q '^efbbbf$' || { echo "✗ export check failed: CSV has no byte-order mark"; exit 1; }
   echo "  · exported CSV, JSON and XLSX verified"
+
+  # What the agent chat gave the CLI: the schema and the conversation on stdin, nothing that
+  # identifies the server, no tools, and an empty working directory of the app's own.
+  check "$WORK/claude.stdin" '^Engine: PostgreSQL'
+  check "$WORK/claude.stdin" '^Database: puricat_e2e$'
+  check "$WORK/claude.stdin" 'take your time'
+  check "$WORK/codex.stdin" '^You are the database assistant inside PuriCat'
+  if grep -qE "127\.0\.0\.1|Demo PostgreSQL|Demo MySQL" "$WORK/claude.stdin" "$WORK/codex.stdin"; then
+    echo "✗ agent check failed: the prompt names the server or the connection"; exit 1
+  fi
+  if grep -qE "orders|puricat_e2e" "$WORK/claude.args" "$WORK/codex.args"; then
+    echo "✗ agent check failed: schema or conversation text in the CLI's arguments"; exit 1
+  fi
+  check "$WORK/claude.args" '^--strict-mcp-config$'
+  check "$WORK/claude.args" '^--no-session-persistence$'
+  check "$WORK/codex.args" '^read-only$'
+  grep -A1 -x -- '--tools' "$WORK/claude.args" | tail -1 | grep -qx '' || { echo "✗ agent check failed: built-in tools were not disabled"; exit 1; }
+  check "$WORK/claude.cwd" '/data/agent-scratch$'
+  [ -z "$(ls -A "$WORK/data/agent-scratch")" ] || { echo "✗ agent check failed: the scratch directory is not empty"; exit 1; }
+  echo "  · agent chat: prompt, arguments and working directory verified"
 fi
 if [ "$last" = done ]; then
   echo "✓ end-to-end smoke test passed — report: target/e2e-report.json"

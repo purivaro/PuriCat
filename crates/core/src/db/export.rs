@@ -60,18 +60,35 @@ fn csv(path: &Path, set: &ResultSet) -> Result<()> {
     Ok(out.flush()?)
 }
 
+/// Object keys for the columns. A query may return two columns with one name (`a.id`,
+/// `b.id`); the later ones get a numeric suffix so no value is dropped.
+fn json_keys(set: &ResultSet) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::with_capacity(set.columns.len());
+    for column in &set.columns {
+        let mut key = column.name.clone();
+        let mut n = 2;
+        while keys.contains(&key) {
+            key = format!("{}_{n}", column.name);
+            n += 1;
+        }
+        keys.push(key);
+    }
+    keys
+}
+
 /// An array of objects. Every value is a string or null: JSON numbers would silently lose
 /// digits of large integers and decimals in most consumers.
 fn json(path: &Path, set: &ResultSet) -> Result<()> {
     let mut out = BufWriter::new(std::fs::File::create(path)?);
+    let keys = json_keys(set);
     out.write_all(b"[")?;
     for (i, row) in set.rows.iter().enumerate() {
         let mut object = serde_json::Map::with_capacity(row.len());
-        for (column, cell) in set.columns.iter().zip(row) {
+        for (key, cell) in keys.iter().zip(row) {
             let value = cell
                 .clone()
                 .map_or(serde_json::Value::Null, serde_json::Value::String);
-            object.insert(column.name.clone(), value);
+            object.insert(key.clone(), value);
         }
         out.write_all(if i == 0 { b"\n  " } else { b",\n  " })?;
         serde_json::to_writer(&mut out, &object).map_err(|e| Error::Io(e.into()))?;
@@ -200,6 +217,15 @@ mod tests {
         assert_eq!(parsed[1]["ชื่อ, \"name\""], "");
         assert_eq!(parsed[0]["note"], "two\nlines");
         assert_eq!(parsed.as_array().unwrap().len(), 3);
+
+        // Two columns with one name both survive.
+        let mut twice = sample();
+        twice.columns[2].name = "id".into();
+        twice.columns.push(twice.columns[0].clone());
+        for row in &mut twice.rows {
+            row.push(Some("last".into()));
+        }
+        assert_eq!(json_keys(&twice), ["id", "ชื่อ, \"name\"", "id_2", "id_3"]);
     }
 
     #[test]
