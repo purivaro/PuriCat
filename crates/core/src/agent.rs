@@ -562,82 +562,136 @@ pub async fn chat_with(
     // An empty directory of PuriCat's own: the CLI has nothing of the user's to look at.
     std::fs::create_dir_all(scratch)?;
 
-    let mut child = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .args(arguments(provider, model, scratch))
         .current_dir(scratch)
         .env("PATH", ai_detect::path_with(path.parent()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    // A process group of its own: a CLI may be a launcher with the real program as its
+    // child (Codex is), and Stop has to end all of it.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn()?;
 
+    // Fed from a task of its own, so a CLI that never reads its input cannot block the turn.
     let mut stdin = child.stdin.take().expect("piped stdin");
-    let feed = async move {
+    let feed = tokio::spawn(async move {
         // The CLI may exit before reading everything (a bad model name): not our error.
         let _ = stdin.write_all(prompt.as_bytes()).await;
         let _ = stdin.shutdown().await;
-    };
+    });
+    // The tail of stderr, for the case where the stream carries no verdict.
     let mut stderr = child.stderr.take().expect("piped stderr");
-    let errors = async move {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text).await;
-        text
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let collect = {
+        let said = said.clone();
+        tokio::spawn(async move {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = stderr.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                let mut all = said.lock().unwrap();
+                all.extend_from_slice(&chunk[..n]);
+                if all.len() > 64 * 1024 {
+                    let cut = all.len() - 32 * 1024;
+                    all.drain(..cut);
+                }
+            }
+        })
     };
+
+    enum End {
+        /// The stream said how the turn ended.
+        Verdict,
+        /// The CLI closed its output without saying.
+        Closed,
+        Stopped,
+        TimedOut,
+    }
     let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
     let mut parser = StreamParser::new(provider);
-    let read = async {
-        loop {
-            let line = tokio::select! {
-                line = lines.next_line() => line,
-                _ = tokio::time::sleep(Duration::from_millis(150)) => {
-                    if stop.load(Ordering::Relaxed) {
-                        return false;
-                    }
-                    continue;
+    let deadline = tokio::time::Instant::now() + TURN_TIMEOUT;
+    let end = loop {
+        if stop.load(Ordering::Relaxed) {
+            break End::Stopped;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break End::TimedOut;
+        }
+        let line = tokio::select! {
+            line = lines.next_line() => line,
+            _ = tokio::time::sleep(Duration::from_millis(150)) => continue,
+        };
+        match line {
+            Ok(Some(line)) => {
+                parser.line(&line).into_iter().for_each(&mut on_event);
+                // The verdict ends the turn, even if something the CLI started keeps the
+                // pipe open.
+                if parser.outcome.is_some() {
+                    break End::Verdict;
                 }
-            };
-            match line {
-                Ok(Some(line)) => parser.line(&line).into_iter().for_each(&mut on_event),
-                _ => return true,
             }
+            _ => break End::Closed,
         }
     };
-    let finished = tokio::time::timeout(TURN_TIMEOUT, async {
-        let (_, stderr, completed) = tokio::join!(feed, errors, async {
-            let completed = read.await;
-            if !completed {
-                let _ = child.start_kill();
-            }
-            completed
-        });
-        (stderr, completed)
-    })
-    .await;
 
-    let (stderr, completed) = match finished {
-        Ok(done) => done,
+    // A CLI that is finishing gets a moment to exit by itself; otherwise it is ended.
+    let grace = match end {
+        End::Verdict | End::Closed => Duration::from_secs(5),
+        End::Stopped | End::TimedOut => Duration::ZERO,
+    };
+    let status = match tokio::time::timeout(grace, child.wait()).await {
+        Ok(status) => status.ok(),
         Err(_) => {
-            let _ = child.start_kill();
-            return Err(Error::Unsupported(format!(
-                "The {} CLI did not finish within {} minutes and was stopped",
-                provider.binary(),
-                TURN_TIMEOUT.as_secs() / 60
-            )));
+            kill_tree(&mut child).await;
+            None
         }
     };
-    if !completed {
-        let _ = child.wait().await;
-        return Err(Error::Conflict("Stopped".into()));
+    feed.abort();
+    let reader = collect.abort_handle();
+    let _ = tokio::time::timeout(Duration::from_millis(300), collect).await;
+    reader.abort();
+    let stderr = String::from_utf8_lossy(&said.lock().unwrap()).into_owned();
+
+    match end {
+        End::Stopped => Err(Error::Conflict("Stopped".into())),
+        End::TimedOut => Err(Error::Unsupported(format!(
+            "The {} CLI did not finish within {} minutes and was stopped",
+            provider.binary(),
+            TURN_TIMEOUT.as_secs() / 60
+        ))),
+        End::Verdict | End::Closed => match parser.outcome.take() {
+            Some(Ok(())) => Ok(parser.text().to_string()),
+            Some(Err(message)) => Err(Error::Unsupported(message)),
+            // No verdict in the stream: fall back to the exit status and what the CLI printed.
+            None if status.is_some_and(|s| s.success()) && !parser.text().is_empty() => {
+                Ok(parser.text().to_string())
+            }
+            None => Err(Error::Unsupported(describe_failure(provider, &stderr))),
+        },
     }
-    let status = child.wait().await?;
-    match parser.outcome.take() {
-        Some(Ok(())) => Ok(parser.text().to_string()),
-        Some(Err(message)) => Err(Error::Unsupported(message)),
-        // No verdict in the stream: fall back to the exit status and what the CLI printed.
-        None if status.success() && !parser.text().is_empty() => Ok(parser.text().to_string()),
-        None => Err(Error::Unsupported(describe_failure(provider, &stderr))),
+}
+
+/// End the CLI and everything in its process group.
+async fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // `kill` with a negative id signals the whole group. No shell is involved.
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
     }
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
 }
 
 /// The last meaningful line the CLI printed to stderr, without log prefixes.
@@ -1054,6 +1108,55 @@ mod tests {
             vec![AgentEvent::Started {
                 model: Some("slow".into())
             }]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // A CLI that is a launcher: the real work happens in a child that holds the pipes.
+        // Stop ends that child too, and the turn does not wait for it.
+        let launcher = format!(
+            "{}\n(sleep 30) &\necho $! > \"$0.pid\"\nwait",
+            print_lines(&[r#"{"type":"system","subtype":"init","model":"launcher"}"#])
+        );
+        let (dir, path) = stand_in(&launcher);
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let error = chat_with(&path, &ask, &dir.join("s"), &stop, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Stopped");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let pid = std::fs::read_to_string(dir.join("claude.pid")).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the CLI's child survived Stop");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // The verdict ends the turn at once, even while a child of the CLI keeps the pipe open.
+        let lingering = format!("(sleep 8) &\n{}", print_lines(CLAUDE_OK));
+        let (dir, path) = stand_in(&lingering);
+        let started = std::time::Instant::now();
+        let answer = chat_with(&path, &ask, &dir.join("s"), &idle, |_| {})
+            .await
+            .unwrap();
+        assert!(answer.starts_with("OK"));
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "{:?}",
+            started.elapsed()
         );
         std::fs::remove_dir_all(&dir).unwrap();
 
