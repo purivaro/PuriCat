@@ -10,7 +10,6 @@ import type {
   DbObject,
   Namespace,
   PasteAnalysis,
-  PasteCounts,
   PasteRequest,
   PasswordChange,
   RowPage,
@@ -60,7 +59,7 @@ export const ipc = {
     id: string,
     table: TableRef,
     request: PasteRequest,
-    expected: PasteCounts,
+    expected: string,
     job: string,
     onProgress: (done: number) => void,
   ) => {

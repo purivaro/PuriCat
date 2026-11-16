@@ -49,8 +49,11 @@ interface Props {
 }
 
 export function SmartPasteDialog(props: Props) {
+  // While a run is in flight the dialog cannot be dismissed (Esc, outside click, the close
+  // button): the only way out is "Stop and roll back", so its outcome is always seen.
+  const [busy, setBusy] = useState(false);
   return (
-    <Dialog.Root open={props.open} onOpenChange={(o) => !o && props.onClose()}>
+    <Dialog.Root open={props.open} onOpenChange={(o) => !o && !busy && props.onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="animate-fade fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px] dark:bg-black/55" />
         <Dialog.Content
@@ -66,14 +69,14 @@ export function SmartPasteDialog(props: Props) {
           className="animate-pop fixed top-1/2 left-1/2 z-50 flex h-[min(90vh,780px)] w-[min(95vw,900px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-raised shadow-pop outline-none"
         >
           {/* Mounted per opening, so every paste starts from the current clipboard. */}
-          {props.open && <Wizard {...props} />}
+          {props.open && <Wizard {...props} onBusy={setBusy} />}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
 
-function Wizard({ onClose, connection, table, columns, onDone }: Props) {
+function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props & { onBusy: (busy: boolean) => void }) {
   const { t } = useTranslation();
   const production = connection.environment === "production";
 
@@ -91,6 +94,10 @@ function Wizard({ onClose, connection, table, columns, onDone }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [run, setRun] = useState<{ job: string; done: number; total: number } | null>(null);
   const analysing = useRef(0);
+  useEffect(() => {
+    onBusy(!!run);
+    return () => onBusy(false);
+  }, [run, onBusy]);
   const previewRef = useRef<HTMLElement>(null);
 
   const read = useCallback(async () => {
@@ -119,8 +126,9 @@ function Wizard({ onClose, connection, table, columns, onDone }: Props) {
 
   // ---- derived set-up ----------------------------------------------------------------
   const available = useMemo(() => usableKeys(keys, mapping), [keys, mapping]);
-  const chosen =
-    keyName === "" ? undefined : (available.find((k) => k.name === keyName) ?? (mode === "insert" ? undefined : available[0]));
+  // INSERT may run without a key; UPDATE and UPSERT always use one (the first usable by default).
+  const picked = available.find((k) => k.name === keyName);
+  const chosen = mode === "insert" ? picked : (picked ?? available[0]);
   const key = useMemo(() => chosen?.columns ?? [], [chosen]);
   const updatable = useMemo(() => updatableColumns(mapping, key, columns), [mapping, key, columns]);
   const generatedKey = key.some((k) => columns.find((c) => c.name === k)?.generated);
@@ -170,7 +178,7 @@ function Wizard({ onClose, connection, table, columns, onDone }: Props) {
     setRun({ job, done: 0, total: toRun });
     setError(null);
     try {
-      const result = await ipc.applyPaste(connection.id, table, built.request, current.counts, job, (done) =>
+      const result = await ipc.applyPaste(connection.id, table, built.request, current.fingerprint, job, (done) =>
         setRun((r) => r && { ...r, done }),
       );
       onDone(result);

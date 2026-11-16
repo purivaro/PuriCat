@@ -9,7 +9,7 @@ use puricat_core::ai_detect::{self, CliStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use puricat_core::db::smart::{Analysis, Counts, PasteRequest, UniqueKey};
+use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
 use puricat_core::db::write::{ApplyResult, ChangeSet, Statement};
 use puricat_core::db::{DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableRef};
 use puricat_core::model::ConnectionProfile;
@@ -299,7 +299,7 @@ pub async fn analyze_paste(
         .await
 }
 
-/// Smart Paste run. `expected` is the outcome the user approved in the preview; if a fresh
+/// Smart Paste run. `expected` is the fingerprint of the previewed outcome; if a fresh
 /// analysis disagrees, nothing runs. Progress is streamed; `cancel_job` rolls it back.
 #[tauri::command]
 pub async fn apply_paste(
@@ -307,7 +307,7 @@ pub async fn apply_paste(
     id: String,
     table: TableRef,
     request: PasteRequest,
-    expected: Counts,
+    expected: String,
     job: String,
     on_progress: Channel<u32>,
 ) -> Result<ApplyResult> {

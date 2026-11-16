@@ -370,14 +370,14 @@ impl Session {
         Ok(self.prepare_paste(table, request).await?.0)
     }
 
-    /// Smart Paste, write half. The table is analysed again; if the outcome no longer matches
-    /// what the user approved (`expected`), nothing runs. Every UPDATE also carries the
+    /// Smart Paste, write half. The table is analysed again; if the outcome is not exactly the
+    /// one the user approved (`expected`, the preview's fingerprint), nothing runs. Every UPDATE also carries the
     /// optimistic check on the values seen by this fresh analysis.
     pub async fn apply_paste(
         &self,
         table: &TableRef,
         request: &smart::PasteRequest,
-        expected: &smart::Counts,
+        expected: &str,
         keep_going: &(dyn Fn(usize) -> bool + Send + Sync),
     ) -> Result<write::ApplyResult> {
         let started = Instant::now();
@@ -385,7 +385,7 @@ impl Session {
         if let Some(problem) = analysis.problems.first() {
             return Err(Error::Invalid(problem.clone()));
         }
-        if &analysis.counts != expected {
+        if analysis.fingerprint != expected {
             return Err(Error::Conflict(
                 "The table changed since the preview, so the result would be different. Preview again before running.".into(),
             ));

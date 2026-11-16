@@ -2,7 +2,6 @@
 // to table columns, and building the request the backend analyses and runs.
 
 import type { ColumnMeta, PasteMode, PasteRequest, UniqueKey } from "../../lib/types";
-import { typedValue } from "./pending";
 
 /** Target column name for each pasted column; `null` skips that column. */
 export type Mapping = (string | null)[];
@@ -97,7 +96,9 @@ export function buildRequest(o: BuildOptions): Built {
         if (o.nullText && text === "NULL") return null;
         // A blank key is "no key", whatever the column type.
         if (text === "" && o.key.includes(picked[j]!.name)) return null;
-        return typedValue(meta[j]!, text);
+        // An empty cell is "no value" for anything but text, also where the column is NOT NULL:
+        // the backend then applies the column default, or reports the cell as required.
+        return text === "" && meta[j]!.kind !== "text" ? null : text;
       }),
     );
     sourceRows.push(r);

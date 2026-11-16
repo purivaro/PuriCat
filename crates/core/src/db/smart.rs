@@ -117,6 +117,9 @@ pub struct Analysis {
     /// One report per pasted row, in pasted order. Empty when `problems` is not.
     pub rows: Vec<RowReport>,
     pub counts: Counts,
+    /// Identifies this exact outcome (every row's status and changed columns). A run is
+    /// accepted only if a fresh analysis produces the same fingerprint.
+    pub fingerprint: String,
     /// Problems with the set-up itself (mapping, key, required columns).
     pub problems: Vec<String>,
     pub elapsed_ms: u64,
@@ -144,6 +147,8 @@ pub struct Draft<'a> {
     /// A key column is filled in by the server, so a blank key means "new row".
     generated_key: bool,
     slots: Vec<Slot>,
+    /// Existing rows already matched, by their key as the database renders it.
+    claimed: HashMap<Vec<Option<String>>, usize>,
     problems: Vec<String>,
 }
 
@@ -185,6 +190,27 @@ fn is_number(text: &str) -> bool {
     mantissa_ok && exponent.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e)))
 }
 
+fn is_integer(text: &str) -> bool {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A key value is compared, not stored, so nothing downstream would reject a malformed one.
+fn check_key(col: &ColumnMeta, value: &str) -> Option<String> {
+    let integer = matches!(
+        col.base_type.as_str(),
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year"
+    );
+    if integer && !is_integer(value) {
+        return Some(format!(
+            "{}: “{}” is not a whole number",
+            col.name,
+            shown(value)
+        ));
+    }
+    check_value(col, value)
+}
+
 /// Declared length of a character column, e.g. 20 for `varchar(20)`.
 fn max_chars(col: &ColumnMeta) -> Option<usize> {
     let base = col.base_type.as_str();
@@ -213,6 +239,17 @@ fn check_value(col: &ColumnMeta, value: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Stable within one build of the app, which is all a preview-then-run round trip needs.
+fn fingerprint(reports: &[RowReport]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for report in reports {
+        (report.status as u8).hash(&mut hasher);
+        report.changed.hash(&mut hasher);
+    }
+    format!("{}-{:016x}", reports.len(), hasher.finish())
 }
 
 impl<'a> Draft<'a> {
@@ -314,6 +351,7 @@ impl<'a> Draft<'a> {
             fetch,
             generated_key,
             slots: Vec::new(),
+            claimed: HashMap::new(),
             problems,
         };
         if draft.problems.is_empty() {
@@ -350,6 +388,16 @@ impl<'a> Draft<'a> {
                         format!("No value for the key ({})", request.key.join(", ")),
                     ))
                 });
+                continue;
+            }
+            // A key the database would silently bend to fit (MySQL reads the text "12abc" or
+            // "1.9" as the integer 12 or 1) must never reach a comparison: it could address
+            // the wrong row.
+            let bad_key = request.key.iter().zip(&key).find_map(|(name, value)| {
+                column(self.meta, name).and_then(|col| check_key(col, value))
+            });
+            if let Some(problem) = bad_key {
+                slots.push(Slot::Done(RowReport::new(RowStatus::Invalid, problem)));
                 continue;
             }
             match first_seen.get(&key) {
@@ -448,6 +496,19 @@ impl<'a> Draft<'a> {
                 .collect();
             match hits.as_slice() {
                 [row] => {
+                    // The key as the database renders it identifies the existing row. A second
+                    // pasted row reaching the same one (from another chunk) is a duplicate too.
+                    let identity = values[..self.request.key.len().min(values.len())].to_vec();
+                    if let Some(&other) = self.claimed.get(&identity).filter(|&&o| o != *row) {
+                        for (a, b) in [(*row, other), (other, *row)] {
+                            self.slots[a] = Slot::Done(RowReport::new(
+                                RowStatus::Duplicate,
+                                format!("Same existing row as pasted row {}", b + 1),
+                            ));
+                        }
+                        continue;
+                    }
+                    self.claimed.insert(identity, *row);
                     self.slots[*row] = match &self.slots[*row] {
                         Slot::Lookup(None) => Slot::Lookup(Some(values.to_vec())),
                         _ => Slot::Done(RowReport::new(
@@ -564,6 +625,7 @@ impl<'a> Draft<'a> {
             let analysis = Analysis {
                 rows: reports,
                 counts: Counts::default(),
+                fingerprint: String::new(),
                 problems: self.problems,
                 elapsed_ms: 0,
             };
@@ -582,6 +644,10 @@ impl<'a> Draft<'a> {
                 Slot::Done(report) => report.clone(),
                 Slot::New => adding(&mut changes),
                 Slot::Lookup(None) => match mode {
+                    Mode::Insert if self.generated_key => RowReport::new(
+                        RowStatus::Invalid,
+                        "The key is assigned by the server and cannot be set. Leave it empty to add this row.".to_string(),
+                    ),
                     Mode::Insert => adding(&mut changes),
                     Mode::Upsert if !self.generated_key => adding(&mut changes),
                     Mode::Upsert => RowReport::new(
@@ -621,10 +687,12 @@ impl<'a> Draft<'a> {
                 _ => {}
             }
         }
+        let fingerprint = fingerprint(&reports);
         (
             Analysis {
                 rows: reports,
                 counts,
+                fingerprint,
                 problems: Vec::new(),
                 elapsed_ms: 0,
             },
@@ -758,16 +826,17 @@ mod tests {
         let lookups = draft.lookups(&table()).unwrap();
         assert_eq!(lookups.len(), 1);
         let (sql, params, rows) = &lookups[0];
-        assert_eq!(rows, &vec![0, 1, 2, 6, 7]);
+        // Row 8's key is longer than the column allows: it is refused without a lookup.
+        assert_eq!(rows, &vec![0, 1, 2, 6]);
         assert!(
             sql.starts_with("SELECT (\"sku\" = $1::varchar)::text, (\"sku\" = $2::varchar)::text")
         );
-        assert!(sql.contains("\"sku\"::text, \"name\"::text, \"qty\"::text FROM \"public\".\"items\" WHERE (\"sku\" = $6::varchar) OR"));
-        assert_eq!(params.len(), 10);
+        assert!(sql.contains("\"sku\"::text, \"name\"::text, \"qty\"::text FROM \"public\".\"items\" WHERE (\"sku\" = $5::varchar) OR"));
+        assert_eq!(params.len(), 8);
         assert!(!sql.contains("Apple"), "values travel as parameters");
 
         let flag = |hit: usize| {
-            (0..5).map(move |i| Some(if i == hit { "true" } else { "false" }.to_string()))
+            (0..4).map(move |i| Some(if i == hit { "true" } else { "false" }.to_string()))
         };
         let found = vec![
             flag(0)
@@ -941,6 +1010,60 @@ mod tests {
         assert_eq!(
             statuses(&draft.finish().0),
             vec![RowStatus::Duplicate, RowStatus::Duplicate]
+        );
+    }
+
+    #[test]
+    fn one_existing_row_is_claimed_once_even_across_lookup_chunks() {
+        let m = meta();
+        let req = request(
+            Mode::Update,
+            &["sku", "name"],
+            &["sku"],
+            &["name"],
+            &[
+                &[Some("abc"), Some("x")],
+                &[Some("ABC"), Some("y")],
+                &[Some("zzz"), Some("z")],
+            ],
+        );
+        let mut draft = Draft::new(Engine::Mysql, &m, &keys(), &req).unwrap();
+        // As if each pasted row had been looked up in its own chunk; a case-insensitive
+        // collation returns the same stored row ("Abc") for the first two.
+        let stored = |flag: &str| {
+            vec![
+                Some(flag.to_string()),
+                Some("Abc".into()),
+                Some("old".into()),
+            ]
+        };
+        draft.matched(&[0], vec![stored("1")]);
+        draft.matched(&[1], vec![stored("1")]);
+        draft.matched(&[2], vec![]);
+        use RowStatus::*;
+        assert_eq!(
+            statuses(&draft.finish().0),
+            vec![Duplicate, Duplicate, Unmatched]
+        );
+    }
+
+    #[test]
+    fn key_values_must_be_well_formed_for_their_type() {
+        let m = meta();
+        let rows: &[&[Option<&str>]] = &[
+            &[Some("12abc"), Some("a")],
+            &[Some("1.9"), Some("b")],
+            &[Some("1e2"), Some("c")],
+            &[Some("-7"), Some("d")],
+        ];
+        let req = request(Mode::Update, &["id", "name"], &["id"], &["name"], rows);
+        let draft = Draft::new(Engine::Mysql, &m, &keys(), &req).unwrap();
+        // Only the well-formed key is sent to the database at all.
+        assert_eq!(draft.lookups(&table()).unwrap()[0].2, vec![3]);
+        use RowStatus::*;
+        assert_eq!(
+            statuses(&draft.finish().0),
+            vec![Invalid, Invalid, Invalid, Unmatched]
         );
     }
 

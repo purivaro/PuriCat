@@ -671,7 +671,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     );
 
     let done = session
-        .apply_paste(stock, &upsert, &preview.counts, GO)
+        .apply_paste(stock, &upsert, &preview.fingerprint, GO)
         .await
         .unwrap();
     assert_eq!((done.inserted, done.updated, done.deleted), (1, 1, 0));
@@ -700,7 +700,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
 
     // Running the approved paste again would now do something else: refused.
     match session
-        .apply_paste(stock, &upsert, &preview.counts, GO)
+        .apply_paste(stock, &upsert, &preview.fingerprint, GO)
         .await
     {
         Err(Error::Conflict(message)) => assert!(message.contains("Preview again"), "{message}"),
@@ -716,7 +716,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     assert_eq!(preview.rows[1].status, RowStatus::Exists);
     assert!(matches!(
         session
-            .apply_paste(stock, &insert, &preview.counts, GO)
+            .apply_paste(stock, &insert, &preview.fingerprint, GO)
             .await,
         Err(Error::Invalid(_))
     ));
@@ -731,7 +731,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     let preview = session.analyze_paste(stock, &update).await.unwrap();
     assert_eq!(preview.counts, counts(0, 1, 0, 1, 0));
     session
-        .apply_paste(stock, &update, &preview.counts, GO)
+        .apply_paste(stock, &update, &preview.fingerprint, GO)
         .await
         .unwrap();
     let page = rows(session, stock).await;
@@ -759,7 +759,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
         ]
     );
     assert!(session
-        .apply_paste(stock, &messy, &preview.counts, GO)
+        .apply_paste(stock, &messy, &preview.fingerprint, GO)
         .await
         .is_err());
 
@@ -776,6 +776,93 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
         assert_eq!(statuses, vec![RowStatus::Unmatched, RowStatus::Update]);
     }
 
+    // A key the database would bend to fit is refused before it can address the wrong row.
+    let bent = paste(json!({
+        "mode": "update", "columns": ["id", "qty"], "key": ["id"], "update": ["qty"],
+        "rows": [[format!("{id_of_b2}abc"), "1"], [format!("{id_of_b2}.9"), "1"], [" 1", "1"]]
+    }));
+    let preview = session.analyze_paste(stock, &bent).await.unwrap();
+    assert!(
+        preview.rows.iter().all(|r| r.status == RowStatus::Invalid),
+        "{:?}",
+        preview.rows
+    );
+    assert!(preview.rows[0]
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("not a whole number"));
+
+    // INSERT cannot honour an id the server assigns.
+    let forced = paste(json!({
+        "mode": "insert", "columns": ["id", "sku"], "key": ["id"], "rows": [["424242", "F1"], [null, "F2"]]
+    }));
+    let preview = session.analyze_paste(stock, &forced).await.unwrap();
+    assert_eq!(
+        preview.rows.iter().map(|r| r.status).collect::<Vec<_>>(),
+        vec![RowStatus::Invalid, RowStatus::Insert]
+    );
+
+    // Composite key: (sku, day) identifies the row; a different day is a different row.
+    let dated = paste(json!({
+        "mode": "insert", "columns": ["sku", "day", "name"],
+        "rows": [["K1", "2026-03-01", "first of march"]]
+    }));
+    let preview = session.analyze_paste(stock, &dated).await.unwrap();
+    session
+        .apply_paste(stock, &dated, &preview.fingerprint, GO)
+        .await
+        .unwrap();
+    let composite = paste(json!({
+        "mode": "update", "columns": ["sku", "day", "name"], "key": ["sku", "day"], "update": ["name"],
+        "rows": [["K1", "2026-03-01", "renamed"], ["K1", "2026-03-02", "other day"], ["K1", null, "no day"]]
+    }));
+    let preview = session.analyze_paste(stock, &composite).await.unwrap();
+    assert_eq!(
+        preview.rows.iter().map(|r| r.status).collect::<Vec<_>>(),
+        vec![
+            RowStatus::Update,
+            RowStatus::Unmatched,
+            RowStatus::MissingKey
+        ]
+    );
+    let solo = paste(json!({
+        "mode": "update", "columns": ["sku", "day", "name"], "key": ["sku", "day"], "update": ["name"],
+        "rows": [["K1", "2026-03-01", "renamed"]]
+    }));
+    let preview = session.analyze_paste(stock, &solo).await.unwrap();
+    session
+        .apply_paste(stock, &solo, &preview.fingerprint, GO)
+        .await
+        .unwrap();
+    let page = rows(session, stock).await;
+    assert!(page
+        .rows
+        .iter()
+        .any(|r| r[1].as_deref() == Some("K1") && r[2].as_deref() == Some("renamed")));
+
+    // The same counts but a different outcome is still not what was approved.
+    let swap_a = paste(json!({
+        "mode": "update", "columns": ["sku", "qty"], "key": ["sku"], "update": ["qty"],
+        "rows": [["A1", "77"], ["B2", "42"]]
+    }));
+    let approved = session.analyze_paste(stock, &swap_a).await.unwrap();
+    assert_eq!(approved.counts, counts(0, 1, 1, 0, 0));
+    let swap_b = paste(json!({
+        "mode": "update", "columns": ["sku", "qty"], "key": ["sku"], "update": ["qty"],
+        "rows": [["A1", "5"], ["B2", "43"]]
+    }));
+    assert_eq!(
+        session.analyze_paste(stock, &swap_b).await.unwrap().counts,
+        approved.counts
+    );
+    assert!(matches!(
+        session
+            .apply_paste(stock, &swap_b, &approved.fingerprint, GO)
+            .await,
+        Err(Error::Conflict(_))
+    ));
+
     // A set-up that cannot identify a row.
     let bad_key = paste(json!({
         "mode": "update", "columns": ["name", "qty"], "key": ["name"], "update": ["qty"], "rows": [["Pear", "1"]]
@@ -783,7 +870,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     let preview = session.analyze_paste(stock, &bad_key).await.unwrap();
     assert!(preview.problems[0].contains("not a primary key or unique index"));
     assert!(session
-        .apply_paste(stock, &bad_key, &preview.counts, GO)
+        .apply_paste(stock, &bad_key, &preview.fingerprint, GO)
         .await
         .is_err());
 
@@ -795,7 +882,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     let preview = session.analyze_paste(stock, &impossible).await.unwrap();
     assert_eq!(preview.counts, counts(2, 0, 0, 0, 0));
     match session
-        .apply_paste(stock, &impossible, &preview.counts, GO)
+        .apply_paste(stock, &impossible, &preview.fingerprint, GO)
         .await
     {
         Err(Error::Database(message)) => {
@@ -816,7 +903,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     assert_eq!(preview.counts, counts(130, 0, 0, 0, 0));
     let stop_at_50: &(dyn Fn(usize) -> bool + Send + Sync) = &|done| done < 50;
     match session
-        .apply_paste(stock, &bulk, &preview.counts, stop_at_50)
+        .apply_paste(stock, &bulk, &preview.fingerprint, stop_at_50)
         .await
     {
         Err(Error::Invalid(message)) => assert!(message.contains("Cancelled"), "{message}"),
@@ -827,7 +914,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     // The same paste run to completion, then pasted again with edits: several lookup
     // chunks, all rows matched correctly.
     session
-        .apply_paste(stock, &bulk, &preview.counts, GO)
+        .apply_paste(stock, &bulk, &preview.fingerprint, GO)
         .await
         .unwrap();
     let edited: Vec<_> = (0..130)
@@ -848,7 +935,7 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
     let preview = session.analyze_paste(stock, &again).await.unwrap();
     assert_eq!(preview.counts, counts(0, 65, 65, 0, 0));
     let done = session
-        .apply_paste(stock, &again, &preview.counts, GO)
+        .apply_paste(stock, &again, &preview.fingerprint, GO)
         .await
         .unwrap();
     assert_eq!(done.updated, 65);

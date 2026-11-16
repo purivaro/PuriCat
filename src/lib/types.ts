@@ -159,6 +159,8 @@ export interface PasteCounts {
 export interface PasteAnalysis {
   rows: { status: PasteRowStatus; message: string | null; changed: string[] }[];
   counts: PasteCounts;
+  /** Identifies this exact outcome; a run is accepted only if a fresh analysis matches it. */
+  fingerprint: string;
   problems: string[];
   elapsedMs: number;
 }

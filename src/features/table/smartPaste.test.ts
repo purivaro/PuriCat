@@ -91,6 +91,12 @@ describe("buildRequest", () => {
     expect(built.request.rows[2]).toEqual(["", "7", ""]); // no key chosen: an empty order_no is just text
   });
 
+  it("sends an empty cell of a required non-text column as NULL, so the default can apply", () => {
+    const required = [...columns.slice(0, 3), col("total", { kind: "number", nullable: false, default: "0" })];
+    const built = buildRequest({ ...base, columns: required, mode: "insert", key: [], update: [] });
+    expect(built.request.rows[1]).toEqual(["SO-2", null, "NULL"]);
+  });
+
   it("treats the first row as data without headers", () => {
     const built = buildRequest({ ...base, hasHeaders: false, mode: "insert", key: [], update: [] });
     expect(built.request.rows).toHaveLength(4);
