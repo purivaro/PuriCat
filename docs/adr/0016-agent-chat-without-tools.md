@@ -4,7 +4,7 @@
 
 Accepted. Implemented as the first slice of Phase 5 for the Claude Code and Codex CLIs. Verified for Claude Code with unit tests on lines captured from the real CLI, the end-to-end test on stand-in CLIs (dev mode and the bundled app under the production CSP), and an opt-in test against the real CLI. **Codex's successful path is not verified against the real CLI**: only the service's refusal was observed, and the success shape is implemented from the documented format ([TESTING.md](../../TESTING.md)).
 
-This record implements the transport and confinement of [ADR 0008](0008-ai-cli-integration.md) and deliberately leaves out its tools. The MCP server with read-only tools, the proposal and approval queue and the audit log remain the next step. They are **not built**.
+This record implements the transport and confinement of [ADR 0008](0008-ai-cli-integration.md) and deliberately leaves out its tools. The MCP server with read-only tools, proposals with an approval step and an activity log were built afterwards as the second slice ([ADR 0017](0017-ai-database-tools.md)), as tools the user turns on. They are off by default, and with them off a chat is what this record describes.
 
 ## Context
 

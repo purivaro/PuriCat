@@ -4,7 +4,7 @@ Status on 2026-11-16. This is a hand-maintained summary of **direct** dependenci
 
 ## PuriCat's own licence
 
-**Not decided.** The Cargo workspace is marked `publish = false`, `package.json` is `private`, and the repository contains no licence file. Until the product owner decides, no rights are granted to third parties. The decision is listed as a blocker in [ROADMAP.md](ROADMAP.md).
+**MIT**, decided on 2026-11-16. The text is in [LICENSE](LICENSE) at the repository root. The Cargo workspace is still marked `publish = false` and `package.json` is still `private`; neither manifest declares a `license` field (checked by reading them on 2026-11-16). The direct dependencies listed below declare permissive licences (MIT, Apache-2.0, ISC; OFL for the fonts); the transitive tree has not been reviewed, which is among the obligations at the end of this file.
 
 ## Shipped in the app — Rust
 
@@ -99,7 +99,7 @@ Monaco Editor was a candidate here until Phase 4; it is now a dependency and lis
 
 | Obligation | Status |
 |---|---|
-| Decide PuriCat's licence and add a licence file | Open (product owner) |
+| Decide PuriCat's licence and add a licence file | Done: MIT, [LICENSE](LICENSE). The `license` field of the Cargo and npm manifests is not set |
 | Generate a complete third-party notice covering transitive dependencies (for example `cargo about` for Rust and `license-checker` for npm) and ship it in the app | Planned (Phase 7) |
 | Ship the OFL text and font copyright notices | Planned (Phase 7) |
 | Include the copyright and permission notices required by MIT, ISC and Apache-2.0 dependencies (and any NOTICE files) | Planned (Phase 7), through the generated notice |

@@ -10,7 +10,7 @@ PuriCat stores connection profiles, UI settings and open tabs, and later history
 
 ## Decision
 
-**Settings:** one SQLite file, `puricat.db`, in the OS app-data directory for the bundle identifier (`app.puricat.desktop`, a placeholder to confirm before signing).
+**Settings:** one SQLite file, `puricat.db`, in the OS app-data directory for the bundle identifier (`com.purivaro.puricat` since the first public release on 2026-11-16; before that the placeholder `app.puricat.desktop`).
 
 - Tables: `connections` (id, JSON profile, timestamps) and `settings` (key, value; current keys `ui` and `workspace`).
 - Migrations are an append-only list in code, tracked with `PRAGMA user_version`. A database from a newer build is refused rather than downgraded.

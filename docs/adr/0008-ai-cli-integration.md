@@ -2,14 +2,14 @@
 
 ## Status
 
-Partly implemented (2026-11-16). The first slice of Phase 5 built the subprocess transport of this record as an agent chat **without tools** ([ADR 0016](0016-agent-chat-without-tools.md)). The rest — the MCP server, the read-only tools, the proposal and approval queue — is still Proposed and not built.
+Implemented in two slices (2026-11-16). The first slice of Phase 5 built the subprocess transport of this record as an agent chat **without tools** ([ADR 0016](0016-agent-chat-without-tools.md)). The second built the rest — the MCP server, the read-only tools, proposals and their approval — as tools the user turns on, off by default ([ADR 0017](0017-ai-database-tools.md)). The tools are verified for Claude Code; no Codex turn with tools has been observed. The open questions listed further down about the MCP configuration, the Claude options and the transport are answered in ADR 0017; the lists there are left as they were written after the first slice.
 
 | Part of the decision | State |
 |---|---|
 | 1. Transport: the CLI as a subprocess in non-interactive streaming mode, fixed argument vector, no shell, prompt on stdin, kill on cancel or timeout | Built for both CLIs. For Codex only the start and failure of a turn were seen from the real CLI; its successful path is implemented from the documented format and unverified |
-| 2. Tools: a PuriCat MCP server with read-only tools | Not built. The model is given no tools at all |
-| 3. Writes: proposals and an approval queue | Not built. The user opens SQL from an answer in a query tab and runs it there |
-| 4. Confinement: restricted built-in tools and sandbox, empty scratch directory | Built, in a stricter form than proposed: Claude runs with `--tools ""` and `--strict-mcp-config` (no tools, no MCP servers) instead of an allow-list; Codex with `--sandbox read-only`, though it keeps its own shell tool inside that sandbox. Both start in an empty directory owned by PuriCat |
+| 2. Tools: a PuriCat MCP server with read-only tools | Built (ADR 0017), off by default: the server runs inside the app on a Unix socket per turn, reached through the app's own executable as a stdio relay. Verified for Claude Code; Codex completed the handshake only |
+| 3. Writes: proposals and an approval queue | Built (ADR 0017) as proposals shown in the conversation and approved one by one in a review dialog; there is no separate queue. With the tools off, the user still opens SQL from an answer in a query tab and runs it there |
+| 4. Confinement: restricted built-in tools and sandbox, empty scratch directory | Built. With the tools off, in a stricter form than proposed: Claude runs with `--tools ""` and `--strict-mcp-config` (no tools, no MCP servers) instead of an allow-list; with them on, with `--tools ""` and an allow-list of PuriCat's MCP tools only; Codex with `--sandbox read-only`, though it keeps its own shell tool inside that sandbox. Both start in an empty directory owned by PuriCat |
 | 5. Data handling: no secrets in prompts, arguments or environment; content treated as untrusted | Built for what exists: the context holds names and types only, the prompt is on stdin, PuriCat adds nothing to the arguments or the environment (the CLI inherits PuriCat's own environment), answers are rendered as text |
 
 ## Context
