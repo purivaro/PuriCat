@@ -44,7 +44,14 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Write refused by the server in a read-only session | Implemented & verified | Implemented & verified | Planned (Phase 3) |
 | Edit views, materialized views, keyless tables | Not offered (read-only in the UI) | Not offered (read-only in the UI) | — |
 | Direct paste from a spreadsheet into the grid | Implemented & verified (E2E) | Implemented, not yet verified on this engine (same client code; E2E pastes into MySQL only) | Planned (Phase 3) |
-| Smart Paste (INSERT / UPDATE / UPSERT wizard), batching | Planned (Phase 3) | Planned (Phase 3) | Planned (Phase 3) |
+| Smart Paste: unique-key discovery (primary key, plain unique indexes, composite keys) | Implemented & verified. Unique indexes over a column prefix are excluded (verified); over an expression: excluded, not yet verified | Implemented & verified. Partial and expression unique indexes are excluded (verified) | Planned (Phase 3) |
+| Smart Paste INSERT (optional check that the key does not exist yet) | Implemented & verified (live test); not through the UI | Implemented & verified (live test); not through the UI | Planned (Phase 3) |
+| Smart Paste UPDATE (unmatched rows skipped, never inserted) | Implemented & verified (live test); not through the UI | Implemented & verified (live test); not through the UI | Planned (Phase 3) |
+| Smart Paste UPSERT | Implemented & verified (live test, and E2E through the UI) | Implemented & verified (live test); not through the UI | Planned (Phase 3) |
+| Smart Paste: matching on a composite key | Implemented & verified (live test); not through the UI | Implemented & verified (live test); not through the UI | Planned (Phase 3) |
+| Smart Paste: key equality decided by the database | Implemented & verified (case-insensitive collation: `c3` and `C3` are one key) | Implemented & verified (case-sensitive: `c3` and `C3` are two keys) | Planned (Phase 3) |
+| Smart Paste: one transaction with progress, cancel and rollback | Implemented & verified (live test; not through the UI) | Implemented & verified (live test; not through the UI) | Planned (Phase 3) |
+| Imports of more than 10,000 rows in batches; CSV / XLSX files | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Run SQL, DDL, import/export | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Backup and restore | Planned (Phase 6) | Planned (Phase 6) | Planned (Phase 6) |
 
@@ -135,6 +142,44 @@ Not verified on the write path: `SET`, `FLOAT` / `DOUBLE`, `TIME`, `YEAR`, `TIME
 | PostgreSQL | `TimeZone = UTC`, sent by the driver at start-up; not chosen by PuriCat and not yet configurable | See known limitations |
 | PostgreSQL, when the read-only option is on | `SET default_transaction_read_only = on` | Server-enforced read-only |
 
+## Smart Paste
+
+Design and alternatives: [ADR 0014](docs/adr/0014-smart-paste-match-then-write.md). The wizard takes a block copied from a spreadsheet and inserts, updates or upserts rows, matched on one key chosen by the user. PuriCat finds the matching rows with `SELECT`s, shows the outcome per pasted row, and then runs plain single-row `INSERT` and `UPDATE` statements — the statements described under "Writing values", addressed by the chosen key instead of the primary key — in one transaction.
+
+| Aspect | MySQL | PostgreSQL |
+|---|---|---|
+| Keys offered for matching | The primary key and every unique index from `information_schema.STATISTICS`, except indexes with a prefix length on any column (`name(3)`) or with a functional key part | The primary key and every valid unique index from `pg_index`, except partial indexes (`WHERE ...`) and indexes on expressions. `INCLUDE` columns are not part of the key |
+| Why those are excluded | Equality on a prefix or an expression is not equality of the row's values | A partial or expression index does not make the plain column values unique |
+| Lookup, per 40 pasted rows | `SELECT CAST((key = ?) AS CHAR), ..., CAST(col AS CHAR), ... FROM t WHERE (key = ?) OR ...` | `SELECT (key = $1::type)::text, ..., col::text, ... FROM t WHERE (key = $n::type) OR ...` |
+| Key comparison | The same typed expressions as the save path (`CAST(? AS SIGNED / UNSIGNED)` for integer keys, `CAST(? AS DECIMAL(65,30))` for decimals, a plain parameter otherwise) | `key = $n::<bare type>` |
+| Who decides that two keys are equal | The column's collation and type. Under a case-insensitive collation `c3` and `C3` are the same key; two pasted rows spelled that way are reported as duplicates (verified). `7` and `007` are the same integer key (unit-tested on the classification, not run against a server) | The type's equality. Text is case-sensitive unless the column uses a non-deterministic collation or `citext` (neither tested): `c3` does not match a stored `C3` (verified) |
+| Generated key (auto-increment / identity) | Usable for matching; never written | Usable for matching; never written |
+| Native upsert | `INSERT ... ON DUPLICATE KEY UPDATE` is not used: it treats a clash on *any* unique index as "the same row" and its affected-row counts do not say plainly what happened | `INSERT ... ON CONFLICT` is not used: it needs a conflict target per statement and does not report the per-row outcome before running. `MERGE` is not used either |
+
+Behaviour common to both engines:
+
+- **Modes.** INSERT adds every row; with a key chosen, rows whose key already exists are reported ("exists") and block the run. UPDATE changes rows that exist; rows without a match are reported and skipped, never inserted. UPSERT changes rows that exist and inserts the rest.
+- **Generated key in UPSERT mode.** A blank key means "new row" (the server assigns the key). A key that is not found is reported as "no match" and skipped; it is not inserted under a different id.
+- **Generated key in INSERT mode.** A blank key inserts. A key that is not found is an invalid row ("assigned by the server and cannot be set; leave it empty"), for the same reason (live-tested on both engines).
+- **Update columns.** Chosen per column; key columns are never updated. Only columns whose pasted text differs from the stored text are written.
+- **Defaults.** Columns that are not mapped take their defaults. A NULL for a NOT NULL column that has a default is left out of the INSERT so the default applies (verified in the backend). The wizard sends an empty cell of every non-text column as NULL, also a NOT NULL one, so an empty cell takes that path (request building unit-tested in the frontend; not exercised end to end).
+- **Pre-checks before anything runs.** Text that does not look like a number for a numeric column (`money` and `bit` are left to the server), text longer than the declared length of a `char` / `varchar` column, NULL for a NOT NULL column, and — for rows that would be inserted — required columns that are not mapped. Key values get the number and length checks too and, for an integer key column, must be whole numbers: `12abc`, `1.9`, `1e2` and ` 1` are invalid rows and are never sent to the database, so MySQL's lenient `CAST('12abc' AS SIGNED)` cannot match row 12 (unit and live tests, both engines). The server stays the authority: a value only it can judge (an impossible date, an unknown enum label, a foreign key) fails at run time and the whole run is rolled back (verified with `2026-02-30`).
+- **Run.** The table is analysed again; nothing runs unless the fresh analysis reproduces the preview's fingerprint, which covers every row's status and changed columns (verified on both engines, including an outcome with the same counts but different rows). Otherwise one transaction, one statement per row, each required to affect exactly one row, UPDATEs carrying the optimistic check on the values seen by that fresh analysis. Progress is reported every 20 statements; "Stop and roll back" and any error undo everything.
+
+Smart Paste limitations:
+
+| Limitation | Detail |
+|---|---|
+| "Update" is a text comparison | A row is counted as an update when the pasted text differs from the server's text rendering of the stored value. `1.5` against a stored `1.500000` is counted and run as an update that stores the same number. Value-aware comparison is Planned (Phase 3) |
+| One transaction, not batches | A run is a single transaction of single-row statements. This keeps a paste atomic but holds locks for its whole duration. Multi-batch and streamed imports are Planned (Phase 4) |
+| 10,000 pasted rows per run | Larger sources are refused. Lookups cost one query per 40 rows and each written row is one statement; duration near the limit, or on a remote server, has not been measured |
+| Problems block the whole run | There is no "skip invalid rows" option yet (Planned, Phase 3). The source has to be fixed and read again |
+| Empty cells in text columns | The wizard sends an empty cell as NULL for a key column and for every non-text column, and as an empty string for a text column. A NOT NULL text column with a default therefore stores an empty string, not the default: to get the default, leave the column unmapped, or paste the text `NULL` with the "Read the text NULL" option on. An empty cell of a NOT NULL non-text column takes the default only on an inserted row; without a default ("is required"), or on a row that would be updated ("cannot be empty"), the row is reported as invalid |
+| Key values of non-integer types | Integer keys must be whole numbers; other key columns get only the number-shape and declared-length checks. A key value of a type the database coerces in another way (a date, for example) is cast and compared by the server: PostgreSQL would reject a malformed one and fail the preview with the server's error instead of flagging the row; MySQL's behaviour is unknown. Not tested on either engine |
+| Tables without a primary key | Smart Paste is offered only where the grid is editable, so a table that has a unique index but no primary key has no entry point in the UI, although the backend could match on that index |
+| Composite keys | Matching is verified in the backend on both engines (live test: update, a different day unmatched, a NULL part of the key reported as a missing key, applied and read back). Not verified through the UI |
+| Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. Through the UI only UPSERT on MySQL has been run |
+
 ## Object classification
 
 | Engine | Shown under Tables | Shown under Views |
@@ -153,12 +198,12 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | Concurrency check covers edited columns only | A concurrent change to a column the user did not edit is neither detected nor overwritten |
 | Truncated and binary cells are not editable | A cell cut to the preview length (1000 characters) cannot be edited because its full original value is unknown; binary and MySQL spatial columns are never editable. There is no full-value editor yet (Phase 3) |
 | Rows with a NULL or truncated key value are not editable | The row cannot be addressed safely |
-| Keyless tables are read-only in the UI | The backend refuses UPDATE and DELETE on a table without a primary key and would allow INSERT, but the UI keeps such tables fully read-only for now. Unique keys are not used as a substitute |
+| Keyless tables are read-only in the UI | The backend refuses UPDATE and DELETE on a table without a primary key and would allow INSERT, but the UI keeps such tables fully read-only for now. Unique keys are not used as a substitute in the grid, and Smart Paste is not offered on such tables either |
 | Views and materialized views are read-only | Even where the engine would allow an updatable view |
 | Generated, identity, auto-increment and serial columns cannot be written | Including on insert: an explicit value for such a column cannot be supplied from the grid |
-| Edits are per page | Staged edits live on the loaded page; paging, sorting and refresh are locked until Save or Discard. One save handles at most 10,000 row changes, as single-row statements without batching or progress |
+| Edits are per page | Staged edits live on the loaded page; paging, sorting and refresh are locked until Save or Discard. One save handles at most 10,000 row changes, as single-row statements without batching or progress (a Smart Paste run reports progress and can be stopped) |
 | Empty input and NULL | An empty cell means NULL only in a nullable column that is not a text type; in text columns it is the empty string. "Set to NULL" in the context menu is explicit. A copied NULL is placed on the clipboard as an empty cell |
-| Validation happens on the server | There is no client-side type check; a bad value is reported at Save and nothing is saved |
+| Validation happens on the server | The grid has no client-side type check; a bad value is reported at Save and nothing is saved. Smart Paste adds a few pre-checks (see "Smart Paste") |
 | MySQL strict mode changes session behaviour | On a server whose default `sql_mode` is not strict, PuriCat's sessions are stricter than other clients' |
 | `OFFSET` paging | Cost grows with the offset; deep pages of large tables are slow. Keyset pagination is Planned (Phase 2b) |
 | Row counts are estimates | From `information_schema.TABLES.TABLE_ROWS` (MySQL) or `pg_class.reltuples` (PostgreSQL). Can be far off, and absent for a never-analysed PostgreSQL table. Labelled as an estimate |
@@ -170,7 +215,7 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | PostgreSQL default database | When the profile has none, the session starts on `postgres`; the user must be allowed to connect to it |
 | MySQL database visibility | `SHOW DATABASES` returns only what the account's privileges allow |
 | MySQL `generated` flag | True for `auto_increment` and `STORED`/`VIRTUAL GENERATED` columns, read from the `EXTRA` column. Expression defaults (`DEFAULT_GENERATED`) are not treated as generated (unit-tested) |
-| No cancellation or reconnect | A slow query runs to completion; a dropped connection surfaces as an error on the next action |
+| No cancellation or reconnect | A slow query runs to completion; a dropped connection surfaces as an error on the next action. A Smart Paste run can be stopped between statements, but its lookup queries cannot be cancelled |
 | Permissions | Catalogue queries assume read access to `information_schema` / `pg_catalog`. Behaviour under restricted accounts is untested |
 | Large tables | No performance measurements exist |
 
@@ -184,7 +229,7 @@ Plan:
 - Testing needs a disposable SQL Server instance. The development machine has no Docker, so this is a blocker ([ROADMAP.md](ROADMAP.md)).
 - Namespaces: databases → schemas → objects, as in PostgreSQL.
 - Rendering to text will need per-type `CONVERT` styles (for example for `datetime2`, `money`, `varbinary`); to be designed and tested.
-- The write path (`db::write`) has no SQL Server statements yet. Upsert will not blindly use `MERGE` (Phase 3).
+- The write path (`db::write`) and Smart Paste (`db::smart`) have no SQL Server statements yet. When they do, Smart Paste will likewise match rows first and run plain `INSERT` and `UPDATE` statements; `MERGE` will not be used blindly ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)). Planned.
 - Backups: `BACKUP DATABASE` writes to a path on the server, not the client ([BACKUP_RESTORE.md](BACKUP_RESTORE.md)).
 
 **Integrated authentication.** Windows integrated authentication from macOS is only plausible through Kerberos/GSSAPI with a ticket obtained by `kinit` on a machine that can reach the domain's KDC. This is unverified with any driver. Until tested, the only SQL Server authentication PuriCat will claim is SQL login (user name and password). Microsoft Entra ID authentication has not been evaluated.

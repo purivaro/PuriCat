@@ -2,7 +2,7 @@
 
 PuriCat is a desktop database client built with Tauri 2 (Rust backend, React/TypeScript frontend). The goal is a client that covers routine database work for MySQL, PostgreSQL and SQL Server with spreadsheet-style editing, an AI agent driven through locally installed CLIs, and scheduled backups. macOS (Apple Silicon) is the first target; Windows follows later.
 
-> **Status: early development.** Phase 1 (runnable foundation) is complete; Phase 2 (database connectivity) and Phase 3 (editing) are partially complete. This build can connect to MySQL and PostgreSQL, browse tables, and **edit data in tables that have a primary key** (spreadsheet-style, staged until Save). It cannot run SQL, tunnel over SSH, connect to SQL Server, talk to an AI agent or take backups. **Not ready for production data.** Builds are unsigned.
+> **Status: early development.** Phase 1 (runnable foundation) is complete; Phase 2 (database connectivity) and Phase 3 (editing) are partially complete. This build can connect to MySQL and PostgreSQL, browse tables, **edit data in tables that have a primary key** (spreadsheet-style, staged until Save), and load a block copied from a spreadsheet with the **Smart Paste wizard** (INSERT / UPDATE / UPSERT matched on a unique key, previewed before anything runs). It cannot run SQL, tunnel over SSH, connect to SQL Server, talk to an AI agent or take backups. **Not ready for production data.** Builds are unsigned.
 
 ## Feature status
 
@@ -29,7 +29,10 @@ Labels used across the docs:
 | Editing | Range selection, copy, and direct paste from Excel / Google Sheets / Numbers (quoted cells, embedded tabs and line breaks, values never reinterpreted) | Implemented & verified (parser, serialiser and paste logic unit-tested; paste, undo / redo in E2E). Copy, drag and Shift+arrow selection, and native key input are not exercised end to end |
 | Editing | Save in one transaction: parameterised statements, rows addressed by the complete primary key, optimistic concurrency check, exactly-one-row rule, rollback on any failure | Implemented & verified (live tests on both engines) |
 | Editing | Not editable yet: generated / identity / auto-increment columns, binary and MySQL spatial columns, cells truncated for preview, rows whose key is NULL or truncated | Implemented & verified (refusals unit- and live-tested) |
-| Editing | Smart Paste wizard (INSERT / UPDATE / UPSERT with mapping), full-value cell editor, filtering, editing across pages | Planned (Phase 3) |
+| Editing | Smart Paste wizard: reads a spreadsheet block from the clipboard; header-row detection, column mapping, INSERT / UPDATE / UPSERT matched on the primary key or a unique index (composite keys accepted); read-only preview with one outcome per pasted row; runs as one transaction with progress and "Stop and roll back"; at most 10,000 pasted rows | Implemented & verified in the backend on both engines (unit and live tests: all three modes, single-column and composite keys). Through the UI only UPSERT on a single-column unique key on MySQL is verified (E2E). Composite keys, INSERT / UPDATE modes, the progress bar, Stop and PostgreSQL through the UI are implemented, not yet verified |
+| Editing | Smart Paste: no native upsert statements. PuriCat matches rows itself and runs plain parameterised INSERT and UPDATE statements; `ON DUPLICATE KEY UPDATE`, `ON CONFLICT` and `MERGE` are deliberately not used ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)) | Implemented & verified (the shared planner emits only single-row INSERT and UPDATE statements; unit and live tests) |
+| Editing | Smart Paste follow-ups: "skip invalid rows", value-aware comparison (`1.5` vs a stored `1.500000` counts as an update today), more than 10,000 rows, CSV / XLSX files | Planned (Phase 3; larger and file-based imports with the Phase 4 import tool) |
+| Editing | Full-value cell editor, filtering, editing across pages | Planned (Phase 3) |
 | Safety | Review step showing the exact SQL and bound values: mandatory for Production-labelled connections, for any delete, and above a per-connection row threshold (default 10) | Implemented & verified for the delete-triggered path (E2E); the production and threshold paths are implemented, not yet verified through the UI |
 | Safety | Unsaved-edit guards: tab dot, confirmation before closing a dirty tab, paging / sorting / refresh locked, disconnect and connection changes refused while edits are pending | Implemented & verified for the close confirmation (E2E); the other guards have no automated test |
 | Safety | Server-enforced read-only session option | Implemented & verified (server reports the flag and refuses a write) |
@@ -91,14 +94,14 @@ PURICAT_TEST_POSTGRES=you@127.0.0.1:5432 PURICAT_TEST_POSTGRES_PASSWORD=... \
 e2e/run.sh        # end-to-end smoke test in the real window (macOS, local MySQL + PostgreSQL; uses only a database named puricat_e2e)
 ```
 
-`live_db` covers connecting and browsing; `live_write` covers saving edits. Both create and drop their own scratch databases. Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". The end-to-end test temporarily overwrites the system clipboard and restores the previous text. See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
+`live_db` covers connecting and browsing; `live_write` covers saving edits and Smart Paste. Both create and drop their own scratch databases. Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". The end-to-end test temporarily overwrites the system clipboard and restores the previous text. See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
 
 ## Repository layout
 
 ```
 crates/core/        puricat-core: model, settings store, secrets, DB adapters, AI CLI discovery (no Tauri dependency)
-  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting, write planner (write.rs)
-  tests/            live_db.rs (browse) and live_write.rs (save edits): integration tests against real servers
+  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting, write planner (write.rs), Smart Paste matching (smart.rs)
+  tests/            live_db.rs (browse) and live_write.rs (save edits, Smart Paste): integration tests against real servers
 src-tauri/          puricat: Tauri app, IPC commands, app state, capabilities, bundle config
 src/                React frontend (components, features, stores, i18n)
 e2e/                end-to-end smoke test (runner, injected script, SQL fixtures)

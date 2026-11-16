@@ -7,7 +7,7 @@
 | Rust unit tests | `crates/core/src/**` (`#[cfg(test)]`) | Nothing | Yes | Yes |
 | Frontend unit tests (Vitest) | `src/**/*.test.ts` | Nothing | Yes | Yes |
 | Static checks | `tsc`, `cargo fmt`, `cargo clippy -D warnings` | Nothing | Yes | Yes |
-| Live database tests | `crates/core/tests/live_db.rs` (connect, browse), `crates/core/tests/live_write.rs` (save edits) | Disposable MySQL and PostgreSQL servers | Server tests run only if the variables are set | Server tests skip (variables unset) |
+| Live database tests | `crates/core/tests/live_db.rs` (connect, browse), `crates/core/tests/live_write.rs` (save edits, Smart Paste) | Disposable MySQL and PostgreSQL servers | Server tests run only if the variables are set | Server tests skip (variables unset) |
 | OS credential store test | `secrets::tests::os_keychain_round_trip` (ignored by default) | A real Keychain / Credential Manager | No | No |
 | End-to-end smoke test | `e2e/run.sh`, `e2e/smoke.js` | macOS desktop session, local MySQL and PostgreSQL | No | No |
 
@@ -35,7 +35,7 @@ PURICAT_TEST_POSTGRES=you@127.0.0.1:5432   PURICAT_TEST_POSTGRES_PASSWORD=...   
   cargo test -p puricat-core --test live_db --test live_write -- --nocapture
 ```
 
-`live_db` covers connecting and browsing; `live_write` covers the save path. Either can be run alone with a single `--test`.
+`live_db` covers connecting and browsing; `live_write` covers the save path and Smart Paste. Either can be run alone with a single `--test`.
 
 | Variable | Format | Required |
 |---|---|---|
@@ -69,12 +69,12 @@ Side effects to know about:
 
 - In dev-server mode the runner's cleanup kills the debug `puricat` process and whatever is listening on TCP port 1420.
 - The smoke test runs the real CLI detection, which executes the installed `claude` and `codex` status commands.
-- **The smoke test overwrites the system clipboard** with its paste fixture and writes the previous text back at the end. If the run fails or is interrupted after the paste step, the fixture text stays on the clipboard. Non-text clipboard contents (an image, files) are not restored. Do not copy anything important while it runs.
+- **The smoke test overwrites the system clipboard** with its paste fixtures (direct paste and Smart Paste) and writes the previous text back at the end. If the run fails or is interrupted after the paste step, the fixture text stays on the clipboard. Non-text clipboard contents (an image, files) are not restored. Do not copy anything important while it runs.
 - The smoke test writes rows through PuriCat into the `puricat_e2e` databases only.
 
 ## What each suite covers
 
-### Rust unit tests (24, plus 1 ignored)
+### Rust unit tests (32, plus 1 ignored)
 
 | Module | Covers |
 |---|---|
@@ -85,6 +85,7 @@ Side effects to know about:
 | `db` | Default order by primary key, validation of the sort column, page limit, truncation on character boundaries, binary prefix |
 | `db::mysql`, `db::postgres` | The generated `SELECT` text, type classification; MySQL expression defaults (`DEFAULT_GENERATED`) not treated as generated columns |
 | `db::write` | The exact MySQL plan and the exact PostgreSQL plan for one change set (statement order, typed key comparison, bare-type casts, `BIT` handling, concurrency conditions, parameter order, empty insert); refusal of empty, incomplete-key, NULL-key, wrong-key, unknown-column, generated-column, duplicate-column and no-change updates; keyless tables (delete refused, insert planned); hostile key and cell values absent from the SQL text |
+| `db::smart` (8) | Number recognition for the pre-check (signs, decimals, exponents, `NaN` / `Infinity`; thousands separators and non-ASCII digits rejected). UPSERT on a unique key: every status in one paste (update with the changed column, unchanged, insert with an empty NOT NULL-with-default cell left out, missing key, exact-text duplicates, not a number, longer than `varchar(8)`), the counts, the lookup SQL shape for PostgreSQL and its parameters, the resulting change set. A generated key: blank means new, unknown means skipped, the key is never written, the MySQL lookup shape. INSERT with a key (existing rows refused), INSERT without a key (no lookup), UPDATE never inserting. Two spellings of one key (`7`, `007`) matching one existing row reported as duplicates. One existing row is claimed once even across lookup chunks: two spellings (`abc`, `ABC`) answered by separate lookups are both duplicates. Key values must be well formed for their type: `12abc`, `1.9` and `1e2` for an integer key are invalid and never looked up, `-7` is looked up. Refused set-ups: a key that is not unique, no key, nothing to update, unknown / doubly mapped / non-writable columns, a key column in the update list, a required column not mapped, ragged rows. The database answers are simulated in these tests |
 | `ai_detect` | Parsing of `claude auth status --json` and `codex login status` output, binary lookup in directories |
 
 ### Live database tests: `live_db` (4 tests)
@@ -96,9 +97,11 @@ Side effects to know about:
 | `unreachable_server_fails_fast_with_the_real_reason` | Both engines against a closed port: a "refused" error in under 5 seconds. Needs no server |
 | `sort_spec_wire_format` | Default of `descending`. Needs no server |
 
-### Live database tests: `live_write` (2 tests)
+### Live database tests: `live_write` (4 tests)
 
-One test per engine (`mysql_save_edits`, `postgres_save_edits`). Each creates its own scratch database, loads fixtures over a separate admin connection, and then saves change sets through `Session::apply_changes`, reading the result back through `Session::fetch_rows`.
+Two tests per engine: saving edits (`mysql_save_edits`, `postgres_save_edits`) and Smart Paste (`mysql_smart_paste`, `postgres_smart_paste`).
+
+Saving edits. Each test creates its own scratch database, loads fixtures over a separate admin connection, and then saves change sets through `Session::apply_changes`, reading the result back through `Session::fetch_rows`.
 
 | Area | MySQL | PostgreSQL |
 |---|---|---|
@@ -118,18 +121,44 @@ One test per engine (`mysql_save_edits`, `postgres_save_edits`). Each creates it
 | Keyless table: delete refused, insert allowed | Yes | Yes |
 | Read-only session: the server refuses the write, data unchanged | Yes | Yes |
 
+Smart Paste. One scenario runs on both engines against a scratch table `stock` (generated `id` primary key, unique `sku`, composite unique `(sku, day)`, a non-unique index, `DECIMAL(24,6)` / `numeric(24,6)` price, `qty` NOT NULL DEFAULT 0), through `Session::unique_keys`, `analyze_paste` and `apply_paste`.
+
+| Area | MySQL | PostgreSQL |
+|---|---|---|
+| Key discovery: primary key first, unique index, composite unique index; a non-unique index is not a key | Yes | Yes |
+| Excluded unique indexes | Prefix index `(name(3), day)` | Expression index `lower(name)`, partial index `WHERE qty > 100` |
+| UPSERT on the unique key: update (changed columns listed), unchanged, insert; Thai text with quotes and a 20-digit decimal read back exactly | Yes | Yes |
+| The preview writes nothing | Yes | Yes |
+| Inserted row: server-assigned id; a NULL for the NOT NULL-with-default column takes the default | Yes | Yes |
+| Re-running an approved paste is refused as a conflict ("Preview again") | Yes | Yes |
+| INSERT with a key: an existing key is reported and the whole paste refused | Yes | Yes |
+| UPDATE by the generated id: an unknown id is skipped, never inserted | Yes | Yes |
+| Row problems flagged: duplicate key, missing key, not a number, too long | Yes | Yes |
+| Key equality decided by the database: `c3` / `C3` | Same key: both rows reported as duplicates | Different keys: one unmatched, one update |
+| A malformed value for the integer key (`<id>abc`, `<id>.9`, ` 1`) is an invalid row ("not a whole number"), not a match on the row its numeric prefix names | Yes | Yes |
+| INSERT with the generated key chosen: an unknown id is invalid, a blank id is an insert (preview) | Yes | Yes |
+| Composite key `(sku, day)`: update; the same sku with another day unmatched; a NULL part of the key reported as a missing key; applied and read back | Yes | Yes |
+| Same counts, different outcome: the fingerprint of one preview (A1 update, B2 unchanged) is refused as a conflict for a paste whose fresh analysis is A1 unchanged, B2 update | Yes | Yes |
+| A key that is not a unique key is refused, in the preview and at run time | Yes | Yes |
+| A value only the server can judge (`2026-02-30`) rolls back the earlier valid row; "Nothing was saved" | Yes | Yes |
+| Cancel after 50 of 130 statements leaves nothing behind | Yes | Yes |
+| 130 rows over several lookup chunks, then pasted again with half of them edited: 65 updates, 65 unchanged | Yes | Yes |
+
+Not covered by the Smart Paste scenario: the exclusion of a MySQL expression (functional) unique index, a malformed key value of a non-integer type (a date, for example), a table changed by another session between preview and run (the conflict cases above re-run or swap the request instead), a row changed between the run-time analysis and the write, two spellings of a key in different lookup chunks (unit-tested with simulated answers only), the 10,000-row limit, the progress callback's values, and the IPC commands themselves (the tests call the core functions below the IPC layer, so the read-only refusal in `apply_paste`, `cancel_job` and the progress channel are not exercised here).
+
 Not covered by the live tests: a wrong password on PostgreSQL, a wrong password (as opposed to an unknown user) on MySQL, reading rows through a PostgreSQL materialized view, any TLS mode other than the default, the 10,000-change limit, two PuriCat sessions editing the same row, a foreign-key or unique-constraint failure (the end-to-end test covers one foreign-key refusal), the PostgreSQL `TimeZone=UTC` behaviour (documented in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), not asserted), and the types listed there as not verified on the write path.
 
-### Frontend unit tests (25 cases in 4 files)
+### Frontend unit tests (34 cases in 5 files)
 
 | File | Cases | Covers |
 |---|---|---|
 | `src/lib/clipboard.test.ts` | 7 | Parsing spreadsheet clipboard text: plain ranges and the final line break, empty cells and rows, Unicode, quoted cells with tabs / line breaks / doubled quotes, ragged rows, an unterminated quote, no reinterpretation of numbers, dates or leading zeros; serialising back with quotes only where needed |
 | `src/features/table/pending.test.ts` | 11 | Staging and un-staging an edit, immutability of earlier states (undo relies on it), blockers (non-editable column, truncated cell, deleted row, unaddressable row), empty input vs NULL, adding / filling / dropping new rows, marking and restoring rows, block paste with appended rows and overflow reporting, single-cell fill of a selection, empty clipboard, change-set building with original values, composite keys in key order, undo / redo history |
+| `src/features/table/smartPaste.test.ts` | 9 | Spreadsheet column letters; header-row detection by column names (case-insensitive, a lone header row is data); automatic mapping by header name and by position, each table column used once; keys offered only when all their columns are mapped; update columns limited to writable non-key columns; request building: header, unmapped columns and blank rows left out, source row numbers kept, empty cells typed (NULL for a nullable number and for a blank key, empty string for text), an empty cell of a NOT NULL non-text column sent as NULL so the default can apply, the `NULL`-text option, no update list for INSERT |
 | `src/stores/workspace.test.ts` | 5 | Tab closing and neighbour activation, tab id uniqueness across connection / database / schema |
 | `src/features/table/sort.test.ts` | 2 | The sort cycle of a header click |
 
-There are no component tests: `DataGrid`, `TableTab` and `ReviewDialog` are exercised only by the end-to-end test.
+There are no component tests: `DataGrid`, `TableTab`, `ReviewDialog` and `SmartPasteDialog` are exercised only by the end-to-end test.
 
 ### End-to-end smoke test
 
@@ -145,9 +174,10 @@ Editing, in the real window against both engines:
 6. Restore the row and save directly; the reloaded grid shows exactly what was typed and pasted.
 7. Closing a tab with unsaved edits asks first; "Keep editing" keeps the edit; Discard clears it.
 8. A keyless table and a view are labelled read-only.
-9. PostgreSQL: `abc` in a numeric column is refused by the server with the edit kept staged; a corrected value and a second cell then save.
+9. Smart Paste on MySQL `orders`: the clipboard holds a header row, four data rows and an empty row. The header row is detected, columns are mapped by name (case-insensitively), an unknown pasted column is skipped, and the unique index on `order_no` is chosen as the key. The preview shows 1 insert, 1 update, 1 unchanged and 1 problem ("not a number"), and Run is disabled. After the clipboard is corrected and read again the preview is clean; Run; the reloaded grid shows the updated row and the inserted row.
+10. PostgreSQL: `abc` in a numeric column is refused by the server with the edit kept staged; a corrected value and a second cell then save.
 
-It uses synthetic DOM events and empty passwords, so it does **not** cover: saving a password through the UI, restoring tabs after a relaunch, native keyboard shortcuts other than the palette (the grid's shortcuts are dispatched as synthetic `keydown` events, so Cmd+V, Cmd+Z and Cmd+S arriving from the operating system are untested), IME composition, drag selection, Shift+arrow selection, copy, the grid's context menu, drag-resizing, the explorer filter or arrow-key navigation. It also does not exercise the review dialog on a Production-labelled connection, the bulk-threshold trigger, a concurrent-edit conflict, the locked paging / sorting controls, the bulk tab closes, or the refusal to disconnect with unsaved edits.
+It uses synthetic DOM events and empty passwords, so it does **not** cover: saving a password through the UI, restoring tabs after a relaunch, native keyboard shortcuts other than the palette (the grid's shortcuts are dispatched as synthetic `keydown` events, so Cmd+V, Cmd+Z and Cmd+S arriving from the operating system are untested), IME composition, drag selection, Shift+arrow selection, copy, the grid's context menu, drag-resizing, the explorer filter or arrow-key navigation. It also does not exercise the review dialog on a Production-labelled connection, the bulk-threshold trigger, a concurrent-edit conflict, the locked paging / sorting controls, the bulk tab closes, or the refusal to disconnect with unsaved edits. For Smart Paste it covers UPSERT on a single-column unique key on MySQL only: not INSERT or UPDATE mode, a composite or generated key, changing the mapping, key or update columns by hand, the header and `NULL`-text switches, the key picked after switching mode, an empty cell of a NOT NULL column taking its default, the progress bar, "Stop and roll back", the blocked dismissal of the dialog during a run, a run-time conflict, a Production-labelled connection, or PostgreSQL.
 
 ## Safety guarantees
 
@@ -166,18 +196,18 @@ Environment: macOS 26 on Apple Silicon, Rust 1.99, Node 25, pnpm 10, local MySQL
 
 | Check | Result |
 |---|---|
-| `cargo test -p puricat-core` (unit) | Pass: 24 passed, 1 ignored |
+| `cargo test -p puricat-core` (unit) | Pass: 32 passed, 1 ignored |
 | `cargo test -p puricat-core --test live_db` with both servers configured | Pass: 4 passed |
-| `cargo test -p puricat-core --test live_write` with both servers configured | Pass: 2 passed |
+| `cargo test -p puricat-core --test live_write` with both servers configured | Pass: 4 passed (2 save-edit tests, 2 Smart Paste tests) |
 | `cargo test -- --ignored os_keychain` (macOS Keychain) | Pass (recorded before the editing work; not repeated afterwards) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Clean |
 | `cargo fmt --check` | Clean |
 | `pnpm typecheck` | Clean |
-| `pnpm test` (Vitest) | Pass: 25 cases in 4 files |
+| `pnpm test` (Vitest) | Pass: 34 cases in 5 files |
 | `vite build` | Succeeds (as part of the bundle build) |
-| `e2e/run.sh` (dev-server mode), including the editing steps | Pass. An earlier run the same day failed once without explanation (see below) |
+| `e2e/run.sh` (dev-server mode), including the editing and Smart Paste steps | Pass, re-run after the last Smart Paste changes (per-row run-time check, key-value checks, duplicates across lookups, empty cells as NULL, blocked dismissal). An earlier run the same day failed once without explanation (see below) |
 | `pnpm tauri build --debug --bundles app` | Builds `PuriCat.app` (unsigned) |
-| `APP=<bundle binary> e2e/run.sh` (embedded assets, production CSP), including the editing steps | Pass |
+| `APP=<bundle binary> e2e/run.sh` (embedded assets, production CSP), including the editing and Smart Paste steps | Pass, with a bundle rebuilt after the last Smart Paste changes |
 
 Observed during the end-to-end run: the local MySQL session reported itself encrypted and the local PostgreSQL session not encrypted (default TLS mode `prefer`); both CLIs were detected as installed and signed in (Claude Code 2.1.303, codex-cli 0.133.0).
 
@@ -201,6 +231,15 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Editing guards other than the close confirmation | Locked paging / sorting / refresh, bulk closes keeping dirty tabs, refusal to disconnect, delete or re-save a connection with dirty tabs: no automated test |
 | The read-only refusal in the `apply_changes` command and the read-only label in the grid | The live test covers the server's own refusal, below the IPC layer |
 | The 10,000-change limit; saves of hundreds or thousands of rows | Not exercised |
+| Smart Paste through the UI on PostgreSQL | Backend-tested only (`live_write`); the end-to-end test runs it on MySQL |
+| Smart Paste INSERT and UPDATE modes, the progress bar and "Stop and roll back" through the UI | Backend-tested only |
+| Smart Paste with a composite key through the UI | Matching on one is covered by the live test on both engines; no frontend or end-to-end test chooses a composite key |
+| Smart Paste pastes near the 10,000-row limit; duration on a remote server | The largest tested paste is 130 rows on a local server. Each written row is one statement and lookups are one query per 40 rows |
+| Smart Paste with a malformed key value of a non-integer type (a date, for example), and the exclusion of MySQL expression unique indexes | No test (malformed integer keys are unit- and live-tested) |
+| Smart Paste duplicates across lookup chunks against a real server | Unit-tested with simulated database answers; in the live scenario both spellings fall into one lookup |
+| Smart Paste dialog: no dismissal during a run (Esc, outside click, close button); the key used after switching from INSERT with "no key" to UPDATE / UPSERT | No automated test |
+| Smart Paste IPC layer: the read-only refusal in `apply_paste`, `cancel_job`, the values sent over the progress channel | The live tests call the core functions directly. The end-to-end test goes through `unique_keys`, `analyze_paste` and `apply_paste` but does not check progress or press Stop |
+| Smart Paste on a Production-labelled connection | The warning and the danger-styled button have no test |
 | PostgreSQL session time zone | The `TimeZone=UTC` behaviour is a known limitation with no test asserting it |
 | Windows, Linux | Not built or run |
 | Release-profile build, DMG, signed or notarized builds | Only the unsigned debug-profile `.app` bundle was built and tested; no signing identity |

@@ -7,7 +7,7 @@ Status on 2026-11-16. Phases follow the delivery plan in the [product brief](doc
 | 0 | Discovery and decisions | Done |
 | 1 | Runnable foundation | Done |
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
-| 3 | Flagship editing | Partial (spreadsheet-style grid editing done for MySQL and PostgreSQL; Smart Paste and the rest remain) |
+| 3 | Flagship editing | Partial (grid editing and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
 | 4 | SQL and schema | Not started |
 | 5 | AI agent | Not started (CLI detection only) |
 | 6 | Backups | Not started |
@@ -64,12 +64,16 @@ Done (MySQL and PostgreSQL, tables with a primary key; evidence in [TESTING.md](
 - Review dialog with the exact statements and bound values; mandatory for Production-labelled connections, deletes and saves above the per-connection row threshold (default 10).
 - Guards for unsaved edits: tab dot, close confirmation, locked paging / sorting / refresh, refusal to disconnect or change a connection with dirty tabs.
 - Read-only presentation, with the reason, for views, materialized views, keyless tables and read-only connections.
+- Smart Paste wizard ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)): clipboard block, header-row detection, column mapping, INSERT / UPDATE / UPSERT matched on the primary key or a plain unique index read from the catalogue, generated keys used for matching only, duplicate detection, cheap pre-checks, a read-only preview with one outcome per pasted row, re-analysis at run time, one transaction of at most 10,000 rows through the same planner as grid saves, progress and "Stop and roll back". Verified in the backend on both engines; through the UI for UPSERT on MySQL only.
 
 Remaining:
 
 | Item | Notes |
 |---|---|
-| Smart Paste wizard | INSERT / UPDATE / UPSERT; header detection; column mapping; matching on a chosen unique key, including composite keys; duplicate detection; insert / update / skip / conflict counts; batching with progress and cancellation |
+| Smart Paste: "skip invalid rows" | Today any row with a problem blocks the whole run until the source is fixed |
+| Smart Paste: value-aware comparison | "Update" means the pasted text differs from the stored text, so `1.5` against a stored `1.500000` is counted and run as an update |
+| Smart Paste: verification gaps | PostgreSQL, INSERT and UPDATE modes, composite keys, the progress bar, Stop and the blocked dismissal during a run through the UI (composite-key matching itself is verified in the backend on both engines); pastes near the 10,000-row limit and their duration on a remote server |
+| Smart Paste: more than 10,000 rows, CSV / XLSX files | One run is one transaction of single-row statements. Multi-batch or streamed imports and file sources belong to the Phase 4 import tool |
 | Full-value cell inspector / editor | For long values (beyond the 1000-character preview) and binary values; until then such cells are not editable. The read-only inspector is also listed under Phase 2b |
 | Filtering | Not started |
 | Column reorder / hide, pinned key columns | Not started |
@@ -80,7 +84,11 @@ Remaining:
 | Audit log of saves | Not started |
 | Grid validation | Performance with many columns and pages of 1000 wide rows; real keyboard, IME and drag input; the Production and bulk-threshold review paths through the UI ([ADR 0006](docs/adr/0006-data-grid.md), [TESTING.md](TESTING.md) gaps) |
 
-Known limitations of what is built (DELETE checks the key only; PostgreSQL sessions run in UTC; keyless tables stay read-only in the UI) are in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
+Known limitations of what is built (DELETE checks the key only; PostgreSQL sessions run in UTC; keyless tables stay read-only in the UI; Smart Paste compares text and runs as a single transaction) are in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
+
+## Recommended next step
+
+Phase 4 (SQL and schema), starting with the editor spike and the query execution path. Reasons: the largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) wait on test infrastructure that is not available yet (see the blockers below), and the Phase 3 leftovers are refinements of working features. The import tool in Phase 4 is also where Smart Paste's row limit and file sources are meant to be lifted. Phase 2b items that need no extra infrastructure (query cancellation, reconnect, keyset pagination, the cell inspector) can be taken alongside. This is a recommendation, not a commitment.
 
 ## Phase 4 — SQL and schema: not started
 

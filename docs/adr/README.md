@@ -19,5 +19,6 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 | [0011](0011-i18n-and-theming.md) | i18next catalogs, CSS-variable tokens, bundled fonts | Accepted | Yes |
 | [0012](0012-e2e-testing-on-macos.md) | Injected-script end-to-end tests in debug builds | Accepted | Yes |
 | [0013](0013-staged-edits-and-optimistic-saves.md) | Staged grid edits, plan-then-apply saves, optimistic concurrency on text renderings | Accepted | MySQL and PostgreSQL |
+| [0014](0014-smart-paste-match-then-write.md) | Smart Paste: match on a verified unique key in the database, preview, then plain INSERT / UPDATE in one transaction; no native upsert statements | Accepted | MySQL and PostgreSQL |
 
 To add a record: copy the section layout of an existing one, use the next number, and add a row here. Do not rewrite an accepted record; supersede it with a new one.

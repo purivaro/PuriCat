@@ -13,7 +13,7 @@ Labels: **Implemented & verified**, **Implemented, not yet verified**, **Planned
 | Database passwords | OS credential store only; in backend memory while a session is open |
 | Database contents | The user's servers; pages of rows in app memory while a tab is open |
 | Connection metadata (hosts, user names, CA paths) | `puricat.db` in the app-data directory |
-| Integrity of the user's data | The servers. PuriCat writes to them only when the user saves staged grid edits (see "Write path") |
+| Integrity of the user's data | The servers. PuriCat writes to them only when the user saves staged grid edits or runs a previewed Smart Paste (see "Write path") |
 | AI CLI accounts | Owned by the CLIs; PuriCat reads only an install and sign-in flag |
 
 ### Trust boundaries
@@ -33,9 +33,10 @@ Out of scope: an attacker who already runs code as the logged-in user or as root
 | Threat | Mitigation | Status |
 |---|---|---|
 | Password disclosed through files, logs or the UI | Stored only in the OS credential store; no IPC command returns one; connections use typed options, not URLs, so driver errors do not carry it | Implemented & verified (Keychain round trip; MySQL auth failure does not echo the password) |
-| Script running in the web view escalates to the system | No shell, filesystem or HTTP capability; CSP `script-src 'self'`; all effects go through 17 typed commands plus plain-text clipboard read and write | Implemented; not penetration-tested. Script in the web view could read the clipboard and could call `apply_changes` on an open connection |
-| SQL injection through object names, sort columns or edited values | Values are bind parameters; identifiers pass through per-engine quoting; sort and edited columns must exist in the table's metadata | Implemented & verified (unit and live tests) |
-| Unintended writes while browsing | The browse path issues only `SELECT`; edits are staged and written only on Save; optional server-enforced read-only session | Implemented & verified |
+| Script running in the web view escalates to the system | No shell, filesystem or HTTP capability; CSP `script-src 'self'`; all effects go through 21 typed commands plus plain-text clipboard read and write | Implemented; not penetration-tested. Script in the web view could read the clipboard and could call `apply_changes` or `apply_paste` on an open connection |
+| SQL injection through object names, sort columns, edited or pasted values | Values are bind parameters, including pasted keys in Smart Paste lookups; identifiers pass through per-engine quoting; sort, edited, mapped and key columns must exist in the table's metadata | Implemented & verified (unit and live tests) |
+| Unintended writes while browsing | The browse path issues only `SELECT`; edits are staged and written only on Save; the Smart Paste preview issues only `SELECT`; optional server-enforced read-only session | Implemented & verified |
+| A pasted block updates or duplicates the wrong rows | Rows are matched only on a catalogue-verified unique key chosen by the user; equality is evaluated by the database; duplicates, missing keys and malformed key values block the run; the outcome is previewed per row and re-checked per row at run time; one transaction (see "Smart Paste") | Implemented & verified in the backend for single-column and composite keys (live tests, both engines). Through the UI: UPSERT on a single-column key on MySQL only |
 | A save overwrites a change made elsewhere, or touches the wrong rows | Complete-primary-key addressing, optimistic check on edited columns, exactly-one-row rule, one transaction with rollback (see "Write path") | Implemented & verified (live tests, both engines). DELETE checks the key only |
 | A value is silently truncated or coerced on save | MySQL session strict mode; PostgreSQL casts to the bare type so the assignment enforces length and precision | Implemented & verified (live tests: bad number, bad enum, NOT NULL, over-long `varchar`, impossible date, malformed JSON) |
 | A destructive or large save goes through unnoticed | Review dialog with the exact statements and bound values; mandatory for Production connections, deletes and saves above the row threshold | Implemented & verified for deletes (E2E); production and threshold paths not yet verified through the UI. Enforced in the UI only, not by the backend |
@@ -74,9 +75,9 @@ TLS is rustls with the OS root store; an extra CA file can be set per connection
 
 A per-connection option runs `SET SESSION TRANSACTION READ ONLY` (MySQL) or `SET default_transaction_read_only = on` (PostgreSQL) on every pooled connection. `ServerInfo.readOnly` is the server's own answer, not the profile setting.
 
-With the option on, the grid opens every table read-only, `apply_changes` refuses before contacting the server (it checks the saved profile), and if a write were sent anyway the server rejects it. The server-side refusal is verified by a live test on both engines.
+With the option on, the grid opens every table read-only and does not offer Smart Paste, `apply_changes` and `apply_paste` refuse before contacting the server (they check the saved profile), and if a write were sent anyway the server rejects it. The server-side refusal is verified by a live test on both engines.
 
-This is a guard rail, not a privilege boundary: a session can switch itself back with another `SET`. That is harmless today because PuriCat sends no user-supplied SQL — the write path issues only generated `INSERT`, `UPDATE` and `DELETE` statements with bound values — but once the SQL editor (Phase 4) and AI tools (Phase 5) exist, the option alone will not stop a determined statement. The strong control is a database account that lacks write privileges.
+This is a guard rail, not a privilege boundary: a session can switch itself back with another `SET`. That is harmless today because PuriCat sends no user-supplied SQL — the write path issues only generated `INSERT`, `UPDATE` and `DELETE` statements (and Smart Paste's generated lookup `SELECT`s) with bound values — but once the SQL editor (Phase 4) and AI tools (Phase 5) exist, the option alone will not stop a determined statement. The strong control is a database account that lacks write privileges.
 
 ## SQL injection defences
 
@@ -85,6 +86,7 @@ This is a guard rail, not a privilege boundary: a session can switch itself back
 - Sort columns are checked against the table's metadata before they are quoted.
 - Page size is limited to 1–1000; `LIMIT` and `OFFSET` are bound.
 - On the write path every value — new values, key values and the original values used for the concurrency check — is a bind parameter. Column names from the UI must match the table's metadata and are then quoted by `db::ident`. A unit test confirms that hostile key and cell values never appear in the SQL text.
+- Smart Paste lookups bind every pasted key value; the mapped, key and update column names must match the table's metadata and are quoted by `db::ident`. A unit test asserts the lookup's shape: one typed placeholder per key value, the values in the parameter list.
 
 ## Write path
 
@@ -104,19 +106,48 @@ Staged edits are saved by `db::write` and the engine modules ([ADR 0013](docs/ad
 | Review policy | UI-enforced: review is mandatory for Production-labelled connections, any delete, and more touched rows than `bulkReviewRows` (default 10, set per connection) | Implemented & verified for deletes only |
 | Read-only profile | `apply_changes` refuses when the saved profile is read-only | Implemented, not yet verified (the server-side refusal is verified) |
 
+### Smart Paste
+
+Smart Paste ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)) writes through the same planner and executor as grid saves, so the backend rules of the table above (parameters only, identifier quoting, complete-key addressing, optimistic concurrency, exactly one row, one transaction, strict input) apply to it, with the chosen key in place of the primary key. The grid's review dialog and row threshold do not; the preview takes their place. What it adds, enforced in the backend unless noted:
+
+| Defence | Detail | Status |
+|---|---|---|
+| Verified matching key | UPDATE and UPSERT need a key; the key must be the primary key or a plain unique index read from the catalogue at analysis time, and every key column must be mapped. Unique indexes over a column prefix or an expression (MySQL) and partial or expression unique indexes (PostgreSQL) do not qualify. Anything else is refused, whatever the UI sent | Implemented & verified (unit and live tests; the MySQL exclusion of expression indexes has no test) |
+| Database-evaluated equality | Pasted keys are compared with stored keys inside parameterised lookup queries, so type and collation rules are the server's. PuriCat never decides that two keys are equal by comparing text, except to flag exact-text repeats within the paste | Implemented & verified (case-insensitive key on MySQL, case-sensitive on PostgreSQL) |
+| Well-formed key values | A key value for an integer column must be a whole number: `12abc`, `1.9`, `1e2` and ` 1` are invalid rows. Other key columns get the value pre-checks (number shape, declared length). Such rows are never sent to the database, so MySQL's lenient `CAST('12abc' AS SIGNED)` cannot match row 12 | Implemented & verified (unit and live tests, both engines). Key values of other types that the database coerces (dates, for example) are not pre-validated beyond those checks |
+| No ambiguous rows | A pasted row without a key value, two pasted rows with the same key, a pasted key matching more than one existing row, and (INSERT with a key) a key that already exists are problems; any problem blocks the whole run | Implemented & verified. Two spellings of one key are duplicates when both reach the same existing row, in one 40-row lookup (unit and live tests) or in different lookups (unit test with simulated answers) |
+| Read-only preview | `analyze_paste` issues only catalogue queries and `SELECT`s | Implemented & verified (row count unchanged after a preview) |
+| Re-analysis before the run | `apply_paste` analyses the table again and refuses with a `conflict` error unless it reproduces the fingerprint of the preview the user approved. The fingerprint covers every row's status and changed columns (not the stored values, which the optimistic check guards), so a change that leaves the counts equal is caught | Implemented & verified (live tests, both engines: re-running an approved paste is refused; so is an outcome with the same counts but different rows) |
+| Optimistic concurrency | UPDATEs address the row by the key as the database rendered it and require every changed column to still hold the value seen by the re-analysis | Implemented & verified through the shared planner; no Smart Paste test changes a row between analysis and write |
+| One transaction, exactly one row per statement | A driver error, a wrong row count or a cancel rolls back everything, including statements that had succeeded | Implemented & verified (an impossible date after a valid row; cancel after 50 of 130 statements) |
+| Cancellation | "Stop and roll back" sets a flag that is read before each statement. While a run is in flight the dialog cannot be dismissed (Esc, outside click and the close button are blocked), so the outcome is always shown | Implemented & verified for the executor's stop callback (live test); the flag itself, `cancel_job`, the button and the blocked dismissal are not exercised by a test |
+| Size limit | At most 10,000 pasted rows per run | Implemented, not yet verified |
+| Generated keys are never written | An auto-increment or identity key column may be used to match; its pasted value is never inserted or updated. In INSERT mode a pasted generated key that is not found is an invalid row, not a row inserted under another id; a blank key inserts | Implemented & verified |
+| Read-only profile | `apply_paste` refuses when the saved profile is read-only; the UI does not show the button on a read-only tab | Implemented, not yet verified |
+| Production connections | UI only: a red warning and a danger-styled Run button. No typed confirmation, and the grid's row threshold does not apply; the preview is always required | Implemented, not yet verified |
+
+Smart Paste limitations:
+
+- **The preview requirement is a UI rule plus a fingerprint check.** The backend cannot tell whether a human saw the preview; it only requires the caller to state the fingerprint a fresh analysis produces, which `analyze_paste` returns.
+- **The re-analysis is not in the write transaction.** Its lookups run on pooled connections just before the transaction starts. A change made in between is caught by the optimistic check (updates) or by the unique index (inserts), and the run rolls back; a row classified as unchanged or unmatched is simply not touched.
+- **"Update" is a text comparison.** A pasted `1.5` against a stored `1.500000` is counted and run as an update that stores the same number.
+- **Key values of non-integer types are pre-checked only generically.** Integer keys must be whole numbers (see the table). A key value of another type that the database coerces, such as a date, gets only the number-shape and length checks and is then cast and compared by the server; a malformed one has not been tested on either engine.
+- **The SQL statements are not shown.** The preview lists the operation per row and the changed columns, not the statement text that the grid's review dialog shows.
+- **A stop request that arrives after the last statement has started does not prevent the commit.**
+
 Data-integrity limitations to know about:
 
 - **DELETE checks the key only.** A row that was changed elsewhere after it was loaded, but still exists, is deleted without a conflict. Only a row that is already gone is reported.
 - **The concurrency check covers edited columns only.** A concurrent change to another column of the same row is not detected, and is not overwritten either, because only edited columns are written.
 - **The comparison is on the server's text rendering.** Types whose text form depends on session settings compare correctly only while those settings match the session that loaded the page; PuriCat's sessions are configured identically, so this holds within one connection profile.
 - **PostgreSQL sessions run in UTC.** The driver (sqlx 0.8) always sends `TimeZone=UTC` at start-up. `timestamptz` values are therefore shown in UTC with an explicit `+00` offset (unambiguous), a `timestamptz` typed without an offset is read as UTC, and `now()`-based defaults of `timestamp without time zone` columns — including those filled in for a row inserted through the grid — are computed in UTC rather than in the server's configured zone. Not fixed; a per-connection session time zone is Planned (Phase 2b). MySQL sessions keep the server's time zone (verified by a live test).
-- **No client-side validation.** Invalid input is rejected by the server at Save, not while typing.
-- **No audit log.** Saves are not recorded anywhere by PuriCat.
+- **No client-side validation in the grid.** Invalid input is rejected by the server at Save, not while typing. Smart Paste adds a few cheap pre-checks; the server remains the authority there too.
+- **No audit log.** Saves and Smart Paste runs are not recorded anywhere by PuriCat.
 - **Policy lives in the UI.** The review step and the keyless-table rule (the backend would accept INSERT on a keyless table) are not enforced by the IPC layer.
 
 ## Tauri capabilities and CSP
 
-- Capabilities for the main window: `core:default`, `core:window:allow-start-dragging`, `clipboard-manager:allow-read-text` and `clipboard-manager:allow-write-text`. The clipboard permissions belong to the official `tauri-plugin-clipboard-manager` and cover plain text only (no images, HTML or clearing); they exist for copy and paste in the grid. No shell, filesystem, HTTP or dialog plugin is installed.
+- Capabilities for the main window: `core:default`, `core:window:allow-start-dragging`, `clipboard-manager:allow-read-text` and `clipboard-manager:allow-write-text`. The clipboard permissions belong to the official `tauri-plugin-clipboard-manager` and cover plain text only (no images, HTML or clearing); they exist for copy and paste in the grid and for Smart Paste, which reads the clipboard when its dialog opens and on "Read clipboard". No shell, filesystem, HTTP or dialog plugin is installed.
 - Reading the clipboard needs no user gesture or prompt, so any script running in the web view could read it. The CSP and the absence of remote content are what guard this.
 - Production CSP: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost`. `'unsafe-inline'` is allowed for styles only.
 - The development CSP (`devCsp`) is deliberately loose for the Vite dev server and applies to `pnpm tauri dev` only.
@@ -168,6 +199,8 @@ They exist so tests never touch real settings or the Keychain ([ADR 0012](docs/a
 | Verification of the production and bulk-threshold review paths through the UI | 3 |
 | Client-side validation before save | 3 |
 | Per-connection session time zone (PostgreSQL) | 2b |
+| Smart Paste: "skip invalid rows"; value-aware comparison | 3 |
+| Smart Paste: pre-check of key values of non-integer types that the database coerces (dates, for example) | Not scheduled |
 | Row-content check on DELETE; backend enforcement of the review policy | Not scheduled |
 | AI confinement and context redaction | 5 |
 | Backup file permissions and encryption | 6 |
