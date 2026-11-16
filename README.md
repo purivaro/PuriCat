@@ -1,141 +1,140 @@
-# PuriCat
+<p align="center">
+  <img src="branding/app-icon.png" width="112" alt="PuriCat icon">
+</p>
 
-PuriCat is a desktop database client built with Tauri 2 (Rust backend, React/TypeScript frontend). The goal is a client that covers routine database work for MySQL, PostgreSQL and SQL Server with spreadsheet-style editing, an AI agent driven through locally installed CLIs, and scheduled backups. macOS (Apple Silicon) is the first target; Windows follows later.
+<h1 align="center">PuriCat</h1>
 
-> **Status: early development.** Phase 1 (runnable foundation) is complete; Phase 2 (database connectivity), Phase 3 (editing), Phase 4 (SQL and schema) and Phase 5 (AI) are partially complete. This build can connect to MySQL and PostgreSQL, browse tables, **edit data in tables that have a primary key** (spreadsheet-style, staged until Save), load a block copied from a spreadsheet with the **Smart Paste wizard** (INSERT / UPDATE / UPSERT matched on a unique key, previewed before anything runs), **run SQL in query tabs** (each tab on its own connection, with a row-impact guard, a row cap, Stop, history, and export to CSV / JSON / XLSX), and **chat with an AI** through a Claude Code or Codex CLI you have installed and signed in to. The AI is given the schema (names and types, never rows) and **no tools**: it only writes text, and SQL it suggests runs only when you open it in a query tab and run it yourself. It cannot create or alter schema objects through a form, import files, tunnel over SSH, connect to SQL Server, let the AI query or change a database, or take backups. **Not ready for production data.** Builds are unsigned.
+<p align="center">
+  <b>A free database client that treats your data carefully.</b><br>
+  Browse and edit MySQL and PostgreSQL like a spreadsheet, see the exact SQL before anything is saved,<br>
+  and let an AI look things up — while every change still waits for your approval.
+</p>
 
-## Feature status
+<p align="center">
+  <a href="https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg"><b>Download for macOS</b></a>
+  &nbsp;·&nbsp; <a href="README.th.md">ภาษาไทย</a>
+  &nbsp;·&nbsp; <a href="STATUS.md">What works today</a>
+  &nbsp;·&nbsp; <a href="LICENSE">MIT licence</a>
+</p>
 
-Labels used across the docs:
+![PuriCat: a PostgreSQL table next to the AI agent, which has read the data and proposed a change that waits for approval](docs/images/hero.png)
 
-- **Implemented & verified** — in the code and exercised by a test or check that passed (see [TESTING.md](TESTING.md)).
-- **Implemented, not yet verified** — in the code, but no test or run has confirmed it.
-- **Planned (Phase N)** — not in the code.
+> **Early development (v0.1).** PuriCat connects to **MySQL** and **PostgreSQL** and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
 
-| Area | Capability | Status |
-|---|---|---|
-| Shell | Tauri window, custom title bar, resizable explorer / workspace / AI panels, multi-tab workspace | Implemented & verified (E2E) |
-| Shell | Light / dark / system theme, English and Thai, command palette | Implemented & verified (E2E) |
-| Shell | Keyboard shortcuts other than the palette, explorer filter and arrow-key navigation, panel and column resize | Implemented, not yet verified (no automated test) |
-| Connections | Create, edit, test, duplicate, favorite, tag, environment label, delete with confirmation | Implemented & verified (create, test, duplicate, delete in E2E); edit, favorite and tags not covered by a test |
-| Connections | Passwords in the OS credential store (macOS Keychain) | Implemented & verified (Keychain round trip) |
-| Connections | Windows Credential Manager | Implemented, not yet verified |
-| Engines | MySQL: connect, list databases / tables / views, describe, browse | Implemented & verified (MySQL 9.3.0) |
-| Engines | PostgreSQL: connect, list databases / schemas / tables / views / materialized views, describe, browse | Implemented & verified (PostgreSQL 16.13) |
-| Engines | SQL Server | Planned (Phase 2b) |
-| Browsing | Virtualized grid: sort, page, exact server-rendered values, truncation flags, NULL vs empty; structure view | Implemented & verified |
-| Browsing | Views, materialized views, tables without a primary key and read-only connections open read-only, with the reason shown | Implemented & verified (E2E: view and keyless table); the read-only-connection label has no automated test |
-| Editing | Staged edits on MySQL and PostgreSQL tables with a primary key: in-cell editor, add / delete / restore rows, undo / redo, Save / Discard; nothing is written before Save | Implemented & verified (unit, live and E2E) |
-| Editing | Range selection, copy, and direct paste from Excel / Google Sheets / Numbers (quoted cells, embedded tabs and line breaks, values never reinterpreted) | Implemented & verified (parser, serialiser and paste logic unit-tested; paste, undo / redo in E2E). Copy, drag and Shift+arrow selection, and native key input are not exercised end to end |
-| Editing | Save in one transaction: parameterised statements, rows addressed by the complete primary key, optimistic concurrency check, exactly-one-row rule, rollback on any failure | Implemented & verified (live tests on both engines) |
-| Editing | Not editable yet: generated / identity / auto-increment columns, binary and MySQL spatial columns, cells truncated for preview, rows whose key is NULL or truncated | Implemented & verified (refusals unit- and live-tested) |
-| Editing | Smart Paste wizard: reads a spreadsheet block from the clipboard; header-row detection, column mapping, INSERT / UPDATE / UPSERT matched on the primary key or a unique index (composite keys accepted); read-only preview with one outcome per pasted row; runs as one transaction with progress and "Stop and roll back"; at most 10,000 pasted rows | Implemented & verified in the backend on both engines (unit and live tests: all three modes, single-column and composite keys). Through the UI only UPSERT on a single-column unique key on MySQL is verified (E2E). Composite keys, INSERT / UPDATE modes, the progress bar, Stop and PostgreSQL through the UI are implemented, not yet verified |
-| Editing | Smart Paste: no native upsert statements. PuriCat matches rows itself and runs plain parameterised INSERT and UPDATE statements; `ON DUPLICATE KEY UPDATE`, `ON CONFLICT` and `MERGE` are deliberately not used ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)) | Implemented & verified (the shared planner emits only single-row INSERT and UPDATE statements; unit and live tests) |
-| Editing | Smart Paste follow-ups: "skip invalid rows", value-aware comparison (`1.5` vs a stored `1.500000` counts as an update today), more than 10,000 rows, CSV / XLSX files | Planned (Phase 3; larger and file-based imports with the Phase 4 import tool) |
-| Editing | Full-value cell editor, filtering, editing across pages | Planned (Phase 3) |
-| Safety | Review step showing the exact SQL and bound values: mandatory for Production-labelled connections, for any delete, and above a per-connection row threshold (default 10) | Implemented & verified for the delete-triggered path (E2E); the production and threshold paths are implemented, not yet verified through the UI |
-| Safety | Unsaved-edit guards: tab dot, confirmation before closing a dirty tab, paging / sorting / refresh locked, disconnect and connection changes refused while edits are pending | Implemented & verified for the close confirmation (E2E); the other guards have no automated test |
-| Safety | Server-enforced read-only session option | Implemented & verified (server reports the flag and refuses a write). A query tab inherits it, but SQL typed there can switch the session back, so in the console it guards against accidents only ([SECURITY.md](SECURITY.md)) |
-| Safety | TLS mode `prefer` (default) | Implemented & verified against local servers only |
-| Safety | TLS modes `disable` / `require` / `verify-ca` / `verify-full`, custom CA file | Implemented, not yet verified |
-| Safety | SSH tunnels | Planned (Phase 2b) |
-| AI | Detect installed Claude Code / Codex CLIs and their sign-in state | Implemented & verified (parser unit tests; against the real CLIs in the end-to-end run made before the agent chat — since then the E2E uses stand-in CLIs, so the real status commands are not exercised by an automated run) |
-| AI | Agent chat in the AI panel ([ADR 0016](docs/adr/0016-agent-chat-without-tools.md)): provider switch, model selector ("Default model", the CLI's models, or any name), streamed answers, Stop, "Try again", "New chat". One CLI process per turn, fixed arguments, no shell, the prompt on stdin, an empty working directory. The conversation is kept in memory only | Claude Code: implemented & verified (unit tests on stream lines captured from Claude Code 2.1.303 and with a stand-in script; E2E through the UI on stand-in CLIs, in dev mode and against the bundled app under the production CSP; an opt-in test against the real CLI). The E2E was last run before Stop was changed to end the CLI's whole process group; that change is unit-tested only. Codex: implemented; **its successful path is not verified against the real CLI** — only the service's refusal was observed, the success shape follows the documented format (unit test and E2E stand-in) |
-| AI | The model has no tools and no database access. SQL in an answer is a code block with "Copy" and "Open in query tab", which opens a new query tab with the text and runs nothing; the SQL console's safeguards apply from there | Implemented & verified for what is passed to the CLI (`--tools ""`, `--strict-mcp-config`, Codex's read-only sandbox: unit tests, E2E on stand-ins) and for "Open in query tab" running nothing (E2E). Codex keeps its own sandboxed shell tool ([SECURITY.md](SECURITY.md), AI chat) |
-| AI | Context shared with the AI: engine and version, database and schema, table / view names with column names, types, key and NOT NULL flags and row estimates (40 tables in full, the rest by name), and the SQL of the active query tab. Never rows, defaults, hosts, user names, passwords or the connection's name. Shown in a context inspector and with every sent message; a switch turns sharing off | Implemented & verified (unit test of the exact text; E2E: the inspector, and that the prompt given to the stand-ins names neither host nor connection). With a PostgreSQL context only; no test builds one from MySQL. The switch and the per-message record have no automated test |
-| AI | Schema and query tools for the model (MCP server), write proposals with an approval queue, audit log, per-column redaction, sample rows | Planned (Phase 5) |
-| SQL | Query tabs: Monaco editor with MySQL / PostgreSQL highlighting, loaded on demand; run the selection or the whole script (⌘↵ / Run); one result tab per result set with exact server-rendered values; a Messages list with status, kind, rows / rows affected and time per statement; the first error stops the script | Implemented & verified in the backend on both engines (live tests); through the UI on MySQL only (E2E, also against the bundled app under the production CSP). ⌘↵, running a selection, and PostgreSQL through the UI are not exercised |
-| SQL | One connection per query tab ([ADR 0015](docs/adr/0015-sql-console.md)): session state (`USE`, `SET`, temporary tables, a transaction) lasts as long as the tab; an open transaction is flagged (badge, dot on the tab, confirmation before closing, disconnect refused); a lost connection is reported and the next run reconnects | Implemented & verified in the backend on both engines (live tests); the badge, tab dot, locked database selector and close confirmation in E2E (MySQL). The lost-connection path and the disconnect refusal are not exercised through the UI |
-| SQL | Safeguards: confirmation before destructive statements (every non-read statement on a Production-labelled connection); an impact guard that rolls back a row-changing statement above the connection's row threshold (default 10) unless "Run it without the limit" is chosen; a row cap per result (default 1,000, at most 100,000); Stop | Implemented & verified: impact guard and row cap in live tests on both engines; the confirmation (cancelled) and the impact guard through the UI in E2E (MySQL). Stop is verified in the backend only; the Production confirmation has no automated test |
-| SQL | Export a result to CSV, JSON or XLSX, written by the backend to a path chosen in the native Save dialog; fetched rows only | Implemented & verified (unit tests; CSV in a live test; E2E writes all three through the IPC command and checks the files). The Save dialog and the Export menu are not exercised |
-| SQL | History per connection (local, password literals in single or double quotes masked, at most 1,000 entries, deleted with the connection); completion of table names, columns and keywords; formatting | History: implemented & verified (unit tests; listed in E2E); its deletion with the connection has no test. Completion and formatting: implemented, not yet verified |
-| SQL | Saved scripts, run statement at cursor, alias-aware completion, results and exports beyond 100,000 rows, EXPLAIN view, query parameters, object editing with DDL preview, import from CSV / XLSX, SQL dump export | Planned (Phase 4) |
-| Backups | Manual and scheduled backup, restore | Planned (Phase 6) |
-| Release | Signed and notarized builds, updater, Windows | Planned (Phase 7) |
+## Download
 
-Details per engine are in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md).
+| System | File |
+|---|---|
+| **macOS** 12 or newer | [**PuriCat-mac.dmg**](https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg) — a universal app. Tested on Apple Silicon; the Intel half has not been run |
+| Windows, Linux | Not built yet |
 
-## Prerequisites
+All versions and checksums are on the [Releases](https://github.com/purivaro/PuriCat/releases) page.
 
-| Tool | Version | Notes |
-|---|---|---|
-| Rust | 1.85 or newer (`rust-version` in `Cargo.toml`) | `cargo` must be on `PATH`; the Tauri CLI and `pnpm check` call it directly |
-| Node.js | 22 or newer | CI uses 22; development used 25 |
-| pnpm | 10 | |
-| macOS | 12.0 or newer (bundle minimum) | Only macOS 26 on Apple Silicon has been tested. Tauri's usual platform prerequisites apply (Xcode Command Line Tools) |
+### Install on a Mac
 
-Windows and Linux builds have not been attempted.
+1. Open `PuriCat-mac.dmg` and drag **PuriCat** into Applications.
+2. Open PuriCat. This build is **not yet signed with an Apple Developer ID**, so macOS stops it the first time:
+   - macOS 15 or newer: open **System Settings › Privacy & Security**, scroll down to the message about PuriCat and choose **Open Anyway**.
+   - macOS 12 to 14: right-click PuriCat in Applications and choose **Open**, then **Open** again.
+   - Or in the Terminal: `xattr -dr com.apple.quarantine /Applications/PuriCat.app`
 
-## Run
+   You only do this once.
+3. Passwords you save are kept in the **macOS Keychain**, never in a file. Because the build is unsigned, macOS may ask again for permission to read them after an update.
+
+## What it does
+
+### Edit tables like a spreadsheet, and read the SQL before it runs
+
+Type in cells, add and delete rows, paste a block copied from Excel or Google Sheets, undo and redo. Nothing touches the database until you press Save. For deletes, larger changes and Production connections, a review shows **every statement with its values** first. Everything is saved in **one transaction**: if a row was changed by someone else in the meantime, nothing is saved.
+
+![The review dialog: each DELETE, UPDATE and INSERT with its values, saved in one transaction](docs/images/edit-review.png)
+
+### Smart Paste: update a table from a spreadsheet
+
+Copy rows from a spreadsheet and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs.
+
+![Smart Paste: columns mapped to the table, and a preview of which rows will be inserted or updated](docs/images/smart-paste.png)
+
+### A SQL console with guard rails
+
+Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
+
+![A query tab with two statements and one result tab for each](docs/images/sql-console.png)
+
+### An AI agent that asks before it changes anything
+
+PuriCat talks to the **Claude Code** or **Codex** command-line tool that you have installed and signed in to. It never asks for an API key or a password.
+
+- **Off by default.** Out of the box the AI only sees table and column names, and only writes text.
+- **Structure**, or **Structure and rows**: you choose whether it may look at the catalogue, or also run read-only queries (one statement at a time, in a read-only transaction, at most 200 rows).
+- **It cannot write.** A change is a *proposal*: you read the SQL and see which connection and database it will run on, and PuriCat runs it only after you approve it. The row limit of the SQL console applies here too.
+- **Everything is visible.** Each step opens to show exactly what the AI was given, and an activity log on your computer records every read, proposal and decision.
+
+![The approval dialog: the proposed SQL, the connection it runs on and the guards that apply](docs/images/ai-review.png)
+
+![The activity log: the queries the AI ran, what it proposed and what was approved](docs/images/ai-activity-log.png)
+
+To use the agent, install [Claude Code](https://claude.com/claude-code) and sign in (`claude auth login`); PuriCat finds it by itself. Codex is supported the same way, but its tool calls have not been verified yet. What you send to the AI goes to that provider under your own account: [AI_INTEGRATION.md](AI_INTEGRATION.md) says exactly what is sent.
+
+### English and Thai, light and dark
+
+![The same screen in Thai with the dark theme](docs/images/thai-dark.png)
+
+## Built to be safe
+
+- **Passwords stay in the macOS Keychain.** They are never written to PuriCat's settings or logs, and never sent to the AI.
+- **No telemetry.** PuriCat's own code opens no connection except to your databases. The AI panel starts the CLI you installed, and that tool talks to its provider.
+- **Environment labels.** Mark a connection as Development, Staging or Production; Production adds confirmations. A connection can also be opened read-only, enforced by the server.
+- **Exact values.** Numbers, dates and JSON are shown as the server renders them: no rounding of a `DECIMAL`, no loss beyond 2^53.
+- **The AI never holds your credentials.** Its tools run inside PuriCat on the connection you already opened, for the length of one answer.
+
+The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY.md).
+
+## Not there yet
+
+SQL Server, SSH tunnels, creating and altering tables, import from files, backups, filtering in the grid, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+
+## Build from source
+
+You need Rust 1.85 or newer, Node.js 22 or newer and pnpm 10, on macOS 12 or newer with the Xcode Command Line Tools.
 
 ```sh
 pnpm install
-pnpm tauri dev
+pnpm tauri dev      # run the app (the first build takes several minutes)
+pnpm tauri build    # make PuriCat.app and a .dmg
+pnpm check          # type-check, unit tests, cargo fmt, clippy, cargo test
 ```
 
-The first build compiles the Rust workspace and takes several minutes. The UI only works inside the Tauri window; opening the Vite URL in a browser shows a notice instead.
+Tests against real MySQL and PostgreSQL servers, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
 
-Unsigned debug builds can trigger a Keychain prompt after each rebuild. For development without the Keychain (debug builds only):
-
-```sh
-PURICAT_SECRET_STORE=memory pnpm tauri dev   # passwords kept in memory, lost on exit
-```
-
-## Build
-
-```sh
-pnpm tauri build
-```
-
-Produces an **unsigned** `.app` and `.dmg` (bundle targets in `src-tauri/tauri.conf.json`). The frontend production bundle (`vite build`) is verified; the full `pnpm tauri build` output has not been verified, and signing/notarization is Planned (Phase 7).
-
-## Test
-
-```sh
-pnpm check        # typecheck, Vitest, cargo fmt --check, clippy -D warnings, cargo test --workspace
-
-# Live database tests: point them at DISPOSABLE servers only.
-PURICAT_TEST_MYSQL=you@127.0.0.1:3306 PURICAT_TEST_MYSQL_PASSWORD=... \
-PURICAT_TEST_POSTGRES=you@127.0.0.1:5432 PURICAT_TEST_POSTGRES_PASSWORD=... \
-  cargo test -p puricat-core --test live_db --test live_write --test live_console
-
-e2e/run.sh        # end-to-end smoke test in the real window (macOS, local MySQL + PostgreSQL; uses only a database named puricat_e2e)
-```
-
-`live_db` covers connecting and browsing; `live_write` covers saving edits and Smart Paste; `live_console` covers the SQL console. All three create and drop their own scratch databases. Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". The end-to-end test temporarily overwrites the system clipboard and restores the previous text. It needs no AI account: the agent chat is driven through stand-in CLIs. One opt-in unit test (`cargo test -p puricat-core --lib -- --ignored real_claude`) sends a single small prompt through the real Claude Code CLI on your own account. See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
-
-## Repository layout
+A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them it is only ad-hoc signed.
 
 ```
-crates/core/        puricat-core: model, settings store, secrets, DB adapters, AI CLI discovery (ai_detect.rs), agent chat runner (agent.rs); no Tauri dependency
-  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting, write planner (write.rs), Smart Paste matching (smart.rs),
-                    SQL console (console.rs), statement splitter and classifier (script.rs), CSV / JSON / XLSX export (export.rs)
-  tests/            live_db.rs (browse), live_write.rs (save edits, Smart Paste) and live_console.rs (SQL console): integration tests against real servers
-src-tauri/          puricat: Tauri app, IPC commands, app state, capabilities, bundle config
-src/                React frontend (components, features, stores, i18n); features/sql holds the query tab and the Monaco set-up,
-                    features/agent the chat and its Markdown reader
-e2e/                end-to-end smoke test (runner, injected script, SQL fixtures, stand-in `claude` and `codex` CLIs in fixtures/bin)
-branding/           icon artwork
-scripts/            icon processing script
-docs/               product brief and architecture decision records
+crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the SQL console,
+               the AI chat runner and the tools it serves (no Tauri dependency)
+src-tauri/     the Tauri app: IPC commands, app state, bundle configuration
+src/           the React frontend
+e2e/           the end-to-end test: runner, script, SQL fixtures, stand-in AI CLIs
+docs/          decision records (docs/adr) and the screenshots on this page
 ```
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements, acceptance criteria and status |
+| [STATUS.md](STATUS.md) | Every feature, and how it is known to work |
+| [ROADMAP.md](ROADMAP.md) | What comes next |
+| [SECURITY.md](SECURITY.md) | Threat model, credentials, TLS, the SQL console, the AI |
+| [AI_INTEGRATION.md](AI_INTEGRATION.md) | How the AI CLIs are run, what is sent, the database tools |
+| [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md) | Engines, versions and features |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Components, data flow, IPC surface |
+| [TESTING.md](TESTING.md) | Test layers, commands, results and gaps |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements and acceptance criteria |
 | [docs/adr/](docs/adr/README.md) | Architecture decision records |
-| [SECURITY.md](SECURITY.md) | Threat model, credentials, TLS, SQL console, AI chat |
-| [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md) | Engine / version / feature matrix |
-| [AI_INTEGRATION.md](AI_INTEGRATION.md) | CLI detection, the agent chat (what is sent, how the CLIs are run), the planned tool protocol |
-| [BACKUP_RESTORE.md](BACKUP_RESTORE.md) | Backup design and limits (nothing implemented yet) |
-| [TESTING.md](TESTING.md) | Test layers, commands, results, gaps |
-| [ROADMAP.md](ROADMAP.md) | Phases, status, blockers |
-| [LICENSES.md](LICENSES.md) | Dependency licences and distribution obligations |
-| [docs/PuriCat_Master_Requirements.md](docs/PuriCat_Master_Requirements.md) | Product brief (source of truth) |
+| [LICENSES.md](LICENSES.md) | Licences of the libraries PuriCat uses |
 
-## License
+## Licence
 
-PuriCat's own licence has not been decided; the workspace is marked `publish = false`. See [LICENSES.md](LICENSES.md).
+PuriCat is free and open source under the [MIT licence](LICENSE). Use it, share it, change it.
+
+The screenshots on this page were taken from a debug build running against a demo database. The AI answers in them are real answers from Claude Code.
