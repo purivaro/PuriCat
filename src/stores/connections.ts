@@ -24,6 +24,19 @@ export const nodeKey = {
   schema: (id: string, database: string, schema: string) => JSON.stringify([id, database, schema]),
 };
 
+/** Profile fields that make the backend close an open session when they change. */
+const SESSION_FIELDS = [
+  "engine",
+  "host",
+  "port",
+  "username",
+  "database",
+  "tls",
+  "tlsCaPath",
+  "readOnly",
+  "connectTimeoutSecs",
+] as const satisfies readonly (keyof ConnectionProfile)[];
+
 interface ConnectionsState {
   connections: ConnectionView[];
   loaded: boolean;
@@ -83,7 +96,13 @@ export const useConnections = create<ConnectionsState>((set, get) => {
 
     save: async (profile, password) => {
       // Changing how to connect closes the session, which would drop staged edits.
-      if (profile.id && useWorkspace.getState().hasUnsavedFor(profile.id)) throw new Error(i18n.t("table.unsavedBlocks"));
+      // Cosmetic changes (name, label, favorite, tags) leave the session alone and are fine.
+      const before = get().connections.find((c) => c.id === profile.id);
+      const reconnects =
+        password.action !== "keep" || !before || SESSION_FIELDS.some((k) => before[k] !== profile[k]);
+      if (profile.id && reconnects && useWorkspace.getState().hasUnsavedFor(profile.id)) {
+        throw new Error(i18n.t("table.unsavedBlocks"));
+      }
       const { connection, sessionClosed } = await ipc.saveConnection(profile, password);
       replace(connection);
       if (sessionClosed) reset(connection.id);

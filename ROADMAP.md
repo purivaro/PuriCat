@@ -7,7 +7,7 @@ Status on 2026-11-16. Phases follow the delivery plan in the [product brief](doc
 | 0 | Discovery and decisions | Done |
 | 1 | Runnable foundation | Done |
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
-| 3 | Flagship editing | Not started |
+| 3 | Flagship editing | Partial (spreadsheet-style grid editing done for MySQL and PostgreSQL; Smart Paste and the rest remain) |
 | 4 | SQL and schema | Not started |
 | 5 | AI agent | Not started (CLI detection only) |
 | 6 | Backups | Not started |
@@ -34,7 +34,7 @@ Done:
 - Credentials in the OS credential store; TLS options; server-enforced read-only sessions.
 - Several concurrent connections with pooling limits and idle timeout.
 - Explorer with lazy metadata (databases, schemas, tables, views).
-- Read-only table browsing with exact values, paging and sorting; structure view.
+- Table browsing with exact values, paging and sorting; structure view.
 
 ### Phase 2b — remaining
 
@@ -49,17 +49,38 @@ Done:
 | Keyset pagination | Replace `OFFSET` where a usable key exists |
 | Exact row count on demand | Opt-in, cancellable |
 | Cell inspector | Fetch and show the full value of a truncated cell |
+| Per-connection session time zone (PostgreSQL) | The driver always starts sessions with `TimeZone=UTC`; let the user choose the server default or a named zone ([DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), known limitations) |
 
 Smaller follow-ups found while documenting: a connect-timeout field in the dialog; display of the TLS state of an open session; a live test for wrong passwords (needs a server with password authentication); a tie-breaker or an "unstable order" flag when a keyless table is sorted.
 
-## Phase 3 — Flagship editing: not started
+## Phase 3 — Flagship editing: partial
 
-1. Grid spike that decides custom grid vs Glide Data Grid ([ADR 0006](docs/adr/0006-data-grid.md)).
-2. Clipboard parser with unit tests (TSV/CSV, quoting, NULL vs empty, Thai, precision).
-3. Staged edits: change tracking, highlight, undo/redo, Save / Discard.
-4. Write path per engine: parameterized, keyed by primary or unique key, optimistic concurrency, transactions; no edits on keyless tables.
-5. Smart Paste wizard: INSERT / UPDATE / UPSERT, column mapping, key validation, counts preview, batching with progress and cancellation.
-6. Per-connection safety policy: review step for bulk changes, impact thresholds, stricter production defaults.
+Done (MySQL and PostgreSQL, tables with a primary key; evidence in [TESTING.md](TESTING.md), design in [ADR 0013](docs/adr/0013-staged-edits-and-optimistic-saves.md)):
+
+- Staged edits on the loaded page: change tracking, highlight, undo / redo, Save / Discard; nothing is written before Save.
+- Editable custom grid: single-range selection (mouse, Shift+arrows, row gutter, select all), in-cell editor, Tab / Enter navigation, multi-line values, clear, set to NULL, add / delete / restore rows, context menu.
+- Clipboard: TSV parser and serialiser with unit tests; copy; direct paste from Excel / Google Sheets / Numbers with fill, append and overflow reporting; system clipboard through the official Tauri clipboard plugin.
+- Write path per engine: parameterised statements, complete-primary-key addressing, optimistic concurrency on edited columns, exactly-one-row rule, one transaction, 10,000 row changes per save; strict mode for MySQL sessions; bare-type casts for PostgreSQL.
+- Review dialog with the exact statements and bound values; mandatory for Production-labelled connections, deletes and saves above the per-connection row threshold (default 10).
+- Guards for unsaved edits: tab dot, close confirmation, locked paging / sorting / refresh, refusal to disconnect or change a connection with dirty tabs.
+- Read-only presentation, with the reason, for views, materialized views, keyless tables and read-only connections.
+
+Remaining:
+
+| Item | Notes |
+|---|---|
+| Smart Paste wizard | INSERT / UPDATE / UPSERT; header detection; column mapping; matching on a chosen unique key, including composite keys; duplicate detection; insert / update / skip / conflict counts; batching with progress and cancellation |
+| Full-value cell inspector / editor | For long values (beyond the 1000-character preview) and binary values; until then such cells are not editable. The read-only inspector is also listed under Phase 2b |
+| Filtering | Not started |
+| Column reorder / hide, pinned key columns | Not started |
+| Multi-range (non-contiguous) selection | Only one rectangular range today |
+| Keyset pagination | Also listed under Phase 2b |
+| Editing across pages | Edits are limited to the loaded page; paging is locked while edits are pending |
+| Client-side type hints and validation before save | Today the server validates at Save |
+| Audit log of saves | Not started |
+| Grid validation | Performance with many columns and pages of 1000 wide rows; real keyboard, IME and drag input; the Production and bulk-threshold review paths through the UI ([ADR 0006](docs/adr/0006-data-grid.md), [TESTING.md](TESTING.md) gaps) |
+
+Known limitations of what is built (DELETE checks the key only; PostgreSQL sessions run in UTC; keyless tables stay read-only in the UI) are in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
 
 ## Phase 4 — SQL and schema: not started
 
@@ -100,7 +121,7 @@ Smaller follow-ups found while documenting: a connect-timeout field in the dialo
 |---|---|---|
 | PuriCat's own licence, and the pricing / licensing model | Phase 7; affects dependency choices earlier | The workspace is `publish = false` with no licence. A commercial model changes what can be bundled |
 | Final bundle identifier and an Apple Developer ID | Signing and notarization; ideally before any external tester | `app.puricat.desktop` is a placeholder. Changing it after users have data orphans their settings |
-| AG Grid Enterprise licence, or stay with the custom grid | Start of Phase 3 | Range selection and clipboard paste are Enterprise-only in AG Grid ([ADR 0006](docs/adr/0006-data-grid.md)) |
+| AG Grid Enterprise licence, or stay with the custom grid | Only if the remaining Phase 3 grid validation fails | Editing, single-range selection and paste are now built on the custom grid; the question returns only if its performance or multi-range validation fails ([ADR 0006](docs/adr/0006-data-grid.md)) |
 | A way to run a disposable SQL Server (Docker or a test server) | Phase 2b | No adapter work can be verified without one |
 | Hosting for the update channel | Phase 7 | The signed-update design depends on where artifacts and manifests are served |
 

@@ -14,6 +14,7 @@ Status on 2026-11-16. This is a hand-maintained summary of **direct** dependenci
 | sqlx | 0.8 | MIT OR Apache-2.0 | MySQL and PostgreSQL drivers, local SQLite store |
 | SQLite (bundled through sqlx / `libsqlite3-sys`) | — | SQLite: public domain; `libsqlite3-sys` bindings: MIT | Local settings database |
 | keyring | 3 | MIT OR Apache-2.0 | OS credential store |
+| `tauri-plugin-clipboard-manager` (+ `@tauri-apps/plugin-clipboard-manager`) | MIT OR Apache-2.0 | Plain-text copy and paste in the data grid |
 | tokio | 1 | MIT | Async runtime, subprocesses |
 | thiserror | 2 | MIT OR Apache-2.0 | Error type |
 | uuid | 1 | Apache-2.0 OR MIT | Connection ids |

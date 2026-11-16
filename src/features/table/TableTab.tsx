@@ -137,8 +137,12 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     (result: ApplyResult) => {
       setReviewing(false);
       setSaving(false);
+      // The edits are in the database now: drop them at once, so a second Save (or ⌘S) before
+      // the reload returns cannot apply the same inserts again.
+      setHistory(NO_HISTORY);
+      setSelection(null);
       toast.success(t("table.saved", { ...result }));
-      refresh(); // shows what the server actually stored and clears the staged edits
+      refresh(); // shows what the server actually stored
     },
     [refresh, t],
   );
@@ -156,7 +160,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
 
   const save = useCallback(
     (forceReview = false) => {
-      if (!page || !connection || !dirty || saving) return;
+      // While the review dialog is open, it owns the save.
+      if (!page || !connection || !dirty || saving || reviewing) return;
       // Bulk, destructive and production saves always pass through the review step.
       const needsReview =
         forceReview ||
@@ -174,7 +179,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
           setSaveError(errorMessage(e));
         });
     },
-    [page, connection, dirty, saving, summary.deleted, summary.rows, tab.table, pending, saved],
+    [page, connection, dirty, saving, reviewing, summary.deleted, summary.rows, tab.table, pending, saved],
   );
 
   // Tab-level shortcuts: ⌘S saves, ⌘R reloads (unless that would drop edits).

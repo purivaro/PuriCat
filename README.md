@@ -2,7 +2,7 @@
 
 PuriCat is a desktop database client built with Tauri 2 (Rust backend, React/TypeScript frontend). The goal is a client that covers routine database work for MySQL, PostgreSQL and SQL Server with spreadsheet-style editing, an AI agent driven through locally installed CLIs, and scheduled backups. macOS (Apple Silicon) is the first target; Windows follows later.
 
-> **Status: early development.** Phase 1 (runnable foundation) is complete and Phase 2 (database connectivity) is partially complete. This build can connect to MySQL and PostgreSQL and browse tables **read-only**. It cannot edit data, run SQL, tunnel over SSH, talk to an AI agent or take backups. **Not ready for production data.** Builds are unsigned.
+> **Status: early development.** Phase 1 (runnable foundation) is complete; Phase 2 (database connectivity) and Phase 3 (editing) are partially complete. This build can connect to MySQL and PostgreSQL, browse tables, and **edit data in tables that have a primary key** (spreadsheet-style, staged until Save). It cannot run SQL, tunnel over SSH, connect to SQL Server, talk to an AI agent or take backups. **Not ready for production data.** Builds are unsigned.
 
 ## Feature status
 
@@ -16,21 +16,28 @@ Labels used across the docs:
 |---|---|---|
 | Shell | Tauri window, custom title bar, resizable explorer / workspace / AI panels, multi-tab workspace | Implemented & verified (E2E) |
 | Shell | Light / dark / system theme, English and Thai, command palette | Implemented & verified (E2E) |
-| Shell | Keyboard shortcuts other than the palette, explorer filter and arrow-key navigation, panel and column resize, copy cell/row | Implemented, not yet verified (no automated test) |
+| Shell | Keyboard shortcuts other than the palette, explorer filter and arrow-key navigation, panel and column resize | Implemented, not yet verified (no automated test) |
 | Connections | Create, edit, test, duplicate, favorite, tag, environment label, delete with confirmation | Implemented & verified (create, test, duplicate, delete in E2E); edit, favorite and tags not covered by a test |
 | Connections | Passwords in the OS credential store (macOS Keychain) | Implemented & verified (Keychain round trip) |
 | Connections | Windows Credential Manager | Implemented, not yet verified |
 | Engines | MySQL: connect, list databases / tables / views, describe, browse | Implemented & verified (MySQL 9.3.0) |
 | Engines | PostgreSQL: connect, list databases / schemas / tables / views / materialized views, describe, browse | Implemented & verified (PostgreSQL 16.13) |
 | Engines | SQL Server | Planned (Phase 2b) |
-| Browsing | Read-only virtualized grid: sort, page, exact server-rendered values, truncation flags, NULL vs empty | Implemented & verified |
-| Safety | Server-enforced read-only session option | Implemented & verified (server reports the flag) |
+| Browsing | Virtualized grid: sort, page, exact server-rendered values, truncation flags, NULL vs empty; structure view | Implemented & verified |
+| Browsing | Views, materialized views, tables without a primary key and read-only connections open read-only, with the reason shown | Implemented & verified (E2E: view and keyless table); the read-only-connection label has no automated test |
+| Editing | Staged edits on MySQL and PostgreSQL tables with a primary key: in-cell editor, add / delete / restore rows, undo / redo, Save / Discard; nothing is written before Save | Implemented & verified (unit, live and E2E) |
+| Editing | Range selection, copy, and direct paste from Excel / Google Sheets / Numbers (quoted cells, embedded tabs and line breaks, values never reinterpreted) | Implemented & verified (parser, serialiser and paste logic unit-tested; paste, undo / redo in E2E). Copy, drag and Shift+arrow selection, and native key input are not exercised end to end |
+| Editing | Save in one transaction: parameterised statements, rows addressed by the complete primary key, optimistic concurrency check, exactly-one-row rule, rollback on any failure | Implemented & verified (live tests on both engines) |
+| Editing | Not editable yet: generated / identity / auto-increment columns, binary and MySQL spatial columns, cells truncated for preview, rows whose key is NULL or truncated | Implemented & verified (refusals unit- and live-tested) |
+| Editing | Smart Paste wizard (INSERT / UPDATE / UPSERT with mapping), full-value cell editor, filtering, editing across pages | Planned (Phase 3) |
+| Safety | Review step showing the exact SQL and bound values: mandatory for Production-labelled connections, for any delete, and above a per-connection row threshold (default 10) | Implemented & verified for the delete-triggered path (E2E); the production and threshold paths are implemented, not yet verified through the UI |
+| Safety | Unsaved-edit guards: tab dot, confirmation before closing a dirty tab, paging / sorting / refresh locked, disconnect and connection changes refused while edits are pending | Implemented & verified for the close confirmation (E2E); the other guards have no automated test |
+| Safety | Server-enforced read-only session option | Implemented & verified (server reports the flag and refuses a write) |
 | Safety | TLS mode `prefer` (default) | Implemented & verified against local servers only |
 | Safety | TLS modes `disable` / `require` / `verify-ca` / `verify-full`, custom CA file | Implemented, not yet verified |
 | Safety | SSH tunnels | Planned (Phase 2b) |
 | AI | Detect installed Claude Code / Codex CLIs and their sign-in state | Implemented & verified |
 | AI | Agent chat, schema tools, approval queue | Planned (Phase 5) |
-| Editing | Editable grid, staged changes, Smart Paste | Planned (Phase 3) |
 | SQL | Query editor, results, history, import/export | Planned (Phase 4) |
 | Backups | Manual and scheduled backup, restore | Planned (Phase 6) |
 | Release | Signed and notarized builds, updater, Windows | Planned (Phase 7) |
@@ -79,19 +86,19 @@ pnpm check        # typecheck, Vitest, cargo fmt --check, clippy -D warnings, ca
 # Live database tests: point them at DISPOSABLE servers only.
 PURICAT_TEST_MYSQL=you@127.0.0.1:3306 PURICAT_TEST_MYSQL_PASSWORD=... \
 PURICAT_TEST_POSTGRES=you@127.0.0.1:5432 PURICAT_TEST_POSTGRES_PASSWORD=... \
-  cargo test -p puricat-core --test live_db
+  cargo test -p puricat-core --test live_db --test live_write
 
 e2e/run.sh        # end-to-end smoke test in the real window (macOS, local MySQL + PostgreSQL; uses only a database named puricat_e2e)
 ```
 
-Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
+`live_db` covers connecting and browsing; `live_write` covers saving edits. Both create and drop their own scratch databases. Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". The end-to-end test temporarily overwrites the system clipboard and restores the previous text. See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
 
 ## Repository layout
 
 ```
 crates/core/        puricat-core: model, settings store, secrets, DB adapters, AI CLI discovery (no Tauri dependency)
-  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting
-  tests/live_db.rs  integration tests against real servers
+  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting, write planner (write.rs)
+  tests/            live_db.rs (browse) and live_write.rs (save edits): integration tests against real servers
 src-tauri/          puricat: Tauri app, IPC commands, app state, capabilities, bundle config
 src/                React frontend (components, features, stores, i18n)
 e2e/                end-to-end smoke test (runner, injected script, SQL fixtures)

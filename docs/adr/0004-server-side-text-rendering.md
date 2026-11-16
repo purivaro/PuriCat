@@ -4,6 +4,8 @@
 
 Accepted. Implemented for table browsing.
 
+Update 2026-11-16: editing now sends values as text parameters as anticipated below — cast to the column's bare type on PostgreSQL, uncast on MySQL (except `BIT`) — and compares these text renderings for optimistic concurrency; the per-type validation before sending was not built (the server validates). See [ADR 0013](0013-staged-edits-and-optimistic-saves.md).
+
 ## Context
 
 A data grid must show what is stored, exactly. Decoding every database type into a Rust type and then into JSON for the web view loses information: JavaScript numbers cannot hold 64-bit integers or high-precision decimals, and each engine has a long tail of types (arrays, enums, ranges, spatial, intervals) that would each need a decoder.

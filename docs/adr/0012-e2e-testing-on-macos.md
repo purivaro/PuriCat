@@ -32,7 +32,7 @@ All four environment hooks are behind `#[cfg(debug_assertions)]`.
 
 ## Consequences
 
-- Events are synthetic (`element.click()`, dispatched `KeyboardEvent`), so native behaviours — real key routing, drag, focus rings, the clipboard — are not exercised.
+- Events are synthetic (`element.click()`, dispatched `KeyboardEvent`), so native behaviours — real key routing, drag, focus rings — are not exercised. The system clipboard is real: the script writes to it through the clipboard plugin before pasting and restores the previous text afterwards.
 - The suite needs a logged-in macOS session with a window server and local database servers; it does not run in the current CI workflow.
 - The `e2e_report` command is registered in release builds too, but its body is compiled out and it returns an `unsupported` error. Removing the registration from release builds would be cleaner.
 - A debug build must never be distributed: anyone who can set its environment can run script in the web view. Release builds contain none of the hooks.

@@ -41,8 +41,8 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | SSH tunnels with host-key verification | Key, passphrase and agent auth; no insecure bypass by default | Planned (Phase 2b) |
 | Several concurrent connections, pooling with limits, idle timeout | Two engines browsable at once | Done |
 | Query cancellation | Long operations can be stopped | Planned (Phase 2b) |
-| Read-only mode | Enforced by the server, not only the UI | Done (server reports the flag; see limits in [SECURITY.md](SECURITY.md)) |
-| Development / Staging / Production labels | Visible on the connection and its tabs | Done (label only; production-specific safeguards arrive with editing) |
+| Read-only mode | Enforced by the server, not only the UI | Done (server reports the flag and refuses a write in a live test; the grid opens read-only; see limits in [SECURITY.md](SECURITY.md)) |
+| Development / Staging / Production labels | Visible on the connection and its tabs | Done. Saves on a Production-labelled connection always pass through the review step (implemented; that path has no automated UI test) |
 | Lazy, searchable explorer | Levels load on expand; filter narrows loaded nodes | Partial: databases, schemas, tables, views. Procedures, functions and indexes are Planned (Phase 2b) |
 
 ## 3. Table browsing
@@ -60,11 +60,12 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 
 | Requirement | Acceptance criteria | Status |
 |---|---|---|
-| Editable grid with staged changes, undo/redo, Save / Discard | Paste creates pending edits only; nothing reaches the server before Save | Planned (Phase 3) |
-| Clipboard parser (TSV/CSV, quotes, embedded tabs/newlines, Thai, NULL vs empty, precision) | Unit-tested round trips | Planned (Phase 3) |
+| Editable grid with staged changes, undo/redo, Save / Discard | Paste creates pending edits only; nothing reaches the server before Save | Done for MySQL and PostgreSQL tables with a primary key: in-cell editing, single-range selection, add / delete / restore rows, undo / redo, Save / Discard, unsaved-edit guards. Edits are limited to the loaded page. Not editable yet: generated, binary and MySQL spatial columns, cells truncated for preview, rows whose key is NULL or truncated. Automation uses synthetic events; native keyboard, IME and drag input are untested. Multi-range selection, a full-value editor, filtering and editing across pages are Planned (Phase 3) |
+| Clipboard parser (TSV/CSV, quotes, embedded tabs/newlines, Thai, NULL vs empty, precision) | Unit-tested round trips | Partial: TSV as written by Excel / Google Sheets / Numbers is done and unit-tested (quoted cells, embedded tabs and line breaks, doubled quotes, ragged rows, Unicode, no reinterpretation of numbers or dates). Empty text becomes NULL only in nullable non-text columns. CSV is Planned (Phase 3, Smart Paste) |
+| Direct paste into the grid | A copied cell fills the selection; a block pastes from the top-left; overflow is reported | Done: rows past the end become new rows; columns past the right edge and read-only cells are skipped and reported |
 | Smart Paste: INSERT / UPDATE / UPSERT with mapping and key matching | Requires a primary or validated unique key; previews insert/update/skip/conflict counts | Planned (Phase 3) |
-| Safe execution | Parameterized values, quoted identifiers, bounded batches, transactions, optimistic concurrency, no edits on keyless tables | Planned (Phase 3) |
-| Bulk and production safeguards | Review step and configurable impact thresholds | Planned (Phase 3) |
+| Safe execution | Parameterized values, quoted identifiers, bounded batches, transactions, optimistic concurrency, no edits on keyless tables | Partial: parameterised values, quoted identifiers, complete-primary-key addressing, one transaction per save, exactly-one-row rule, optimistic concurrency on edited columns, at most 10,000 row changes per save; verified by live tests on both engines. Keyless tables are read-only in the UI (the backend would allow INSERT only). DELETE checks the key only, not the row's contents. Batching with progress and cancellation is Planned (Phase 3) |
+| Bulk and production safeguards | Review step and configurable impact thresholds | Partial: a review dialog shows the exact statements and bound values; it is mandatory for Production-labelled connections, for any delete, and above the per-connection threshold (`bulkReviewRows`, default 10). Only the delete-triggered path is verified end to end. An audit log of saves is Planned (Phase 3) |
 
 ## 5. SQL workspace and schema management
 

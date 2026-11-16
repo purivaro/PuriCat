@@ -4,6 +4,8 @@
 
 Accepted for the read-only grid (implemented). **To be re-validated in Phase 3** before any editing work builds on it.
 
+Update 2026-11-16: the custom grid now supports editing, single-range selection and paste ([ADR 0013](0013-staged-edits-and-optimistic-saves.md)); the performance and multi-range validation described under "Phase 3 gate" is still open.
+
 ## Context
 
 The grid is the flagship surface. Phase 2 needs fast read-only browsing. Phase 3 needs editable cells, multi-range selection, clipboard paste from spreadsheets, staged-change highlighting, column reorder/hide and pinned key columns. The brief forbids relying on paid-only features without a licensing decision.
