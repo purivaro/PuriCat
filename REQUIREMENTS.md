@@ -19,10 +19,10 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | Requirement | Acceptance criteria | Status |
 |---|---|---|
 | Tauri desktop app with explorer (left), tabbed workspace (centre), AI panel (right) | Panels resize and collapse; widths and visibility persist | Done |
-| Multi-tab workspace with restoration | Tabs identify their connection and database; open tabs are stored and reloaded | Partial: tabs are stored and reloaded on start; relaunch restore is not covered by a test |
+| Multi-tab workspace with restoration | Tabs identify their connection and database; open tabs are stored and reloaded | Partial: table and query tabs are stored and reloaded on start; a query tab's text is saved per tab and cleared when the tab closes. Relaunch restore is not covered by a test |
 | Light and dark themes, white/orange palette | Theme follows the OS or an explicit choice; tokens match the brief | Partial: implemented; contrast audit Planned (Phase 7), see [ADR 0011](docs/adr/0011-i18n-and-theming.md) |
 | English and Thai | Every UI string comes from a catalog; language switch needs no restart | Done |
-| Command palette and shortcuts | Palette lists actions, connections, tabs and loaded tables | Partial: palette verified; other shortcuts have no automated test |
+| Command palette and shortcuts | Palette lists actions, connections, tabs and loaded tables | Partial: palette verified; other shortcuts have no automated test. "New query" is offered per connected connection in the palette and on ⌘T (neither exercised by a test; the explorer's context-menu entry is, in E2E) |
 | Loading, empty and error states | No blank panels; errors show the server's message | Done for implemented views |
 | Accessibility | Keyboard reachable, ARIA roles, reduced motion | Partial: roles and reduced-motion rule exist; no audit (Phase 7) |
 | Original cat icon and brandmark | No third-party logos | Done (see [LICENSES.md](LICENSES.md)) |
@@ -32,7 +32,7 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | Requirement | Acceptance criteria | Status |
 |---|---|---|
 | Create, edit, test, duplicate, tag, favorite, delete | Test reports engine, version, TLS state and latency without saving | Done (edit, tag and favorite lack an automated test) |
-| Reconnect | Dropped sessions recover or report clearly | Planned (Phase 2b) |
+| Reconnect | Dropped sessions recover or report clearly | Partial: a query tab whose own connection was ended reports it and opens a new connection on its next run (backend live test on both engines; not exercised through the UI). The session's pooled connections (explorer, grids) have no reconnect logic: Planned (Phase 2b) |
 | MySQL and PostgreSQL: host, port, user, password, database, TLS | Connect with typed options; real error on failure | Done |
 | Timeouts and connection options | Per-connection connect timeout and options | Partial: timeout is stored (default 10 s, clamped 1–120) but has no field in the dialog |
 | SQL Server, including an honest account of integrated auth | Connect, browse; limits documented | Planned (Phase 2b) |
@@ -40,9 +40,9 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | TLS modes with verification | `verify-full` rejects a wrong host or untrusted CA | Partial: modes are mapped to the drivers; verification untested against a TLS-enforcing server |
 | SSH tunnels with host-key verification | Key, passphrase and agent auth; no insecure bypass by default | Planned (Phase 2b) |
 | Several concurrent connections, pooling with limits, idle timeout | Two engines browsable at once | Done |
-| Query cancellation | Long operations can be stopped | Planned (Phase 2b) |
-| Read-only mode | Enforced by the server, not only the UI | Done (server reports the flag and refuses a write in a live test; the grid opens read-only; see limits in [SECURITY.md](SECURITY.md)) |
-| Development / Staging / Production labels | Visible on the connection and its tabs | Done. Saves on a Production-labelled connection always pass through the review step (implemented; that path has no automated UI test) |
+| Query cancellation | Long operations can be stopped | Partial: a statement running in a query tab can be stopped (`KILL QUERY` on MySQL, `pg_cancel_backend` on PostgreSQL, sent from another pooled connection); closing the tab or disconnecting also interrupts it. Verified in the backend on both engines; the Stop button and the `cancel_sql` command are not exercised by a test. Browse queries, catalogue queries and Smart Paste lookups cannot be cancelled: Planned (Phase 2b) |
+| Read-only mode | Enforced by the server, not only the UI | Done (server reports the flag and refuses a write in a live test; the grid opens read-only; see limits in [SECURITY.md](SECURITY.md)). A query tab's connection inherits the setting and the server refuses a write there too (live test, MySQL), but SQL typed in the tab can switch the session back, so in the console the option guards against accidents, not against the person at the keyboard |
+| Development / Staging / Production labels | Visible on the connection and its tabs | Done. Saves on a Production-labelled connection always pass through the review step, and a query tab on one lists every statement that is not a read for confirmation before it runs (both implemented; neither path has an automated UI test) |
 | Lazy, searchable explorer | Levels load on expand; filter narrows loaded nodes | Partial: databases, schemas, tables, views. Procedures, functions and indexes are Planned (Phase 2b) |
 
 ## 3. Table browsing
@@ -78,10 +78,10 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 
 | Requirement | Acceptance criteria | Status |
 |---|---|---|
-| Editor with dialect highlighting, completion, formatting, history | Selection execution, cancellation, duration and affected rows shown | Planned (Phase 4) |
-| Multiple result sets, large results, export CSV / XLSX / JSON | UI stays responsive on large results | Planned (Phase 4) |
-| Risk-based confirmation for dangerous scripts | Not keyword matching alone | Planned (Phase 4) |
-| Create / alter / drop objects with DDL preview | Engine differences explained, not hidden | Planned (Phase 4) |
+| Editor with dialect highlighting, completion, formatting, history | Selection execution, cancellation, duration and affected rows shown | Partial ([ADR 0015](docs/adr/0015-sql-console.md)). Done: query tabs with a Monaco editor (MySQL and PostgreSQL grammars) opened from the explorer, the palette or ⌘T; ⌘↵ / Run executes the selection or the whole script on the tab's own connection; a Messages list gives status, kind, rows or rows affected and time per statement; Stop; history per connection (local, at most 1,000 entries, password literals masked, "Clear history"); completion of loaded table names, their columns and keywords; formatting with `sql-formatter`. Verified in the backend on both engines; through the UI on MySQL only, where running a script, the Messages list and the history list are covered (E2E). Not verified: ⌘↵, selection execution, Stop through the UI, completion, formatting, loading a history entry, PostgreSQL through the UI. Not done (Planned, Phase 4): saved scripts, run statement at cursor, alias-aware completion, query parameters, an EXPLAIN view, inline error markers. Backend messages are English only |
+| Multiple result sets, large results, export CSV / XLSX / JSON | UI stays responsive on large results | Partial. Done: one result tab per result set, shown in the shared virtualized grid (read-only, not sortable) with exact server-rendered values; a row cap per result (100 / 1,000 / 10,000 / 100,000, default 1,000) that stops a plain read on the server; cells longer than 1,000 characters cut for display only; export of a result to CSV, JSON or XLSX, written by the backend with full values. Verified by unit and live tests (cap and CSV on both engines) and E2E (all three files written and checked, through the IPC command; the Save dialog is not exercised). Not done (Planned, Phase 4): streaming, results and exports beyond 100,000 rows, sorting or filtering a result, SQL dump export. Responsiveness with a 100,000-row result has not been measured |
+| Risk-based confirmation for dangerous scripts | Not keyword matching alone | Partial. Two layers: (1) a confirmation that lists `UPDATE` / `DELETE` without a top-level `WHERE`, `DROP`, `TRUNCATE` and `ALTER ... DROP`, and on a Production-labelled connection every statement that is not a read — this layer reads the statement text; (2) an impact guard that runs each row-changing statement in a guard transaction and rolls it back when it affected more rows than the connection's threshold (`bulkReviewRows`, default 10), with "Run it without the limit" to proceed — this layer measures what the statement did. The guard is verified on both engines (live tests) and through the UI on MySQL (E2E); the confirmation through the UI for a `DELETE` without `WHERE` (E2E, cancelled); the Production path has no automated test. DDL, `CALL` and other statements are not guarded, and MySQL DDL cannot be rolled back. The confirmation and the threshold are applied by the UI; the backend provides the mechanism ([SECURITY.md](SECURITY.md)) |
+| Create / alter / drop objects with DDL preview | Engine differences explained, not hidden | Planned (Phase 4). DDL can be typed and run in a query tab; there is no object editor or preview |
 | Import with mapping and error reports | Batch import with cancellation | Planned (Phase 4) |
 
 ## 6. AI agent
@@ -107,7 +107,7 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 
 | Requirement | Acceptance criteria | Status |
 |---|---|---|
-| Scoped Tauri capabilities and CSP | No shell, filesystem or HTTP access from the web view | Done |
+| Scoped Tauri capabilities and CSP | No shell, filesystem or HTTP access from the web view | Done. The SQL console added one permission, `dialog:allow-save` (the native Save dialog); export files are written by the backend. The CSP is unchanged and the Monaco editor runs under it (E2E against the bundled app) |
 | Subprocesses without shell interpolation of untrusted input | Fixed argument vectors, timeouts | Done for CLI detection (see the note in [SECURITY.md](SECURITY.md)) |
 | No telemetry by default | No network calls except to the user's databases | Done (nothing in the code sends telemetry) |
 | Signed and notarized macOS build, signed updates | Installs without Gatekeeper warnings | Planned (Phase 7) |

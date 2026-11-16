@@ -8,7 +8,7 @@ Status on 2026-11-16. Phases follow the delivery plan in the [product brief](doc
 | 1 | Runnable foundation | Done |
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
 | 3 | Flagship editing | Partial (grid editing and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
-| 4 | SQL and schema | Not started |
+| 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; object editing, import and the rest are listed below) |
 | 5 | AI agent | Not started (CLI detection only) |
 | 6 | Backups | Not started |
 | 7 | Public beta | Not started |
@@ -44,8 +44,8 @@ Done:
 | SSH tunnels | `russh`, host-key verification, key / passphrase / agent ([ADR 0009](docs/adr/0009-ssh-tunnels.md)); needs a disposable `sshd` |
 | TLS verification test | Run `require`, `verify-ca`, `verify-full` against a TLS-enforcing server, including the failure cases; decide a stricter default for Production connections |
 | Procedures, functions, indexes in the explorer | Per engine |
-| Query cancellation | Verify driver support per engine |
-| Reconnect on dropped connections | Today a dropped connection is an error on the next action |
+| Query cancellation outside query tabs | A statement in a query tab can be stopped (Phase 4, done). Browse, catalogue and Smart Paste lookup queries cannot; the console's canceller (`KILL QUERY`, `pg_cancel_backend`) shows the way |
+| Reconnect on dropped connections | A query tab reconnects its own connection on the next run (Phase 4, done). For the pooled session a dropped connection is still an error on the next action |
 | Keyset pagination | Replace `OFFSET` where a usable key exists |
 | Exact row count on demand | Opt-in, cancellable |
 | Cell inspector | Fetch and show the full value of a truncated cell |
@@ -88,15 +88,46 @@ Known limitations of what is built (DELETE checks the key only; PostgreSQL sessi
 
 ## Recommended next step
 
-Phase 4 (SQL and schema), starting with the editor spike and the query execution path. Reasons: the largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) wait on test infrastructure that is not available yet (see the blockers below), and the Phase 3 leftovers are refinements of working features. The import tool in Phase 4 is also where Smart Paste's row limit and file sources are meant to be lifted. Phase 2b items that need no extra infrastructure (query cancellation, reconnect, keyset pagination, the cell inspector) can be taken alongside. This is a recommendation, not a commitment.
+Stay in Phase 4 and take two things in this order. This is a recommendation, not a commitment.
 
-## Phase 4 — SQL and schema: not started
+1. **Close the verification gaps of the SQL console before building on it.** The console now runs arbitrary SQL, which makes it the riskiest surface in the app, and several of its safeguards are verified below the UI only: Stop, the lost-connection path, the Production confirmation, and everything on PostgreSQL through the UI. Extending the end-to-end test to a PostgreSQL query tab, a Stop, and a Production-labelled connection is small work with the fixtures that exist. In the same pass, decide the open hardening questions listed under "Remaining" (transaction state from the server instead of the text; a read-only refusal that typed SQL cannot switch off).
+2. **Import from CSV / XLSX.** It is the next piece users will miss, it is where Smart Paste's 10,000-row limit and file sources are meant to be lifted, and it reuses what exists: `db::smart` for matching, and the console's dedicated connection and cancellation for a long job. A library for reading XLSX has still to be chosen (`rust_xlsxwriter` only writes).
 
-1. Editor spike: Monaco under the production CSP ([ADR 0007](docs/adr/0007-sql-editor.md)).
-2. Query execution path with native result decoding ([ADR 0004](docs/adr/0004-server-side-text-rendering.md), open question), multiple result sets, cancellation.
-3. History, saved scripts, formatting, schema-aware completion.
-4. Risk-based confirmation for destructive statements.
-5. Object editing with DDL preview; import and export (CSV, XLSX, JSON, SQL).
+Object editing with DDL preview is the larger remaining Phase 4 item and can follow. The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination, the cell inspector — can be taken alongside.
+
+## Phase 4 — SQL and schema: partial
+
+Done (MySQL and PostgreSQL; evidence in [TESTING.md](TESTING.md), design in [ADR 0015](docs/adr/0015-sql-console.md)):
+
+- Query tabs with a Monaco editor ([ADR 0007](docs/adr/0007-sql-editor.md)), loaded as its own chunk and running under the unchanged production CSP; opened from the explorer, the command palette or ⌘T; text saved per tab and restored with the workspace.
+- Execution on one dedicated connection per tab over the simple/text protocol (the answer to the open question of [ADR 0004](docs/adr/0004-server-side-text-rendering.md)): run the selection or the whole script, statement by statement, several result sets, exact text values, a Messages list with status, kind, rows and time.
+- Dialect-aware statement splitting and classification in the backend.
+- Safeguards: confirmation before destructive statements (every non-read statement on Production), an impact guard that rolls back a row-changing statement above the connection's row threshold, a row cap per result, Stop, the first error stops the script.
+- Transactions the user opens: tracked, left alone by the guard, flagged on the tab, protected by the same guards as staged edits. MySQL autocommit is read from the server.
+- A lost connection is reported and replaced on the next run; closing a tab or disconnecting interrupts a running statement.
+- Export of a result to CSV, JSON and XLSX, written by the backend through the native Save dialog.
+- History per connection in the local store, with password literals masked.
+- Completion (table names, columns, keywords) and formatting.
+
+Verified in the backend on both engines; through the UI on MySQL only.
+
+Remaining:
+
+| Item | Notes |
+|---|---|
+| SQL console: verification gaps | PostgreSQL through the UI; Stop and the lost-connection path through the UI; the confirmation on a Production-labelled connection; completion, formatting, the Save dialog, restoring a tab's text after a relaunch; results near 100,000 rows ([TESTING.md](TESTING.md) gaps) |
+| SQL console: hardening | Transaction tracking is textual (procedures, `XA`, a MySQL deadlock and non-DDL implicit commits are not seen); the confirmation and the impact threshold are applied by the UI, not enforced by the backend; a read-only connection can be switched back by typed SQL; history has no off switch and outlives a deleted connection ([SECURITY.md](SECURITY.md), SQL console) |
+| Saved scripts | Today a tab's text lives only as long as the tab |
+| Run the statement at the cursor | Today: the selection, or the whole script |
+| Alias-aware completion | Today: loaded table names, columns of tables named in the text, keywords. Inline error markers are not built either |
+| Streaming, and results or exports beyond 100,000 rows | Results are held in memory, capped at 100,000 rows; a capped result cannot be continued. Sorting and filtering a result are not available |
+| Switching database inside a PostgreSQL tab | A PostgreSQL tab is bound to the database it was opened on |
+| Query parameters | Not started |
+| EXPLAIN view | `EXPLAIN` can be typed; its output is shown as an ordinary result |
+| Object editing (table, index, view) with DDL preview | Not started. DDL can be typed in a query tab |
+| Import from CSV / XLSX | Not started. Also where Smart Paste's 10,000-row limit and file sources are to be lifted (Phase 3 table above) |
+| SQL dump export | Not started |
+| Translating backend messages | Danger reasons, the lost-connection note, "Cancelled" and the history summary are English only |
 
 ## Phase 5 — AI: not started
 

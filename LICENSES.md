@@ -14,13 +14,16 @@ Status on 2026-11-16. This is a hand-maintained summary of **direct** dependenci
 | sqlx | 0.8 | MIT OR Apache-2.0 | MySQL and PostgreSQL drivers, local SQLite store |
 | SQLite (bundled through sqlx / `libsqlite3-sys`) | — | SQLite: public domain; `libsqlite3-sys` bindings: MIT | Local settings database |
 | keyring | 3 | MIT OR Apache-2.0 | OS credential store |
-| `tauri-plugin-clipboard-manager` (+ `@tauri-apps/plugin-clipboard-manager`) | MIT OR Apache-2.0 | Plain-text copy and paste in the data grid |
+| `tauri-plugin-clipboard-manager` (+ `@tauri-apps/plugin-clipboard-manager`) | 2 | MIT OR Apache-2.0 | Plain-text copy and paste in the data grid |
+| `tauri-plugin-dialog` (+ `@tauri-apps/plugin-dialog`) | 2 | Apache-2.0 OR MIT (npm package: MIT OR Apache-2.0) | Native Save dialog for exports; only the `save` permission is granted |
+| rust_xlsxwriter | 0.96 | MIT OR Apache-2.0 | Writing XLSX exports |
+| futures-util | 0.3 | MIT OR Apache-2.0 | Reading the driver's result stream in the SQL console |
 | tokio | 1 | MIT | Async runtime, subprocesses |
 | thiserror | 2 | MIT OR Apache-2.0 | Error type |
 | uuid | 1 | Apache-2.0 OR MIT | Connection ids |
 | serde, serde_json | 1 | MIT OR Apache-2.0 | Serialisation |
 
-TLS is provided by rustls (Apache-2.0 OR ISC OR MIT) with `ring` (Apache-2.0 AND ISC), pulled in through sqlx's `tls-rustls-ring-native-roots` feature. The rest of the transitive tree has not been reviewed and must be covered by the generated notice.
+TLS is provided by rustls (Apache-2.0 OR ISC OR MIT) with `ring` (Apache-2.0 AND ISC), pulled in through sqlx's `tls-rustls-ring-native-roots` feature. `tauri-plugin-dialog` brings in `rfd` and `tauri-plugin-fs` as dependencies (the filesystem plugin is compiled in but not registered; see [SECURITY.md](SECURITY.md)); their licences were not read. The rest of the transitive tree has not been reviewed and must be covered by the generated notice.
 
 ## Shipped in the app — JavaScript
 
@@ -36,6 +39,12 @@ TLS is provided by rustls (Apache-2.0 OR ISC OR MIT) with `ring` (Apache-2.0 AND
 | sonner | 2 | MIT | Toasts |
 | @tanstack/react-virtual | 3 | MIT | Grid virtualization |
 | clsx | 2 | MIT | Class-name helper |
+| monaco-editor | 0.57 | MIT | SQL editor in query tabs ([ADR 0007](docs/adr/0007-sql-editor.md)); loaded on demand |
+| sql-formatter | 15 | MIT | "Format" in the SQL editor; loaded on demand |
+
+`@tauri-apps/plugin-clipboard-manager` and `@tauri-apps/plugin-dialog` (both 2, MIT OR Apache-2.0) are listed with their Rust halves above.
+
+`monaco-editor` ships its own `ThirdPartyNotices.txt` and depends on `marked` and `dompurify`; `sql-formatter` depends on `argparse` and `nearley`. Those notices and transitive licences were not read and must be carried into the generated notice. The Monaco chunk also bundles the Codicons icon font (`codicon.ttf`) that comes inside the `monaco-editor` package; that package declares MIT and its `ThirdPartyNotices.txt` does not mention the font, so the font's own terms are **not checked**.
 
 ## Build and test tools — not shipped
 
@@ -68,7 +77,8 @@ The fonts are bundled; nothing is fetched from the network. The OFL requires its
 | russh (SSH) | 2b | Apache-2.0 | [ADR 0009](docs/adr/0009-ssh-tunnels.md) |
 | Glide Data Grid 6.0.3 | 3 (fallback) | MIT | Peer dependencies declare React 16–18 only |
 | AG Grid Community | 3 (not chosen) | MIT | Range selection and clipboard paste are Enterprise-only (commercial licence) |
-| Monaco Editor | 4 | MIT | [ADR 0007](docs/adr/0007-sql-editor.md) |
+
+Monaco Editor was a candidate here until Phase 4; it is now a dependency and listed under "Shipped in the app — JavaScript".
 
 ## External programs — not bundled
 
@@ -93,6 +103,7 @@ The fonts are bundled; nothing is fetched from the network. The OFL requires its
 | Generate a complete third-party notice covering transitive dependencies (for example `cargo about` for Rust and `license-checker` for npm) and ship it in the app | Planned (Phase 7) |
 | Ship the OFL text and font copyright notices | Planned (Phase 7) |
 | Include the copyright and permission notices required by MIT, ISC and Apache-2.0 dependencies (and any NOTICE files) | Planned (Phase 7), through the generated notice |
-| Review the transitive dependency tree (and the one "Not checked" entry above) for copyleft or unusual terms | Planned (Phase 7) |
+| Review the transitive dependency tree (and the "Not checked" entries above: Pillow, and the Codicons font bundled with `monaco-editor`) for copyleft or unusual terms | Planned (Phase 7) |
+| Carry `monaco-editor`'s `ThirdPartyNotices.txt` into the shipped notice | Planned (Phase 7), through the generated notice |
 | Add a licence check to CI so new dependencies are reviewed | Planned (Phase 7) |
 | Re-check this file whenever a dependency is added or a major version changes | Ongoing |

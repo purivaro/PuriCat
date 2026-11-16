@@ -7,7 +7,7 @@
 | Rust unit tests | `crates/core/src/**` (`#[cfg(test)]`) | Nothing | Yes | Yes |
 | Frontend unit tests (Vitest) | `src/**/*.test.ts` | Nothing | Yes | Yes |
 | Static checks | `tsc`, `cargo fmt`, `cargo clippy -D warnings` | Nothing | Yes | Yes |
-| Live database tests | `crates/core/tests/live_db.rs` (connect, browse), `crates/core/tests/live_write.rs` (save edits, Smart Paste) | Disposable MySQL and PostgreSQL servers | Server tests run only if the variables are set | Server tests skip (variables unset) |
+| Live database tests | `crates/core/tests/live_db.rs` (connect, browse), `crates/core/tests/live_write.rs` (save edits, Smart Paste), `crates/core/tests/live_console.rs` (SQL console) | Disposable MySQL and PostgreSQL servers | Server tests run only if the variables are set | Server tests skip (variables unset) |
 | OS credential store test | `secrets::tests::os_keychain_round_trip` (ignored by default) | A real Keychain / Credential Manager | No | No |
 | End-to-end smoke test | `e2e/run.sh`, `e2e/smoke.js` | macOS desktop session, local MySQL and PostgreSQL | No | No |
 
@@ -32,10 +32,10 @@ cargo test -p puricat-core -- --ignored os_keychain    # real credential store r
 ```sh
 PURICAT_TEST_MYSQL=you@127.0.0.1:3306      PURICAT_TEST_MYSQL_PASSWORD=...      \
 PURICAT_TEST_POSTGRES=you@127.0.0.1:5432   PURICAT_TEST_POSTGRES_PASSWORD=...   \
-  cargo test -p puricat-core --test live_db --test live_write -- --nocapture
+  cargo test -p puricat-core --test live_db --test live_write --test live_console -- --nocapture
 ```
 
-`live_db` covers connecting and browsing; `live_write` covers the save path and Smart Paste. Either can be run alone with a single `--test`.
+`live_db` covers connecting and browsing; `live_write` covers the save path and Smart Paste; `live_console` covers the SQL console. Each can be run alone with a single `--test`.
 
 | Variable | Format | Required |
 |---|---|---|
@@ -44,7 +44,7 @@ PURICAT_TEST_POSTGRES=you@127.0.0.1:5432   PURICAT_TEST_POSTGRES_PASSWORD=...   
 | `PURICAT_TEST_POSTGRES` | `user@host:port` | To run the PostgreSQL tests |
 | `PURICAT_TEST_POSTGRES_PASSWORD` | Password | Only if the account has one |
 
-The account must be allowed to create and drop databases. PostgreSQL must support `DROP DATABASE ... WITH (FORCE)`.
+The account must be allowed to create and drop databases. PostgreSQL must support `DROP DATABASE ... WITH (FORCE)`. `live_console` also interrupts and kills its own connections (`KILL QUERY`, `KILL`, `pg_cancel_backend`, `pg_terminate_backend`), which an account may do to its own sessions.
 
 **A test whose variable is unset prints "skipped" to stderr and passes.** A green `cargo test` therefore does not prove the live tests ran; use `--nocapture` and check for the absence of "skipped" lines.
 
@@ -63,29 +63,35 @@ APP=<binary> e2e/run.sh # run against a bundled debug build instead of the dev s
 | `PG_USER` | `$USER` | PostgreSQL account, connecting to `127.0.0.1` without a password |
 | `MYSQL`, `PSQL` | `mysql`, `psql` | Client binaries used to load fixtures |
 
-Requirements: macOS with a logged-in desktop session, `mysql` and `psql` clients, local servers that accept the accounts above without a password, and `swift` when `SHOTS=1`. The report is copied to `target/e2e-report.json`. How it works: [ADR 0012](docs/adr/0012-e2e-testing-on-macos.md).
+Requirements: macOS with a logged-in desktop session, `mysql` and `psql` clients, local servers that accept the accounts above without a password, `unzip` and `xxd` (the runner checks the exported files with them), and `swift` when `SHOTS=1`. The report is copied to `target/e2e-report.json`. How it works: [ADR 0012](docs/adr/0012-e2e-testing-on-macos.md).
+
+The report carries a `problems` list: every Content-Security-Policy violation, uncaught error and unhandled promise rejection the page saw while the test ran (Monaco's own "Canceled" rejections, raised when focus moves, are ignored). **The run fails if the list is not empty**, so a resource blocked by the production CSP cannot pass unnoticed.
 
 Side effects to know about:
 
 - In dev-server mode the runner's cleanup kills the debug `puricat` process and whatever is listening on TCP port 1420.
 - The smoke test runs the real CLI detection, which executes the installed `claude` and `codex` status commands.
 - **The smoke test overwrites the system clipboard** with its paste fixtures (direct paste and Smart Paste) and writes the previous text back at the end. If the run fails or is interrupted after the paste step, the fixture text stays on the clipboard. Non-text clipboard contents (an image, files) are not restored. Do not copy anything important while it runs.
-- The smoke test writes rows through PuriCat into the `puricat_e2e` databases only.
+- The smoke test writes rows through PuriCat into the `puricat_e2e` databases only. Its SQL console steps run `UPDATE` statements on `puricat_e2e.orders` (one blocked by the impact guard and then committed without the limit, one inside a transaction that is rolled back); the `DELETE` without `WHERE` it types is cancelled at the confirmation and never runs.
+- The smoke test exports three files (`export.csv`, `export.json`, `export.xlsx`) into the runner's temporary work directory. The runner checks them and deletes the directory on exit.
 
 ## What each suite covers
 
-### Rust unit tests (32, plus 1 ignored)
+### Rust unit tests (44, plus 1 ignored)
 
 | Module | Covers |
 |---|---|
 | `model` | Input trimming and defaults, rejection of incomplete profiles, stable wire format |
-| `store` | Connection CRUD and ordering, update of a missing connection, settings round trip, reopening an existing database file |
+| `store` (5) | Connection CRUD and ordering, update of a missing connection, settings round trip, reopening an existing database file. Query history (1 test): entries are per connection and newest first, the database name and start time are kept, no more than 1,000 entries survive over all connections, clearing one connection's history leaves the other's |
 | `secrets` | In-memory store round trip; (ignored) real OS credential store round trip |
 | `db::ident` | Quoting for MySQL, PostgreSQL and SQL Server, escaping of the quote character, rejection of empty and NUL names |
 | `db` | Default order by primary key, validation of the sort column, page limit, truncation on character boundaries, binary prefix |
 | `db::mysql`, `db::postgres` | The generated `SELECT` text, type classification; MySQL expression defaults (`DEFAULT_GENERATED`) not treated as generated columns |
 | `db::write` | The exact MySQL plan and the exact PostgreSQL plan for one change set (statement order, typed key comparison, bare-type casts, `BIT` handling, concurrency conditions, parameter order, empty insert); refusal of empty, incomplete-key, NULL-key, wrong-key, unknown-column, generated-column, duplicate-column and no-change updates; keyless tables (delete refused, insert planned); hostile key and cell values absent from the SQL text |
 | `db::smart` (8) | Number recognition for the pre-check (signs, decimals, exponents, `NaN` / `Infinity`; thousands separators and non-ASCII digits rejected). UPSERT on a unique key: every status in one paste (update with the changed column, unchanged, insert with an empty NOT NULL-with-default cell left out, missing key, exact-text duplicates, not a number, longer than `varchar(8)`), the counts, the lookup SQL shape for PostgreSQL and its parameters, the resulting change set. A generated key: blank means new, unknown means skipped, the key is never written, the MySQL lookup shape. INSERT with a key (existing rows refused), INSERT without a key (no lookup), UPDATE never inserting. Two spellings of one key (`7`, `007`) matching one existing row reported as duplicates. One existing row is claimed once even across lookup chunks: two spellings (`abc`, `ABC`) answered by separate lookups are both duplicates. Key values must be well formed for their type: `12abc`, `1.9` and `1e2` for an integer key are invalid and never looked up, `-7` is looked up. Refused set-ups: a key that is not unique, no key, nothing to update, unknown / doubly mapped / non-writable columns, a key column in the update list, a required column not mapped, ragged rows. The database answers are simulated in these tests |
+| `db::script` (6) | Splitting on real semicolons only (not in strings, quoted identifiers, line or block comments), empty statements dropped, byte offsets of statements. Dialect rules: MySQL backticks, `#` comments, backslash escapes and `--` without a following space not being a comment; PostgreSQL dollar-quoted bodies, nested block comments, literal backslashes, `E''` strings, `$1` not opening a dollar quote. Classification: reads (`SELECT`, `WITH`, `SHOW`, `EXPLAIN DELETE`, `VALUES`), row-changing statements (including a data-modifying `WITH`, `EXPLAIN ANALYZE UPDATE`, `MERGE`), DDL, transaction control, `SELECT ... INTO` and `CALL` as `other`, keywords inside a string or an identifier ignored. Danger reasons: `DELETE` and `UPDATE` without `WHERE` (a `WHERE` only in a subquery still counts as none), `DROP`, `TRUNCATE`, `ALTER ... DROP`, and their harmless counterparts. Transaction effect: `BEGIN`, `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `ROLLBACK TO` and `SAVEPOINT` (no change), a comment in front, a keyword inside a comment, `AND CHAIN` / `AND NO CHAIN`, `START REPLICA`. Masking of password literals after `IDENTIFIED BY` and `PASSWORD`, including the over-masking of a literal after a column named `password` |
+| `db::console` (2) | Value kind from the driver's type name (numbers, text, temporal, JSON, binary, bool). The preview: a cell longer than 1,000 characters is cut on a character boundary and flagged while the stored value stays whole, NULL is kept, the result id and the `capped` flag are passed through; hex rendering of bytes. The run loop itself is covered by the live tests only |
+| `db::export` (3) | CSV: exact bytes of a file with a byte-order mark, CRLF, quoted fields (comma, quotes, line break, padding), Thai text, a 64-bit integer beyond 2^53, NULL as an empty field and an empty string as `""`. JSON: every value a string or `null`, the row count. XLSX: which texts become numbers (`12.50`, `-7`, 15 digits) and which stay text (16 or more significant digits, exponents, `NaN`, empty, `.5`, `5.`, thousands separators, a leading `+`); the written file is a zip archive (its cells are not read back in the unit test) |
 | `ai_detect` | Parsing of `claude auth status --json` and `codex login status` output, binary lookup in directories |
 
 ### Live database tests: `live_db` (4 tests)
@@ -146,6 +152,45 @@ Smart Paste. One scenario runs on both engines against a scratch table `stock` (
 
 Not covered by the Smart Paste scenario: the exclusion of a MySQL expression (functional) unique index, a malformed key value of a non-integer type (a date, for example), a table changed by another session between preview and run (the conflict cases above re-run or swap the request instead), a row changed between the run-time analysis and the write, two spellings of a key in different lookup chunks (unit-tested with simulated answers only), the 10,000-row limit, the progress callback's values, and the IPC commands themselves (the tests call the core functions below the IPC layer, so the read-only refusal in `apply_paste`, `cancel_job` and the progress channel are not exercised here).
 
+### Live database tests: `live_console` (2 tests)
+
+`mysql_console` and `postgres_console`. Each creates its own scratch database with a table `items` (Thai text with quotes, a `DECIMAL(24,6)` / `numeric(24,6)` price, a `BIGINT` beyond 2^53, a 1,500-character value, NULLs), opens consoles through `Session::open_console` and runs scripts through `Console::run`. One shared scenario runs on both engines, followed by engine-specific checks.
+
+| Area (shared scenario) | MySQL | PostgreSQL |
+|---|---|---|
+| A three-statement script with a comment containing a semicolon: one outcome per statement with its kind (`read`, `dml`, `read`), all `ok`, nothing skipped | Yes | Yes |
+| Exact values in a result: column names, Thai text with quotes, a 20-digit decimal, `9007199254740993`, NULL | Yes | Yes |
+| A query reports rows, not rows affected; an `UPDATE` reports 1 row affected and no result | Yes | Yes |
+| A query returning no rows still has its column names | Yes | Yes |
+| The first error stops the script: the failing statement carries the server's message, the statement after it is counted as skipped and has not run | Yes | Yes |
+| Impact guard: an `UPDATE` touching 3 rows with a limit of 2 is `blocked` with 3 rows affected, `resume` is the statement, and nothing changed | Yes | Yes |
+| `resume` is the blocked statement and the rest of the script, not the part that already ran | Yes | Yes |
+| With the limit lifted the same statement commits | Yes | Yes |
+| A transaction the user opens is not guarded (3 rows with a limit of 1), is reported as open, spans runs, and `ROLLBACK` undoes it | Yes | Yes |
+| The same with a line comment before `BEGIN` and a block comment before the `UPDATE` | Yes | Yes |
+| Session state lasts between runs | `SET @kept = 5`, read back | `CREATE TEMP TABLE`, read back |
+| Row cap: 5,000 rows with a cap of 100 gives 100 rows flagged `capped`; the console runs the next query normally | Yes (recursive CTE) | Yes (`generate_series`) |
+| A 1,500-character cell is cut to 1,000 characters and flagged in the preview; the CSV export has it whole, with quotes doubled; an unknown result id is an error | Yes | Yes |
+| Cancel: a 30-second sleep followed by a second statement, interrupted after 0.4 s, returns in under 10 s as `cancelled`; the second statement is not run; the console is usable afterwards | Yes (`SELECT SLEEP(30)`) | Yes (`SELECT pg_sleep(30)`) |
+| A script with no statement, and a row cap of 0, are refused | Yes | Yes |
+| Lost connection: after the server kills the console's connection, the run reports `connectionLost`, no open transaction, one failed statement saying the connection was lost; a further run on that console is refused; a new console on the same session works | Yes (`KILL <id>`) | Yes (`pg_terminate_backend`) |
+
+| Area (engine-specific) | Covered |
+|---|---|
+| MySQL: `VARBINARY` shown as `0x00ff10`, `BIT(8)` as `5` | Yes |
+| MySQL: `USE information_schema` moves the tab's session; the statement is classified `other` | Yes |
+| MySQL: with `SET autocommit = 0` an `UPDATE` over the limit is neither blocked nor committed by the guard; the run reports a transaction open; after `ROLLBACK` it still does (autocommit is off); `SET autocommit = 1` clears it and the guard blocks again | Yes |
+| MySQL: six open consoles do not keep the session's own pool (4 connections) from answering | Yes |
+| MySQL: on a read-only session the server refuses a `DELETE` sent through the console; the rows are still there | Yes |
+| PostgreSQL: `bytea` as `0x00ff10`, a user-defined enum, a `text[]` literal, `timestamptz` with microseconds | Yes |
+| PostgreSQL: `INSERT ... RETURNING` is `dml`, returns its row and reports 1 row affected | Yes |
+| PostgreSQL: a `DO $$ ... $$` block containing semicolons is one statement | Yes |
+| PostgreSQL: `UPDATE ... RETURNING` with a cap of 2 shows 2 rows flagged `capped`, reports 4 rows affected, and all 4 rows are changed and committed | Yes |
+| PostgreSQL: inside the user's transaction a 5,000-row read capped at 100 does not abort the transaction; the earlier `UPDATE` in it is still visible | Yes |
+| PostgreSQL: an error inside the user's transaction adds "run ROLLBACK" to the message; the transaction is still reported open until `ROLLBACK` | Yes |
+
+Not covered by `live_console`: the IPC commands (`run_sql`, `cancel_sql`, `close_console`, `export_result` and the history are below or beside what the tests call, so the stop flag set by `cancel_sql`, the interruption on closing a tab or a session, the replacement of a lost console and the masking of the stored script are not exercised here); a read-only session on PostgreSQL through the console, and a statement that switches a read-only session back; MySQL DDL inside a user transaction; a deadlock; a transaction opened in a stored procedure; a statement returning several result sets (a MySQL procedure); the row cap inside a user's transaction on MySQL; a result at or near 100,000 rows; JSON and XLSX export (unit tests and the end-to-end test cover them).
+
 Not covered by the live tests: a wrong password on PostgreSQL, a wrong password (as opposed to an unknown user) on MySQL, reading rows through a PostgreSQL materialized view, any TLS mode other than the default, the 10,000-change limit, two PuriCat sessions editing the same row, a foreign-key or unique-constraint failure (the end-to-end test covers one foreign-key refusal), the PostgreSQL `TimeZone=UTC` behaviour (documented in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), not asserted), and the types listed there as not verified on the write path.
 
 ### Frontend unit tests (34 cases in 5 files)
@@ -158,7 +203,7 @@ Not covered by the live tests: a wrong password on PostgreSQL, a wrong password 
 | `src/stores/workspace.test.ts` | 5 | Tab closing and neighbour activation, tab id uniqueness across connection / database / schema |
 | `src/features/table/sort.test.ts` | 2 | The sort cycle of a header click |
 
-There are no component tests: `DataGrid`, `TableTab`, `ReviewDialog` and `SmartPasteDialog` are exercised only by the end-to-end test.
+There are no component tests: `DataGrid`, `TableTab`, `ReviewDialog`, `SmartPasteDialog` and the query tab (`SqlTab`, `monaco.ts`) are exercised only by the end-to-end test. The SQL console added no frontend unit test: the workspace store's handling of query tabs (`openSql`, the numbering of "Query n", releasing a closed tab's console and saved text) has none.
 
 ### End-to-end smoke test
 
@@ -177,7 +222,21 @@ Editing, in the real window against both engines:
 9. Smart Paste on MySQL `orders`: the clipboard holds a header row, four data rows and an empty row. The header row is detected, columns are mapped by name (case-insensitively), an unknown pasted column is skipped, and the unique index on `order_no` is chosen as the key. The preview shows 1 insert, 1 update, 1 unchanged and 1 problem ("not a number"), and Run is disabled. After the clipboard is corrected and read again the preview is clean; Run; the reloaded grid shows the updated row and the inserted row.
 10. PostgreSQL: `abc` in a numeric column is refused by the server with the edit kept staged; a corrected value and a second cell then save.
 
+SQL console, in the real window on MySQL (between steps 9 and 10; stages `sql-console`, `sql-blocked`, `sql-transaction` and the `sql-more` log entry). The editor's text is set through the Monaco instance and scripts are started with the Run button.
+
+1. "New query" from the connection's context menu in the explorer opens a query tab; the Monaco editor loads.
+2. A two-statement script with a leading comment runs and the first result's rows appear in the grid. The result tabs (one per statement, with row counts) and the summary line are recorded in the report, not asserted.
+3. `DELETE FROM audit_log` (no `WHERE`) opens the confirmation, which lists the statement and its reason; Cancel closes it. That nothing ran is visible in the history recorded in step 8, not asserted.
+4. An `UPDATE` of 50 rows on a connection with the default threshold of 10 is reported as blocked. "Run it without the limit" then runs it: 50 rows affected.
+5. A three-statement script whose second statement fails: the Messages list shows `ok`, `error` with the server's message, and "1 later statement was not run".
+6. `BEGIN` behind a comment followed by an `UPDATE` of 40 rows: both statements are `ok` (the guard stays out), the transaction badge appears, the tab gets its dot, the database selector is disabled, and closing the tab opens the "Roll back and close" dialog; "Keep the tab" keeps it. `ROLLBACK` followed by a count then shows 0 rows changed and clears the badge, the dot and the lock.
+7. A script that contains only a comment cannot start; the reason is shown in Messages.
+8. The history menu lists the scripts that ran on the connection.
+9. A query over `customers` is run and its result exported as CSV, JSON and XLSX by calling `export_result` over IPC with paths in the runner's work directory. After the run the runner checks the files: the CSV starts with a byte-order mark and holds the first row with its Thai name, the JSON holds the name as a string, and the XLSX's shared strings hold it.
+
 It uses synthetic DOM events and empty passwords, so it does **not** cover: saving a password through the UI, restoring tabs after a relaunch, native keyboard shortcuts other than the palette (the grid's shortcuts are dispatched as synthetic `keydown` events, so Cmd+V, Cmd+Z and Cmd+S arriving from the operating system are untested), IME composition, drag selection, Shift+arrow selection, copy, the grid's context menu, drag-resizing, the explorer filter or arrow-key navigation. It also does not exercise the review dialog on a Production-labelled connection, the bulk-threshold trigger, a concurrent-edit conflict, the locked paging / sorting controls, the bulk tab closes, or the refusal to disconnect with unsaved edits. For Smart Paste it covers UPSERT on a single-column unique key on MySQL only: not INSERT or UPDATE mode, a composite or generated key, changing the mapping, key or update columns by hand, the header and `NULL`-text switches, the key picked after switching mode, an empty cell of a NOT NULL column taking its default, the progress bar, "Stop and roll back", the blocked dismissal of the dialog during a run, a run-time conflict, a Production-labelled connection, or PostgreSQL.
+
+For the SQL console it covers MySQL only, with the text set programmatically. Not covered: typing into Monaco, ⌘↵, running a selection, ⌘T and the palette's "New query", the Stop button, a lost connection, the row-cap selector and a capped result, the database selector actually switching database, confirming the destructive-statement dialog ("Run anyway"), the confirmation on a Production-labelled connection, "Roll back and close", the refusal to disconnect with a transaction open, completion, formatting, loading a history entry into the editor, "Clear history", the Export menu and the native Save dialog (the export goes straight to the IPC command), a result with several long or binary cells, restoring a query tab and its text after a relaunch, and any of it on PostgreSQL.
 
 ## Safety guarantees
 
@@ -187,6 +246,7 @@ It uses synthetic DOM events and empty passwords, so it does **not** cover: savi
 - The end-to-end app instance uses a temporary settings directory and an in-memory secret store; the user's real settings and Keychain are not touched.
 - The ignored Keychain test writes and deletes one entry under a random `connection/selftest-<uuid>/password` key.
 - `live_write` and the end-to-end test issue `INSERT`, `UPDATE` and `DELETE` through PuriCat's own write path, but only against tables in the scratch databases they created (`puricat_it_<random>`, `puricat_e2e`). `live_db` issues only reads through PuriCat. DDL and fixtures are run by separate admin connections.
+- `live_console` sends SQL through the console to its own scratch database: `UPDATE`, `INSERT`, `DELETE` (refused, on a read-only session), a temporary table, `SET` statements, and on MySQL `USE information_schema` followed by a read. It interrupts and kills only connections it opened itself, by the id the server gave that connection. It writes one CSV file to the system temporary directory and removes it.
 - The end-to-end test replaces the text on the system clipboard and restores the previous text when it finishes (see the side effects above).
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
@@ -196,22 +256,27 @@ Environment: macOS 26 on Apple Silicon, Rust 1.99, Node 25, pnpm 10, local MySQL
 
 | Check | Result |
 |---|---|
-| `cargo test -p puricat-core` (unit) | Pass: 32 passed, 1 ignored |
+| `cargo test -p puricat-core` (unit) | Pass: 44 passed, 1 ignored |
 | `cargo test -p puricat-core --test live_db` with both servers configured | Pass: 4 passed |
 | `cargo test -p puricat-core --test live_write` with both servers configured | Pass: 4 passed (2 save-edit tests, 2 Smart Paste tests) |
+| `cargo test -p puricat-core --test live_console` with both servers configured | Pass: 2 passed (`mysql_console`, `postgres_console`) |
 | `cargo test -- --ignored os_keychain` (macOS Keychain) | Pass (recorded before the editing work; not repeated afterwards) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Clean |
 | `cargo fmt --check` | Clean |
 | `pnpm typecheck` | Clean |
 | `pnpm test` (Vitest) | Pass: 34 cases in 5 files |
 | `vite build` | Succeeds (as part of the bundle build) |
-| `e2e/run.sh` (dev-server mode), including the editing and Smart Paste steps | Pass, re-run after the last Smart Paste changes (per-row run-time check, key-value checks, duplicates across lookups, empty cells as NULL, blocked dismissal). An earlier run the same day failed once without explanation (see below) |
+| `e2e/run.sh` (dev-server mode), including the editing, Smart Paste and SQL console steps | Pass, with an empty `problems` list, re-run after the SQL console work. An earlier run the same day failed once without explanation (see below) |
 | `pnpm tauri build --debug --bundles app` | Builds `PuriCat.app` (unsigned) |
-| `APP=<bundle binary> e2e/run.sh` (embedded assets, production CSP), including the editing and Smart Paste steps | Pass, with a bundle rebuilt after the last Smart Paste changes |
+| `APP=<bundle binary> e2e/run.sh` (embedded assets, production CSP), including the editing, Smart Paste and SQL console steps | Pass, with an empty `problems` list (no CSP violation, uncaught error or unhandled rejection), with a bundle rebuilt after the SQL console work. This is the evidence that the Monaco editor and its worker run under the production CSP |
 
 Observed during the end-to-end run: the local MySQL session reported itself encrypted and the local PostgreSQL session not encrypted (default TLS mode `prefer`); both CLIs were detected as installed and signed in (Claude Code 2.1.303, codex-cli 0.133.0).
 
 A defect found by `live_write` and fixed before these results: the PostgreSQL write path first cast parameters to the column's full type (`$n::varchar(5)`), and an explicit cast to a sized type truncates silently, so an over-long value was stored shortened. Parameters are now cast to the bare type and the column assignment rejects the value ([ADR 0013](docs/adr/0013-staged-edits-and-optimistic-saves.md)).
+
+A defect found by the end-to-end run against the bundled app and fixed before these results: the Monaco editor never appeared in the bundle, although it worked under the dev server. The production CSS build rewrites colour tokens to their shortest spelling (`#ffffff` becomes `#fff`), and Monaco's theme accepts only `#rrggbb` / `#rrggbbaa`. Design tokens are now normalised before they reach the theme (`css()` in `src/features/sql/monaco.ts`). There is no unit test for that function; the bundled end-to-end run is what guards it.
+
+A fault in the test itself, also fixed: one bundled run timed out closing the history menu, because Escape was sent to whichever element had focus at that instant. The step now sends Escape to the menu until it is gone.
 
 Known instability: one dev-server run, the first after a Rust rebuild, timed out waiting for the MySQL "Test connection" result; the next three runs passed. The cause is not established (a dev-server reload during the first compile is the suspect). Treat a single failure as a reason to re-run and a repeated one as a bug.
 
@@ -240,6 +305,24 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Smart Paste dialog: no dismissal during a run (Esc, outside click, close button); the key used after switching from INSERT with "no key" to UPDATE / UPSERT | No automated test |
 | Smart Paste IPC layer: the read-only refusal in `apply_paste`, `cancel_job`, the values sent over the progress channel | The live tests call the core functions directly. The end-to-end test goes through `unique_keys`, `analyze_paste` and `apply_paste` but does not check progress or press Stop |
 | Smart Paste on a Production-labelled connection | The warning and the danger-styled button have no test |
+| SQL console through the UI on PostgreSQL | Backend-tested only (`live_console`); the end-to-end test opens its query tab on MySQL |
+| SQL console: Stop through the UI, and the `cancel_sql` command | Cancellation is verified in the backend (`live_console` sets the stop flag and calls the canceller itself); nothing presses Stop or calls the command |
+| SQL console: the lost-connection path through the UI and the IPC layer | Verified in the backend only: the console reports the loss. Removing the dead console and opening a new one on the next run (`run_sql`) is not exercised |
+| SQL console: interrupting a running statement when its tab or session closes | No automated test |
+| SQL console: confirmation on a Production-labelled connection; confirming a destructive statement ("Run anyway") | Only the destructive confirmation followed by Cancel is exercised |
+| SQL console: "Roll back and close", and the refusal to disconnect, change or delete a connection with a transaction open | The close dialog is opened and dismissed with "Keep the tab"; the rest has no automated test |
+| SQL console: a read-only connection | The server's refusal is live-tested through the console on MySQL only. A statement that switches the session back to read-write has not been run by a test on either engine |
+| SQL console: transaction tracking beyond `BEGIN` / `COMMIT` / `ROLLBACK` text | MySQL DDL inside a transaction, a deadlock, a transaction opened by a stored procedure or `XA`: no test |
+| SQL console: what the impact guard counts | Triggers, foreign-key cascades, `EXPLAIN ANALYZE` of a row-changing statement and a data-modifying `WITH` are not tested |
+| SQL console: results at or near 100,000 rows; memory and grid responsiveness | The largest result in a test is 5,000 rows, capped at 100 |
+| SQL console: statements returning several result sets (a MySQL stored procedure) | Not tested; scripts with several statements are |
+| SQL console: the row cap inside a user's transaction on MySQL | Tested on PostgreSQL only |
+| Export through the Save dialog and the Export menu | The end-to-end test calls `export_result` directly. XLSX cell types are not read back by any test (the unit test checks which texts convert; the runner checks that the Thai name is in the workbook) |
+| History: masking on the `run_sql` path, loading an entry, "Clear history" | The masking function and the store are unit-tested; the end-to-end test only lists the entries |
+| Completion and formatting in the SQL editor | No automated test |
+| ⌘↵, ⌘T, the palette's "New query", running a selection | No automated test; the end-to-end test uses the explorer menu and the Run button |
+| A query tab's saved text and its restoration after a relaunch | No automated test |
+| The colour normalisation for the Monaco theme (`css()`) | No unit test; guarded only by the bundled end-to-end run |
 | PostgreSQL session time zone | The `TimeZone=UTC` behaviour is a known limitation with no test asserting it |
 | Windows, Linux | Not built or run |
 | Release-profile build, DMG, signed or notarized builds | Only the unsigned debug-profile `.app` bundle was built and tested; no signing identity |

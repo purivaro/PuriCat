@@ -2,7 +2,7 @@
 
 PuriCat is a desktop database client built with Tauri 2 (Rust backend, React/TypeScript frontend). The goal is a client that covers routine database work for MySQL, PostgreSQL and SQL Server with spreadsheet-style editing, an AI agent driven through locally installed CLIs, and scheduled backups. macOS (Apple Silicon) is the first target; Windows follows later.
 
-> **Status: early development.** Phase 1 (runnable foundation) is complete; Phase 2 (database connectivity) and Phase 3 (editing) are partially complete. This build can connect to MySQL and PostgreSQL, browse tables, **edit data in tables that have a primary key** (spreadsheet-style, staged until Save), and load a block copied from a spreadsheet with the **Smart Paste wizard** (INSERT / UPDATE / UPSERT matched on a unique key, previewed before anything runs). It cannot run SQL, tunnel over SSH, connect to SQL Server, talk to an AI agent or take backups. **Not ready for production data.** Builds are unsigned.
+> **Status: early development.** Phase 1 (runnable foundation) is complete; Phase 2 (database connectivity), Phase 3 (editing) and Phase 4 (SQL and schema) are partially complete. This build can connect to MySQL and PostgreSQL, browse tables, **edit data in tables that have a primary key** (spreadsheet-style, staged until Save), load a block copied from a spreadsheet with the **Smart Paste wizard** (INSERT / UPDATE / UPSERT matched on a unique key, previewed before anything runs), and **run SQL in query tabs** (each tab on its own connection, with a row-impact guard, a row cap, Stop, history, and export to CSV / JSON / XLSX). It cannot create or alter schema objects through a form, import files, tunnel over SSH, connect to SQL Server, talk to an AI agent or take backups. **Not ready for production data.** Builds are unsigned.
 
 ## Feature status
 
@@ -35,13 +35,18 @@ Labels used across the docs:
 | Editing | Full-value cell editor, filtering, editing across pages | Planned (Phase 3) |
 | Safety | Review step showing the exact SQL and bound values: mandatory for Production-labelled connections, for any delete, and above a per-connection row threshold (default 10) | Implemented & verified for the delete-triggered path (E2E); the production and threshold paths are implemented, not yet verified through the UI |
 | Safety | Unsaved-edit guards: tab dot, confirmation before closing a dirty tab, paging / sorting / refresh locked, disconnect and connection changes refused while edits are pending | Implemented & verified for the close confirmation (E2E); the other guards have no automated test |
-| Safety | Server-enforced read-only session option | Implemented & verified (server reports the flag and refuses a write) |
+| Safety | Server-enforced read-only session option | Implemented & verified (server reports the flag and refuses a write). A query tab inherits it, but SQL typed there can switch the session back, so in the console it guards against accidents only ([SECURITY.md](SECURITY.md)) |
 | Safety | TLS mode `prefer` (default) | Implemented & verified against local servers only |
 | Safety | TLS modes `disable` / `require` / `verify-ca` / `verify-full`, custom CA file | Implemented, not yet verified |
 | Safety | SSH tunnels | Planned (Phase 2b) |
 | AI | Detect installed Claude Code / Codex CLIs and their sign-in state | Implemented & verified |
 | AI | Agent chat, schema tools, approval queue | Planned (Phase 5) |
-| SQL | Query editor, results, history, import/export | Planned (Phase 4) |
+| SQL | Query tabs: Monaco editor with MySQL / PostgreSQL highlighting, loaded on demand; run the selection or the whole script (⌘↵ / Run); one result tab per result set with exact server-rendered values; a Messages list with status, kind, rows / rows affected and time per statement; the first error stops the script | Implemented & verified in the backend on both engines (live tests); through the UI on MySQL only (E2E, also against the bundled app under the production CSP). ⌘↵, running a selection, and PostgreSQL through the UI are not exercised |
+| SQL | One connection per query tab ([ADR 0015](docs/adr/0015-sql-console.md)): session state (`USE`, `SET`, temporary tables, a transaction) lasts as long as the tab; an open transaction is flagged (badge, dot on the tab, confirmation before closing, disconnect refused); a lost connection is reported and the next run reconnects | Implemented & verified in the backend on both engines (live tests); the badge, tab dot, locked database selector and close confirmation in E2E (MySQL). The lost-connection path and the disconnect refusal are not exercised through the UI |
+| SQL | Safeguards: confirmation before destructive statements (every non-read statement on a Production-labelled connection); an impact guard that rolls back a row-changing statement above the connection's row threshold (default 10) unless "Run it without the limit" is chosen; a row cap per result (default 1,000, at most 100,000); Stop | Implemented & verified: impact guard and row cap in live tests on both engines; the confirmation (cancelled) and the impact guard through the UI in E2E (MySQL). Stop is verified in the backend only; the Production confirmation has no automated test |
+| SQL | Export a result to CSV, JSON or XLSX, written by the backend to a path chosen in the native Save dialog; fetched rows only | Implemented & verified (unit tests; CSV in a live test; E2E writes all three through the IPC command and checks the files). The Save dialog and the Export menu are not exercised |
+| SQL | History per connection (local, password literals masked, at most 1,000 entries); completion of table names, columns and keywords; formatting | History: implemented & verified (unit tests; listed in E2E). Completion and formatting: implemented, not yet verified |
+| SQL | Saved scripts, run statement at cursor, alias-aware completion, results and exports beyond 100,000 rows, EXPLAIN view, query parameters, object editing with DDL preview, import from CSV / XLSX, SQL dump export | Planned (Phase 4) |
 | Backups | Manual and scheduled backup, restore | Planned (Phase 6) |
 | Release | Signed and notarized builds, updater, Windows | Planned (Phase 7) |
 
@@ -89,21 +94,22 @@ pnpm check        # typecheck, Vitest, cargo fmt --check, clippy -D warnings, ca
 # Live database tests: point them at DISPOSABLE servers only.
 PURICAT_TEST_MYSQL=you@127.0.0.1:3306 PURICAT_TEST_MYSQL_PASSWORD=... \
 PURICAT_TEST_POSTGRES=you@127.0.0.1:5432 PURICAT_TEST_POSTGRES_PASSWORD=... \
-  cargo test -p puricat-core --test live_db --test live_write
+  cargo test -p puricat-core --test live_db --test live_write --test live_console
 
 e2e/run.sh        # end-to-end smoke test in the real window (macOS, local MySQL + PostgreSQL; uses only a database named puricat_e2e)
 ```
 
-`live_db` covers connecting and browsing; `live_write` covers saving edits and Smart Paste. Both create and drop their own scratch databases. Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". The end-to-end test temporarily overwrites the system clipboard and restores the previous text. See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
+`live_db` covers connecting and browsing; `live_write` covers saving edits and Smart Paste; `live_console` covers the SQL console. All three create and drop their own scratch databases. Without the `PURICAT_TEST_*` variables the live tests skip themselves and still report "ok". The end-to-end test temporarily overwrites the system clipboard and restores the previous text. See [TESTING.md](TESTING.md) for what each suite covers and the recorded results.
 
 ## Repository layout
 
 ```
 crates/core/        puricat-core: model, settings store, secrets, DB adapters, AI CLI discovery (no Tauri dependency)
-  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting, write planner (write.rs), Smart Paste matching (smart.rs)
-  tests/            live_db.rs (browse) and live_write.rs (save edits, Smart Paste): integration tests against real servers
+  src/db/           Session enum, MySQL and PostgreSQL adapters, identifier quoting, write planner (write.rs), Smart Paste matching (smart.rs),
+                    SQL console (console.rs), statement splitter and classifier (script.rs), CSV / JSON / XLSX export (export.rs)
+  tests/            live_db.rs (browse), live_write.rs (save edits, Smart Paste) and live_console.rs (SQL console): integration tests against real servers
 src-tauri/          puricat: Tauri app, IPC commands, app state, capabilities, bundle config
-src/                React frontend (components, features, stores, i18n)
+src/                React frontend (components, features, stores, i18n); features/sql holds the query tab and the Monaco set-up
 e2e/                end-to-end smoke test (runner, injected script, SQL fixtures)
 branding/           icon artwork
 scripts/            icon processing script

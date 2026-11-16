@@ -33,7 +33,7 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Browse rows of a view | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Composite primary keys, names needing quotes | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Keyset pagination, exact row count, cell inspector | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
-| Query cancellation, reconnect | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
+| Cancellation of browse and catalogue queries; reconnect of the pooled session | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Edit rows of a table with a primary key (UPDATE by complete key) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
 | Insert rows (omitted columns take server defaults) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
 | Delete rows (by complete key) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
@@ -52,7 +52,17 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Smart Paste: key equality decided by the database | Implemented & verified (case-insensitive collation: `c3` and `C3` are one key) | Implemented & verified (case-sensitive: `c3` and `C3` are two keys) | Planned (Phase 3) |
 | Smart Paste: one transaction with progress, cancel and rollback | Implemented & verified (live test; not through the UI) | Implemented & verified (live test; not through the UI) | Planned (Phase 3) |
 | Imports of more than 10,000 rows in batches; CSV / XLSX files | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
-| Run SQL, DDL, import/export | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
+| Run a script in a query tab: own connection, statement by statement, several result sets, exact text values | Implemented & verified (live test; E2E through the UI) | Implemented & verified (live test); not through the UI | Planned (Phase 4) |
+| Session state kept for the life of the tab (`SET`, temporary tables, user variables) | Implemented & verified (`SET @v`, `USE`) | Implemented & verified (`CREATE TEMP TABLE`) | Planned (Phase 4) |
+| Statement splitting by the engine's lexical rules | Implemented & verified (unit tests: backticks, `#` comments, backslash escapes, `--` needing a space) | Implemented & verified (unit tests: dollar quotes, nested block comments, `E''` strings; a `DO $$ ... $$` block in the live test) | Planned (Phase 4) |
+| Impact guard: a row-changing statement above the row threshold is rolled back | Implemented & verified (live test; E2E) | Implemented & verified (live test) | Planned (Phase 4) |
+| A transaction the user opens spans runs and is left alone by the guard | Implemented & verified (live test, also with autocommit off; E2E) | Implemented & verified (live test, including an error inside the transaction) | Planned (Phase 4) |
+| Row cap per result; a plain read is cancelled on the server at the cap | Implemented & verified (live test) | Implemented & verified (live test; a capped `UPDATE ... RETURNING` still commits; a capped read inside a transaction does not abort it) | Planned (Phase 4) |
+| Stop a statement running in a query tab | Implemented & verified in the backend (`KILL QUERY`); not through the UI | Implemented & verified in the backend (`pg_cancel_backend`); not through the UI | Planned (Phase 4) |
+| A query tab's lost connection is reported; the next run opens a new one | Implemented & verified in the backend (`KILL <id>` from another connection) | Implemented & verified in the backend (`pg_terminate_backend`) | Planned (Phase 4) |
+| Choose another database for a query tab | Implemented: the selector makes the next run open a new connection on that database (no automated test); `USE` inside a script is verified (live test) | Not available: a tab stays on the database it was opened on. Planned (Phase 4) | Planned (Phase 4) |
+| Export a result to CSV, JSON, XLSX | Implemented & verified (unit tests; CSV in the live test; all three in E2E) | Implemented & verified (unit tests; CSV in the live test); not through the UI | Planned (Phase 4) |
+| Object editing with DDL preview, import from CSV / XLSX, SQL dump export, EXPLAIN view | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Backup and restore | Planned (Phase 6) | Planned (Phase 6) | Planned (Phase 6) |
 
 ## Capability flags
@@ -65,7 +75,7 @@ Reported by each adapter so the UI asks instead of guessing from the engine name
 | `transactionalDdl` | false | true | DDL can be rolled back |
 | `returning` | false | true | `INSERT/UPDATE/DELETE ... RETURNING` is available |
 
-Only `schemas` affects behaviour today. The write path does not use `returning` or `transactionalDdl` yet: after a save the grid reloads the page instead of reading returned rows.
+Only `schemas` affects behaviour today. The write path does not use `returning` or `transactionalDdl` yet: after a save the grid reloads the page instead of reading returned rows. The SQL console does not consult them either; it branches on the engine.
 
 ## Type rendering
 
@@ -105,6 +115,27 @@ Notes for both engines:
 - Temporal values are shown in the session's time zone and format. MySQL sessions keep the server's time zone (verified). PostgreSQL sessions always run in UTC, whatever the server or role default is (see known limitations).
 - Truncated cells are flagged. The full value cannot be viewed or edited yet.
 
+### Query results (SQL console)
+
+The tables above describe the browse path, where PuriCat writes the `SELECT`. In a query tab the user's statement is sent over the simple/text protocol and the server renders each value as text itself ([ADR 0015](docs/adr/0015-sql-console.md)). The exactness is the same; a few renderings differ:
+
+| Value | In a query result | Verified |
+|---|---|---|
+| Integers, `BIGINT` beyond 2^53, `DECIMAL` / `numeric`, text including Thai | Exact text, as on the browse path | Yes, both engines |
+| NULL | Distinct from the empty string | Yes, both engines |
+| MySQL `BINARY` / `VARBINARY` / `BLOB` family | `0x` + **lowercase** hex of the whole value (the browse path shows uppercase hex of the first 24 bytes) | Yes (`VARBINARY`) |
+| MySQL `BIT(n)` | Decimal number | Yes |
+| MySQL spatial types | Treated as binary: hex of the internal form, not WKT. Use `ST_AsText()` in the query | No (from the code) |
+| MySQL `TINYINT(1)`, `JSON`, temporal types, `ENUM` | Server text | No |
+| PostgreSQL `bytea` | `0x` + lowercase hex of the whole value (the server's `\x…` with the prefix replaced) | Yes |
+| PostgreSQL enum, array, `timestamptz` | Server text, e.g. `{a,"b c"}`; `timestamptz` in the session's zone (UTC) | Yes (the date and microseconds asserted) |
+| PostgreSQL `boolean` | `t` / `f`, the server's text output (the browse path's `::text` cast gives `true` / `false`) | No (follows from the protocol; not asserted) |
+| Other types | Whatever the server's text output is | No |
+
+- Nothing is cut on the server. The backend keeps full values; the grid shows the first 1,000 characters of a long cell and flags it; an export has the whole value (verified with a 1,500-character Thai value).
+- A column's kind (number, text, temporal, binary, JSON, bool) is derived from the driver's type name. It decides alignment in the grid, which values are shown as hex, and which XLSX cells may become numbers.
+- A query that returns no rows still shows its column names (verified on both engines).
+
 ## Writing values
 
 Saving staged edits is described in [ADR 0013](docs/adr/0013-staged-edits-and-optimistic-saves.md). Values are sent as text parameters, exactly as typed or pasted; PuriCat does not parse or reformat them. The server converts and validates. A save is one transaction of single-row statements (deletes, then updates, then inserts; at most 10,000 row changes), and every statement must affect exactly one row.
@@ -141,6 +172,8 @@ Not verified on the write path: `SET`, `FLOAT` / `DOUBLE`, `TIME`, `YEAR`, `TIME
 | PostgreSQL | `application_name = PuriCat` | Identifies the session |
 | PostgreSQL | `TimeZone = UTC`, sent by the driver at start-up; not chosen by PuriCat and not yet configurable | See known limitations |
 | PostgreSQL, when the read-only option is on | `SET default_transaction_read_only = on` | Server-enforced read-only |
+
+A query tab's connection is opened through the same pool, so it starts with the same settings. SQL typed in the tab can change them for that tab (`SET sql_mode`, `SET TIME ZONE`, the read-only setting); such a change lasts until the tab's connection is closed and affects no other tab.
 
 ## Smart Paste
 
@@ -180,6 +213,54 @@ Smart Paste limitations:
 | Composite keys | Matching is verified in the backend on both engines (live test: update, a different day unmatched, a NULL part of the key reported as a missing key, applied and read back). Not verified through the UI |
 | Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. Through the UI only UPSERT on MySQL has been run |
 
+## SQL console
+
+Design and alternatives: [ADR 0015](docs/adr/0015-sql-console.md). A query tab runs the selection or the whole script on a connection of its own, one statement at a time, and reports each statement's outcome.
+
+| Aspect | MySQL | PostgreSQL |
+|---|---|---|
+| The tab's connection | Taken from the session's pool and detached; `USE <database>` when the tab names one | Taken from the pool of the tab's database (the profile's default when the tab names none) and detached |
+| Changing database | The tab's selector: the next run opens a new connection on the chosen database. `USE` inside a script also works but does not move the selector | Not possible inside a tab; open a new query tab from the other database in the explorer |
+| Protocol | Text protocol (`COM_QUERY`), one statement per request | Simple query protocol, one statement per request |
+| Lexical rules when splitting | Backtick identifiers; `#` and `-- ` comments (`--` must be followed by white space); backslash escapes in strings; block comments do not nest | Dollar-quoted strings (`$$…$$`, `$tag$…$tag$`; `$1` is a parameter); nested block comments; backslash escapes only in `E'…'` strings |
+| Guard transaction around a row-changing statement | `START TRANSACTION` … `COMMIT` / `ROLLBACK` | `BEGIN` … `COMMIT` / `ROLLBACK` |
+| When the guard stays out | After the user's `BEGIN` / `START TRANSACTION`, and whenever `@@autocommit` is 0 (asked from the server; asked again after `SET`, `CALL` and other unclassified statements) | After the user's `BEGIN` / `START TRANSACTION` |
+| DDL inside the user's transaction | Commits implicitly; the console then treats the transaction as ended | Transactional; the transaction stays open |
+| An error inside the user's transaction | The transaction stays open, as the server leaves it; a deadlock, which rolls the whole transaction back, is not noticed | The server aborts the transaction; the message says to run `ROLLBACK`; the tab stays flagged until then |
+| Row cap reached | A plain read is interrupted with `KILL QUERY`, also inside a user's transaction (not tested there). Statements of other kinds are read to the end | A plain read outside a user's transaction is interrupted with `pg_cancel_backend`. Inside a user's transaction, and for statements of other kinds, the rest is read and dropped |
+| Stop | `KILL QUERY <connection id>` from a pooled connection | `SELECT pg_cancel_backend(<pid>)` from a pooled connection of the same database |
+| Connection treated as lost | I/O or protocol error; server errors 1053 (shutdown), 1927 (connection killed), 4031 (idle disconnect) | I/O or protocol error; SQLSTATE class `08`, `57P01`, `57P02`, `57P03` |
+| Read-only option | The connection starts with `SET SESSION TRANSACTION READ ONLY`; the server refuses a write (verified). `SET SESSION TRANSACTION READ WRITE` switches it back | The connection starts with `default_transaction_read_only = on` (the console was not run read-only in a test). `SET default_transaction_read_only = off` switches it back |
+| Verified | Live test and E2E through the UI | Live test only |
+
+Behaviour common to both engines:
+
+- **Statement kinds.** `read` (`SELECT`, `SHOW`, `EXPLAIN`, `WITH` without a row-changing word, …), `dml` (`INSERT`, `UPDATE`, `DELETE`, `REPLACE`, `MERGE`, a `WITH` containing one, `EXPLAIN ANALYZE` of one), `ddl`, `transaction`, `other` (`SET`, `USE`, `CALL`, `DO`, `SELECT ... INTO`, anything unrecognised). The same keyword table is used for both engines.
+- **Confirmation.** `UPDATE` or `DELETE` without a top-level `WHERE`, `DROP`, `TRUNCATE` and `ALTER ... DROP` are listed before the script runs; on a Production-labelled connection every statement that is not `read` is.
+- **Impact guard.** A `dml` statement outside the user's transaction that affects more rows than the connection's "review larger saves" threshold (default 10) is rolled back and reported as blocked; "Run it without the limit" runs it and the rest of the script with no limit.
+- **Errors.** The first error stops the script; the number of statements not run is shown.
+- **Results.** At most the chosen cap of rows per result (100 / 1,000 / 10,000 / 100,000; default 1,000). Results are read-only and cannot be sorted in the grid.
+- **Export.** CSV (UTF-8 with a byte-order mark, RFC 4180, CRLF; NULL is an empty field, an empty string is `""`), JSON (an array of objects, every value a string or `null`), XLSX (a cell of a numeric column becomes a number only when it has at most 15 significant digits in plain notation, otherwise it stays text; bold frozen header; at most 1,048,575 data rows). Fetched rows only.
+
+SQL console limitations:
+
+| Limitation | Detail |
+|---|---|
+| Read-only is not enforced against typed SQL | A query tab inherits the connection's read-only setting, but a statement can switch the session back (see the table above). In the console the option protects against accidents, not against the person at the keyboard; a database account without write privileges is the real control ([SECURITY.md](SECURITY.md)) |
+| The classification reads keywords | A function called from a `SELECT` can write and is still a `read`: not confirmed, not guarded, cancelled at the row cap. A `WITH` that mentions a word such as `replace` is treated as row-changing. Vendor statements the table does not know are `other` |
+| Unguarded statements | DDL, `CALL`, `DO` and every `other` statement run without the impact guard. MySQL DDL cannot be rolled back |
+| What the guard counts | The server's affected-row count of the statement. Rows changed by triggers or foreign-key cascades are not included. `EXPLAIN ANALYZE UPDATE` and a data-modifying `WITH` that ends in a `SELECT` report a count that is not the number of changed rows. Not tested |
+| Transaction tracking is textual | A transaction opened inside a stored procedure or with `XA` is not seen. On MySQL a deadlock rollback, and an implicit commit caused by a statement that is not DDL, are not noticed; a successful DDL statement always counts as a commit, including `CREATE TEMPORARY TABLE`, which does not commit |
+| 100,000 rows per result, in memory | No streaming and no "load more": a capped result has to be run again with a higher cap. Memory use and grid responsiveness at the cap have not been measured |
+| Export | Only the results of the tab's last run, and only fetched rows (a capped result exports capped). In JSON, columns with the same name collapse into one key. XLSX numbers: a value such as `007` in a numeric column becomes the number 7 |
+| PostgreSQL tabs cannot change database | Planned (Phase 4) |
+| MySQL `USE` and the selector | A `USE` in a script moves the session; the tab's database selector keeps showing its own choice |
+| One server connection per query tab | Each tab that has run something holds a connection until it is closed, beyond the pool limits (4 on MySQL, 3 per database on PostgreSQL). There is no cap other than the server's |
+| Stop and the row cap need the pool | The interrupt is sent on a pooled connection; with every pooled connection busy it waits for one |
+| Completion | Table names the explorer has loaded, columns of the tables named in the text (and of `table.` before the cursor), keywords. Aliases are not understood; for PostgreSQL only the `public` schema of the tab's database is loaded automatically |
+| Messages | Messages produced by the backend (danger reasons, "Cancelled", the lost-connection note, the history summary) are English only |
+| Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. Through the UI the console has been run on MySQL only |
+
 ## Object classification
 
 | Engine | Shown under Tables | Shown under Views |
@@ -215,7 +296,8 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | PostgreSQL default database | When the profile has none, the session starts on `postgres`; the user must be allowed to connect to it |
 | MySQL database visibility | `SHOW DATABASES` returns only what the account's privileges allow |
 | MySQL `generated` flag | True for `auto_increment` and `STORED`/`VIRTUAL GENERATED` columns, read from the `EXTRA` column. Expression defaults (`DEFAULT_GENERATED`) are not treated as generated (unit-tested) |
-| No cancellation or reconnect | A slow query runs to completion; a dropped connection surfaces as an error on the next action. A Smart Paste run can be stopped between statements, but its lookup queries cannot be cancelled |
+| No cancellation or reconnect outside query tabs | A slow browse or catalogue query runs to completion; a dropped pooled connection surfaces as an error on the next action. A Smart Paste run can be stopped between statements, but its lookup queries cannot be cancelled. A statement running in a query tab can be stopped, and a query tab whose connection was lost reconnects on its next run (see "SQL console") |
+| Read-only connections and the SQL console | The read-only option is a session setting. The grid and Smart Paste never send SQL that could change it; a query tab runs what the user types, including a statement that switches the session back to read-write (see "SQL console") |
 | Permissions | Catalogue queries assume read access to `information_schema` / `pg_catalog`. Behaviour under restricted accounts is untested |
 | Large tables | No performance measurements exist |
 
@@ -230,6 +312,7 @@ Plan:
 - Namespaces: databases → schemas → objects, as in PostgreSQL.
 - Rendering to text will need per-type `CONVERT` styles (for example for `datetime2`, `money`, `varbinary`); to be designed and tested.
 - The write path (`db::write`) and Smart Paste (`db::smart`) have no SQL Server statements yet. When they do, Smart Paste will likewise match rows first and run plain `INSERT` and `UPDATE` statements; `MERGE` will not be used blindly ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)). Planned.
+- The SQL console has no SQL Server path either. The statement scanner (`db::script`) knows the MySQL and PostgreSQL lexical rules only; bracketed identifiers, `GO` batches and T-SQL transaction statements are not handled. Planned.
 - Backups: `BACKUP DATABASE` writes to a path on the server, not the client ([BACKUP_RESTORE.md](BACKUP_RESTORE.md)).
 
 **Integrated authentication.** Windows integrated authentication from macOS is only plausible through Kerberos/GSSAPI with a ticket obtained by `kinit` on a machine that can reach the domain's KDC. This is unverified with any driver. Until tested, the only SQL Server authentication PuriCat will claim is SQL login (user name and password). Microsoft Entra ID authentication has not been evaluated.

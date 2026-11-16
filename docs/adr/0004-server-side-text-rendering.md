@@ -6,6 +6,8 @@ Accepted. Implemented for table browsing.
 
 Update 2026-11-16: editing now sends values as text parameters as anticipated below — cast to the column's bare type on PostgreSQL, uncast on MySQL (except `BIT`) — and compares these text renderings for optimistic concurrency; the per-type validation before sending was not built (the server validates). See [ADR 0013](0013-staged-edits-and-optimistic-saves.md).
 
+Update 2026-11-16 (SQL console): the open question under "Consequences" about arbitrary SQL results is answered. Query tabs send statements over the simple/text protocol on both engines, MySQL included, so the server renders every value as text there too; no driver-native decoding was added. Differences from the browse path: nothing is truncated on the server (the backend keeps full values for export and cuts cells to 1,000 characters for display only), binary values are shown in full as `0x` plus lowercase hex on both engines, and MySQL spatial columns are classified as binary, so they are shown as hex rather than WKT (from the code; not run against a server). See [ADR 0015](0015-sql-console.md).
+
 ## Context
 
 A data grid must show what is stored, exactly. Decoding every database type into a Rust type and then into JSON for the web view loses information: JavaScript numbers cannot hold 64-bit integers or high-precision decimals, and each engine has a long tail of types (arrays, enums, ranges, spatial, intervals) that would each need a decoder.
