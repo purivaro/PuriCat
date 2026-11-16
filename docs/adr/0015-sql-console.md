@@ -69,7 +69,7 @@ Closing a query tab, or disconnecting its connection, interrupts a statement tha
 
 ### 5. A transaction the user opens is theirs
 
-The console tracks the user's `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` from the statement text, read with the same scanner (a comment in front does not hide the keyword; `AND CHAIN` keeps the transaction open; `ROLLBACK TO` and `SAVEPOINT` change nothing). On MySQL it also asks the server for `@@autocommit`, remembers the answer, and asks again after any `other` statement, since `SET` or `CALL` may have changed it; a successful DDL statement on MySQL marks the transaction as ended (implicit commit).
+The console tracks the user's `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` from the statement text, read with the same scanner (a comment in front does not hide the keyword; `AND CHAIN` keeps the transaction open; `ROLLBACK TO` and `SAVEPOINT` change nothing). On MySQL it also asks the server for `@@autocommit`, remembers the answer, and asks again after any `other` statement, since `SET` or `CALL` may have changed it; a successful DDL statement on MySQL marks the transaction as ended (implicit commit), unless it contains the keyword `TEMPORARY`: `CREATE` and `DROP TEMPORARY TABLE` do not commit (second round, 2026-11-16).
 
 While a transaction is open, or MySQL autocommit is off, the guard stays out: it adds no transaction of its own and blocks nothing. The UI shows a badge and a dot on the tab, disables the database selector, asks before closing the tab ("Roll back and close"), and refuses to disconnect, change or delete the connection — the same guard as for staged table edits. On PostgreSQL an error inside the user's transaction adds "run ROLLBACK" to the message, because the server has aborted the transaction.
 
@@ -84,14 +84,14 @@ An error that is not a server answer (I/O, protocol, TLS), a PostgreSQL SQLSTATE
 | Format | Rules |
 |---|---|
 | CSV | UTF-8 with a byte-order mark, RFC 4180, CRLF line ends. NULL is an empty field and an empty string is `""`, so the two stay distinct |
-| JSON | An array of objects, one per row. Every value is a string or `null`: JSON numbers would lose digits of large integers and decimals in most consumers |
+| JSON | An array of objects, one per row. Every value is a string or `null`: JSON numbers would lose digits of large integers and decimals in most consumers. Columns that share a name are kept under `name`, `name_2`, `name_3`, … so no value is dropped |
 | XLSX | Bold, frozen header row. A cell of a numeric column becomes a number only when its text is plain decimal notation with at most 15 significant digits; everything else stays text. NULL is an empty cell. At most 1,048,575 data rows |
 
 Only fetched rows are exported, so the row cap applies; long cells are exported in full.
 
 ### 8. History is local and masked
 
-Each run that started is recorded in the SQLite settings store (table `query_history`, store migration 2): the connection, the database, the script text, the status of the last statement, a one-line summary and the duration. At most 1,000 entries are kept in total; the UI lists the latest 100 of the tab's connection and can clear that connection's entries. Before storage `script::redact` masks any single-quoted literal that follows `password`, `identified by` or `identified with` within 48 characters.
+Each run that started is recorded in the SQLite settings store (table `query_history`, store migration 2): the connection, the database, the script text, the status of the last statement, a one-line summary and the duration. At most 1,000 entries are kept in total; the UI lists the latest 100 of the tab's connection and can clear that connection's entries. Before storage `script::redact` masks any quoted literal — in single quotes, or in the double quotes MySQL also accepts — that follows `password`, `identified by` or `identified with` within 48 characters. Deleting a connection deletes its history entries.
 
 ### 9. The editor
 
@@ -133,12 +133,12 @@ Limitations:
 - **The guard measures the server's affected-row count for the statement.** Rows changed by triggers or foreign-key cascades are not in that count, and a statement whose count is not that of its changes (`EXPLAIN ANALYZE UPDATE`, a data-modifying `WITH` whose final statement is a `SELECT`) is measured by what the server reports. None of these cases is tested.
 - **The confirmation and the limit are the UI's.** `run_sql` runs the text it is given with the limit it is given; a caller can pass no limit. The backend enforces the mechanism, not the policy.
 - **"Run it without the limit" lifts the limit for the blocked statement and everything after it in that script.**
-- **Transaction tracking is textual.** A transaction opened inside a stored procedure or with `XA` is not seen. A MySQL error that rolls back the whole transaction (a deadlock) is not noticed, nor is an implicit commit caused by a statement that is not DDL. A successful MySQL DDL statement always marks the transaction as ended, also the few that do not commit (`CREATE TEMPORARY TABLE`).
+- **Transaction tracking is textual.** A transaction opened inside a stored procedure or with `XA` is not seen. A MySQL error that rolls back the whole transaction (a deadlock) is not noticed, nor is an implicit commit caused by a statement that is not DDL. The exception for MySQL DDL that does not commit is a keyword test for `TEMPORARY`: DDL on an unquoted object or column that is itself named `temporary` is taken as not committing. No test runs MySQL DDL inside a transaction.
 - **Read-only is inherited, not enforced against the person typing.** The console's connection carries the session's read-only setting, and the server refuses a write (live-tested on MySQL). A statement can switch the session back (`SET SESSION TRANSACTION READ WRITE`, `SET default_transaction_read_only = off`). `run_sql` does not check the profile's read-only flag. The real control is a database account without write privileges ([SECURITY.md](../../SECURITY.md)).
 - **Results are held in memory**, in the backend in full and in the web view with long cells cut: up to 100,000 rows per result, with no streaming. Memory use with wide rows at the cap has not been measured.
 - **Results cannot be sorted or filtered** in the grid, and a capped result cannot be continued; the query has to be run again with a higher cap.
-- **Only the last run's results can be exported**, and only the fetched rows. In a JSON export, columns with the same name collapse into one key.
-- **History stores SQL text in clear** in the local settings database, apart from masked password literals. The mask is a heuristic: it covers single-quoted literals only and can hide an unrelated literal that follows the word `password`. Other secrets in a script are stored as typed. Entries of a deleted connection are not removed until they age out.
+- **Only the last run's results can be exported**, and only the fetched rows.
+- **History stores SQL text in clear** in the local settings database, apart from masked password literals. The mask is a heuristic: it takes the first quote character after the keyword, so it can hide an unrelated literal or a double-quoted identifier that follows the word `password`, and it misses the literal in `"password" = '...'`, where the identifier's own closing quote is the first one it meets. Other secrets in a script are stored as typed.
 - **Stop needs a free pooled connection** to send the interrupt, and what an interrupt leaves behind is the server's rule: a guarded statement is rolled back; a statement in the user's PostgreSQL transaction aborts that transaction.
 - **A `USE` typed in a MySQL tab moves the session but not the tab's database selector.**
 - **PostgreSQL tabs cannot change database.**

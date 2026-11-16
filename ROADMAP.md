@@ -9,7 +9,7 @@ Status on 2026-11-16. Phases follow the delivery plan in the [product brief](doc
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
 | 3 | Flagship editing | Partial (grid editing and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
 | 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; object editing, import and the rest are listed below) |
-| 5 | AI agent | Not started (CLI detection only) |
+| 5 | AI agent | Partial (CLI detection and an agent chat in which the model has no tools; the MCP server, read-only tools and the approval queue are not built) |
 | 6 | Backups | Not started |
 | 7 | Public beta | Not started |
 
@@ -88,12 +88,13 @@ Known limitations of what is built (DELETE checks the key only; PostgreSQL sessi
 
 ## Recommended next step
 
-Stay in Phase 4 and take two things in this order. This is a recommendation, not a commitment.
+Do not give the model tools yet. Take three things in this order. This is a recommendation, not a commitment.
 
-1. **Close the verification gaps of the SQL console before building on it.** The console now runs arbitrary SQL, which makes it the riskiest surface in the app, and several of its safeguards are verified below the UI only: Stop, the lost-connection path, the Production confirmation, and everything on PostgreSQL through the UI. Extending the end-to-end test to a PostgreSQL query tab, a Stop, and a Production-labelled connection is small work with the fixtures that exist. In the same pass, decide the open hardening questions listed under "Remaining" (transaction state from the server instead of the text; a read-only refusal that typed SQL cannot switch off).
-2. **Import from CSV / XLSX.** It is the next piece users will miss, it is where Smart Paste's 10,000-row limit and file sources are meant to be lifted, and it reuses what exists: `db::smart` for matching, and the console's dedicated connection and cancellation for a long job. A library for reading XLSX has still to be chosen (`rust_xlsxwriter` only writes).
+1. **Close the verification gaps of the SQL console, and make read-only hold against SQL.** The console runs arbitrary SQL, which makes it the riskiest surface in the app, and since the agent chat it is also where AI-written SQL lands ("Open in query tab"). Several of its safeguards are verified below the UI only: Stop, the lost-connection path, the Production confirmation, and running anything on PostgreSQL through the UI. Extending the end-to-end test to a PostgreSQL query tab, a Stop, and a Production-labelled connection is small work with the fixtures that exist. In the same pass, decide the open hardening questions listed under Phase 4 "Remaining" (transaction state from the server instead of the text; a read-only refusal that typed SQL cannot switch off). The second is a precondition for the AI's read-only query tool, not only a console nicety.
+2. **Finish the first slice of the chat before widening it.** See a successful Codex turn from the real CLI (it needs an account the service accepts) or label Codex as unverified in the panel; decide what to do about Codex's shell tool; add a version check; and fix the small things listed under Phase 5 "Remaining" (Stop while the context is being read, the schema of an opened query tab, masking the active query before it is sent). Repeat the end-to-end run, dev and bundled, on the turn handling as it is now, with the screen awake: the last change to it (process groups, commit `1515bac`) was not followed by one.
+3. **Then the MCP server with read-only tools** ([ADR 0008](docs/adr/0008-ai-cli-integration.md)), which first needs its open questions answered: how each CLI is handed a per-invocation MCP configuration, and which Claude permission mode allows only PuriCat's tools.
 
-Object editing with DDL preview is the larger remaining Phase 4 item and can follow. The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination, the cell inspector — can be taken alongside.
+Import from CSV / XLSX remains the next Phase 4 feature users will miss: it is where Smart Paste's 10,000-row limit and file sources are meant to be lifted, and it reuses what exists (`db::smart` for matching, the console's dedicated connection and cancellation for a long job). A library for reading XLSX has still to be chosen (`rust_xlsxwriter` only writes). It is independent of the AI work and can be taken in parallel. Object editing with DDL preview is the larger remaining Phase 4 item and can follow. The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination, the cell inspector — can be taken alongside.
 
 ## Phase 4 — SQL and schema: partial
 
@@ -106,7 +107,7 @@ Done (MySQL and PostgreSQL; evidence in [TESTING.md](TESTING.md), design in [ADR
 - Transactions the user opens: tracked, left alone by the guard, flagged on the tab, protected by the same guards as staged edits. MySQL autocommit is read from the server.
 - A lost connection is reported and replaced on the next run; closing a tab or disconnecting interrupts a running statement.
 - Export of a result to CSV, JSON and XLSX, written by the backend through the native Save dialog.
-- History per connection in the local store, with password literals masked.
+- History per connection in the local store, with password literals masked (single- and double-quoted); a connection's history is deleted with it.
 - Completion (table names, columns, keywords) and formatting.
 
 Verified in the backend on both engines; through the UI on MySQL only.
@@ -116,7 +117,7 @@ Remaining:
 | Item | Notes |
 |---|---|
 | SQL console: verification gaps | PostgreSQL through the UI; Stop and the lost-connection path through the UI; the confirmation on a Production-labelled connection; completion, formatting, the Save dialog, restoring a tab's text after a relaunch; results near 100,000 rows ([TESTING.md](TESTING.md) gaps) |
-| SQL console: hardening | Transaction tracking is textual (procedures, `XA`, a MySQL deadlock and non-DDL implicit commits are not seen); the confirmation and the impact threshold are applied by the UI, not enforced by the backend; a read-only connection can be switched back by typed SQL; history has no off switch and outlives a deleted connection ([SECURITY.md](SECURITY.md), SQL console) |
+| SQL console: hardening | Transaction tracking is textual (procedures, `XA`, a MySQL deadlock and non-DDL implicit commits are not seen; the exception for `CREATE` / `DROP TEMPORARY TABLE` is a keyword test); the confirmation and the impact threshold are applied by the UI, not enforced by the backend; a read-only connection can be switched back by typed SQL; history has no off switch, and its password mask misses a literal that follows a double-quoted `"password"` identifier ([SECURITY.md](SECURITY.md), SQL console) |
 | Saved scripts | Today a tab's text lives only as long as the tab |
 | Run the statement at the cursor | Today: the selection, or the whole script |
 | Alias-aware completion | Today: loaded table names, columns of tables named in the text, keywords. Inline error markers are not built either |
@@ -129,14 +130,35 @@ Remaining:
 | SQL dump export | Not started |
 | Translating backend messages | Danger reasons, the lost-connection note, "Cancelled" and the history summary are English only |
 
-## Phase 5 — AI: not started
+## Phase 5 — AI: partial
 
-1. Resolve the open questions in [AI_INTEGRATION.md](AI_INTEGRATION.md) from official CLI documentation.
-2. Subprocess runner with streaming, cancellation and version gating.
-3. PuriCat MCP server with read-only tools.
-4. Proposal and approval queue; audit log.
-5. Context preview and redaction.
-6. Tests with a mocked CLI, plus opt-in smoke tests against the real CLIs.
+Done (the first slice: a chat in which the model has no tools and no database access; design in [ADR 0016](docs/adr/0016-agent-chat-without-tools.md), details in [AI_INTEGRATION.md](AI_INTEGRATION.md), evidence in [TESTING.md](TESTING.md)):
+
+- CLI detection for Claude Code and Codex; the chat is offered only for a CLI that is installed and not known to be signed out, otherwise the panel says what is missing.
+- Subprocess runner: one CLI process per turn in a process group of its own, fixed argument vector, no shell, the prompt on stdin, an empty working directory owned by PuriCat, kill-on-drop, a 10-minute timeout, Stop killing the whole group.
+- Stream parsers for `claude -p --output-format stream-json` (confirmed by capture from Claude Code 2.1.303) and `codex exec --json` (start and failure lines captured from codex-cli 0.133.0; **the success lines are from the documented format and unverified against the real CLI**).
+- Chat UI in the AI panel: provider switch, model selector (default, the CLI's models, any name), streamed answers rendered from Markdown as text, errors in the CLI's own words with "Try again", "New chat"; English and Thai.
+- Schema context produced by the backend — names and types only, 40 tables in full and the rest by name, plus the active query tab's SQL — shown in a context inspector and kept with every sent message; a switch turns sharing off.
+- "Open in query tab" for SQL in an answer: a new query tab with the text, nothing run.
+- Stateless turns: the CLIs keep no session; the conversation lives in memory and is resent each turn; only the provider, the model per provider and the sharing switch are stored.
+- Tests with stand-in CLIs (unit and end-to-end) and one opt-in test against the real Claude Code CLI.
+
+Verified for Claude Code on stand-ins (unit tests; end-to-end in dev mode and against the bundled app, before the process-group change) and by an opt-in test against the real CLI. Through the UI the chat ran with a PostgreSQL context only.
+
+Remaining:
+
+| Item | Notes |
+|---|---|
+| Codex verified against the real CLI | No successful turn has been seen; the service refused every model tried. Until then Codex support rests on the documented stream format |
+| Codex's shell tool | Codex keeps its own shell tool inside a read-only sandbox; no documented option was found to remove it. Decide: accept and say so in the panel, or find a way to run it without |
+| Version gating | Nothing checks the CLI version; a changed option or stream format surfaces as a failed turn. Minimum versions are not established |
+| Chat: verification gaps | The real CLIs through the UI; the 10-minute timeout; the cut after 40 tables and 80 columns; a MySQL context and a query tab's context; the sharing switch, "Context sent", "New chat", "Copy", the composer's keys and IME; the agent store ([TESTING.md](TESTING.md) gaps) |
+| Chat: known defects and rough edges | Stop is ignored while the context is still being read, before the CLI has started; the first `error` line from Codex ends the turn as failed, whether or not Codex would have recovered; a query tab opened from an answer carries no schema, so unqualified names from a non-`public` PostgreSQL schema do not resolve; the active query's text is sent unmasked; the first 40 tables are taken in catalogue order, not by relevance, and foreign keys are not part of the context; switching the provider resends the conversation to the other provider |
+| Conversation history | The conversation is lost when the app closes; one conversation at a time; no export |
+| PuriCat MCP server with read-only tools | Not started. List schemas, describe a table, a row-limited single `SELECT` in a read-only transaction. Open questions: per-invocation MCP configuration for Codex, the Claude permission mode that allows only these tools, transport and library ([ADR 0008](docs/adr/0008-ai-cli-integration.md)) |
+| Proposal and approval queue; audit log | Not started. Until then the user is the only path from an answer to a database |
+| Context redaction | Not started: columns marked sensitive, sample rows on request, pinning, a scope the user can narrow |
+| Translating backend messages | The chat's own error messages are English only |
 
 ## Phase 6 — Backups: not started
 

@@ -63,6 +63,8 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Choose another database for a query tab | Implemented: the selector makes the next run open a new connection on that database (no automated test); `USE` inside a script is verified (live test) | Not available: a tab stays on the database it was opened on. Planned (Phase 4) | Planned (Phase 4) |
 | Export a result to CSV, JSON, XLSX | Implemented & verified (unit tests; CSV in the live test; all three in E2E) | Implemented & verified (unit tests; CSV in the live test); not through the UI | Planned (Phase 4) |
 | Object editing with DDL preview, import from CSV / XLSX, SQL dump export, EXPLAIN view | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
+| Schema context for the agent chat (engine and version, database, tables and views with column names, types, key / NOT NULL / generated flags, row estimates; no rows) | Implemented, not yet verified on this engine (the same code reads the catalogue as for the structure view; no test builds a MySQL context) | Implemented & verified (unit test of the text; E2E: the context inspector and the prompt handed to the stand-in CLI, for a table tab in a non-`public` schema) | Planned |
+| Database tools for the AI (read-only query tool, write proposals) | Planned (Phase 5) | Planned (Phase 5) | Planned (Phase 5) |
 | Backup and restore | Planned (Phase 6) | Planned (Phase 6) | Planned (Phase 6) |
 
 ## Capability flags
@@ -133,7 +135,7 @@ The tables above describe the browse path, where PuriCat writes the `SELECT`. In
 | Other types | Whatever the server's text output is | No |
 
 - Nothing is cut on the server. The backend keeps full values; the grid shows the first 1,000 characters of a long cell and flags it; an export has the whole value (verified with a 1,500-character Thai value).
-- A column's kind (number, text, temporal, binary, JSON, bool) is derived from the driver's type name. It decides alignment in the grid, which values are shown as hex, and which XLSX cells may become numbers.
+- A column's kind (number, text, temporal, binary, JSON, bool) is derived from the driver's type name. It decides alignment in the grid, which values are shown as hex, and which XLSX cells may become numbers. The name is matched by substring; `INTERVAL` is temporal and `POINT` is text although both contain "int" (unit-tested). Other type names that happen to contain a matched word are not checked one by one.
 - A query that returns no rows still shows its column names (verified on both engines).
 
 ## Writing values
@@ -250,9 +252,9 @@ SQL console limitations:
 | The classification reads keywords | A function called from a `SELECT` can write and is still a `read`: not confirmed, not guarded, cancelled at the row cap. A `WITH` that mentions a word such as `replace` is treated as row-changing. Vendor statements the table does not know are `other` |
 | Unguarded statements | DDL, `CALL`, `DO` and every `other` statement run without the impact guard. MySQL DDL cannot be rolled back |
 | What the guard counts | The server's affected-row count of the statement. Rows changed by triggers or foreign-key cascades are not included. `EXPLAIN ANALYZE UPDATE` and a data-modifying `WITH` that ends in a `SELECT` report a count that is not the number of changed rows. Not tested |
-| Transaction tracking is textual | A transaction opened inside a stored procedure or with `XA` is not seen. On MySQL a deadlock rollback, and an implicit commit caused by a statement that is not DDL, are not noticed; a successful DDL statement always counts as a commit, including `CREATE TEMPORARY TABLE`, which does not commit |
+| Transaction tracking is textual | A transaction opened inside a stored procedure or with `XA` is not seen. On MySQL a deadlock rollback, and an implicit commit caused by a statement that is not DDL, are not noticed; a successful DDL statement counts as a commit unless it contains the keyword `TEMPORARY` (`CREATE` / `DROP TEMPORARY TABLE` do not commit). The exception is a keyword test, so DDL on an unquoted object or column named `temporary` is misread as not committing; it has a unit test for the keyword only and no test against a server |
 | 100,000 rows per result, in memory | No streaming and no "load more": a capped result has to be run again with a higher cap. Memory use and grid responsiveness at the cap have not been measured |
-| Export | Only the results of the tab's last run, and only fetched rows (a capped result exports capped). In JSON, columns with the same name collapse into one key. XLSX numbers: a value such as `007` in a numeric column becomes the number 7 |
+| Export | Only the results of the tab's last run, and only fetched rows (a capped result exports capped). In JSON, columns with the same name are kept under the keys `name`, `name_2`, `name_3`, … in column order (unit-tested for the keys). XLSX numbers: a value such as `007` in a numeric column becomes the number 7 |
 | PostgreSQL tabs cannot change database | Planned (Phase 4) |
 | MySQL `USE` and the selector | A `USE` in a script moves the session; the tab's database selector keeps showing its own choice |
 | One server connection per query tab | Each tab that has run something holds a connection until it is closed, beyond the pool limits (4 on MySQL, 3 per database on PostgreSQL). There is no cap other than the server's |

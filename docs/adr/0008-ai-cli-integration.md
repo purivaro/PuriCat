@@ -2,7 +2,15 @@
 
 ## Status
 
-Proposed (Phase 5). Only CLI **detection** is implemented. Nothing in the current build sends a prompt.
+Partly implemented (2026-11-16). The first slice of Phase 5 built the subprocess transport of this record as an agent chat **without tools** ([ADR 0016](0016-agent-chat-without-tools.md)). The rest — the MCP server, the read-only tools, the proposal and approval queue — is still Proposed and not built.
+
+| Part of the decision | State |
+|---|---|
+| 1. Transport: the CLI as a subprocess in non-interactive streaming mode, fixed argument vector, no shell, prompt on stdin, kill on cancel or timeout | Built for both CLIs. For Codex only the start and failure of a turn were seen from the real CLI; its successful path is implemented from the documented format and unverified |
+| 2. Tools: a PuriCat MCP server with read-only tools | Not built. The model is given no tools at all |
+| 3. Writes: proposals and an approval queue | Not built. The user opens SQL from an answer in a query tab and runs it there |
+| 4. Confinement: restricted built-in tools and sandbox, empty scratch directory | Built, in a stricter form than proposed: Claude runs with `--tools ""` and `--strict-mcp-config` (no tools, no MCP servers) instead of an allow-list; Codex with `--sandbox read-only`, though it keeps its own shell tool inside that sandbox. Both start in an empty directory owned by PuriCat |
+| 5. Data handling: no secrets in prompts, arguments or environment; content treated as untrusted | Built for what exists: the context holds names and types only, the prompt is on stdin, PuriCat adds nothing to the arguments or the environment (the CLI inherits PuriCat's own environment), answers are rendered as text |
 
 ## Context
 
@@ -27,18 +35,31 @@ The brief requires the agent to run through locally installed, already authentic
 
 ## Consequences
 
-- PuriCat depends on CLI flags and stream formats it does not control; versions must be detected and unsupported ones refused with an explanation.
+- PuriCat depends on CLI flags and stream formats it does not control; versions must be detected and unsupported ones refused with an explanation. (Not built in the first slice: an incompatible CLI fails the turn with its own message.)
 - The MCP server is a new local attack surface: it must only be reachable by the spawned CLI (stdio transport preferred).
 - A server-side read-only transaction is a guard rail, not a privilege boundary; the read-only tool must also reject anything that is not a single `SELECT`, and a read-only database role remains the strong control ([SECURITY.md](../../SECURITY.md)).
 
 ## Open questions (verify against official documentation at implementation time)
 
-- Exact event schemas of `claude --output-format stream-json` and `codex exec --json`.
-- How Codex is given a per-invocation MCP configuration (`-c key=value`, `codex mcp`, or another mechanism).
-- Which Claude permission mode permits MCP tools while denying everything else, non-interactively.
+Answered by the first slice (2026-11-16):
 
-The flags named here were confirmed by `--help` only (Claude Code 2.1.303, codex-cli 0.133.0); their behaviour was not exercised. See [AI_INTEGRATION.md](../../AI_INTEGRATION.md).
+| Question | Answer | Evidence |
+|---|---|---|
+| Exact event schema of `claude --output-format stream-json` | With `--verbose --include-partial-messages`: `system` / `init` (carries `model`), `stream_event` → `content_block_delta` → `text_delta`, `assistant` (the complete message; one carrying `error` describes a failure), `result` (`is_error`, `result`) | Lines captured from Claude Code 2.1.303, kept as unit-test fixtures in `crates/core/src/agent.rs`; the opt-in test `real_claude_cli_answers` against the real CLI passed on 2026-11-16 |
+| Exact event schema of `codex exec --json` | **Partly.** `thread.started`, `turn.started`, `error` and `turn.failed` were captured. The success lines (`item.completed` with an `agent_message` item, `turn.completed`) are taken from the CLI's documented format and were not observed | Lines captured from codex-cli 0.133.0 for a refused model. No successful turn could be produced: the service refused every model tried ("The '<model>' model is not supported when using Codex with a ChatGPT account") |
+
+Two further things were learned that the record did not ask: both CLIs can be told to keep no session (`--no-session-persistence`, `--ephemeral`), which is why PuriCat resends the conversation itself; and a model the account cannot use is reported inside the stream, in a sentence that can be shown to the user as it is.
+
+Still open:
+
+- A successful Codex turn observed from the real CLI.
+- How Codex is given a per-invocation MCP configuration (`-c key=value`, `codex mcp`, or another mechanism).
+- Which Claude permission mode permits MCP tools while denying everything else, non-interactively. The chat avoids the question by allowing no tools.
+- Whether Codex can be run without its own shell tool.
+- Version detection: which CLI versions accept these options and emit these streams. Nothing checks today.
+
+Of the flags named in this record, those the chat passes were exercised: the Claude vector by the opt-in test against the real CLI, both vectors by stand-in CLIs in unit and end-to-end tests (which prove what PuriCat passes, not what the real CLIs do with it). The remaining flags (`--allowedTools`, `--mcp-config`, permission modes) are still confirmed by `--help` only (Claude Code 2.1.303, codex-cli 0.133.0). See [AI_INTEGRATION.md](../../AI_INTEGRATION.md).
 
 ## Licensing
 
-The CLIs are separate programs installed and licensed by the user; PuriCat does not bundle or redistribute them. Their terms of use apply to the user's account. No MCP library has been chosen.
+The CLIs are separate programs installed and licensed by the user; PuriCat does not bundle or redistribute them. Their terms of use apply to the user's account, including to what the chat sends. No MCP library has been chosen.

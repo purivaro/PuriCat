@@ -19,22 +19,23 @@ Describes the code as it exists on 2026-11-16. Planned pieces are marked as such
 |                                       |  model    store    secrets  |  |
 |                                       |  db (adapters, write, smart,|  |
 |                                       |     console, script, export)|  |
-|                                       |  ai_detect                  |  |
+|                                       |  ai_detect    agent         |  |
 |                                       +--+-------+-------+-------+--+  |
 +------------------------------------------|-------|-------|-------|-----+
                                            |       |       |       |
                                   puricat.db   OS credential   MySQL /      claude / codex
-                                  (SQLite,     store           PostgreSQL   (version and auth
-                                  app data)    (Keychain)      servers      status only)
+                                  (SQLite,     store           PostgreSQL   (status commands;
+                                  app data)    (Keychain)      servers      one process per
+                                                                            chat turn)
 ```
 
-The backend also writes export files (CSV, JSON, XLSX) to paths the user picks in the native Save dialog.
+The backend also writes export files (CSV, JSON, XLSX) to paths the user picks in the native Save dialog. The `claude` and `codex` processes are the only part that talks to an AI provider; they are given text on stdin and no database access ([ADR 0016](docs/adr/0016-agent-chat-without-tools.md)).
 
 | Component | Responsibility | Must not |
 |---|---|---|
-| `src/` (React) | Rendering, interaction, view state, staged edits, Smart Paste set-up (mapping, mode, key), the SQL editor and the confirmation before a risky script | Hold stored passwords, build SQL (text typed in a query tab is passed to the backend unchanged; it is split, classified and run there), touch files or processes |
-| `src-tauri` (`puricat`) | IPC commands, open sessions, one console per query tab, cancel flags of running jobs, choice of secret store, clipboard and dialog plugin registration, debug-only test hooks | Contain database or storage logic |
-| `crates/core` (`puricat-core`) | Profiles, settings store and SQL history, secrets, adapters, the SQL console, export writers, CLI discovery | Depend on Tauri |
+| `src/` (React) | Rendering, interaction, view state, staged edits, Smart Paste set-up (mapping, mode, key), the SQL editor and the confirmation before a risky script, the agent chat (the conversation, which context to ask for, rendering answers) | Hold stored passwords, build SQL (text typed in a query tab is passed to the backend unchanged; it is split, classified and run there), touch files or processes, run SQL from an AI answer (it can only be placed in a query tab's editor) |
+| `src-tauri` (`puricat`) | IPC commands, open sessions, one console per query tab, cancel flags of running jobs (Smart Paste runs and agent turns), the location of the AI CLIs' scratch directory, choice of secret store, clipboard and dialog plugin registration, debug-only test hooks | Contain database or storage logic |
+| `crates/core` (`puricat-core`) | Profiles, settings store and SQL history, secrets, adapters, the SQL console, export writers, CLI discovery, the agent chat runner (prompt, context text, CLI process, stream parsing) | Depend on Tauri |
 
 `puricat-core` has no Tauri dependency so it can be unit-tested without a window and reused by the planned backup helper and MCP bridge binaries ([ADR 0002](docs/adr/0002-core-crate-and-thin-ipc.md)).
 
@@ -48,10 +49,11 @@ The backend also writes export files (CSV, JSON, XLSX) to paths the user picks i
 | `db` | `Session` enum (`MySql`, `Postgres`), `Capabilities`, shared paging/truncation logic, `ident` quoting, one module of SQL per engine |
 | `db::write` | Turns a change set (updates, inserts, deletes) into parameterised statements and enforces the write rules; the engine modules execute the plan in one transaction ([ADR 0013](docs/adr/0013-staged-edits-and-optimistic-saves.md)) |
 | `db::smart` | Smart Paste ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)). `Draft` holds the pure logic: validation of the set-up against the table metadata and its unique keys, duplicate detection, the lookup queries to run, classification of every pasted row and the resulting change set. It performs no I/O; `Session` supplies the catalogue data, runs the lookups it asks for and feeds the results back |
-| `db::script` | Reads SQL text without parsing it: a dialect-aware scanner (strings, comments, MySQL backticks, PostgreSQL dollar quotes) that splits a script into statements, classifies each as `read` / `dml` / `ddl` / `transaction` / `other` with an optional "danger" reason, says whether a transaction-control statement leaves a transaction open, and masks password literals for the history. Pure functions, no I/O |
+| `db::script` | Reads SQL text without parsing it: a dialect-aware scanner (strings, comments, MySQL backticks, PostgreSQL dollar quotes) that splits a script into statements, classifies each as `read` / `dml` / `ddl` / `transaction` / `other` with an optional "danger" reason, says whether a transaction-control statement leaves a transaction open, says whether a statement mentions a keyword outside strings and comments (`mentions`, used for `TEMPORARY`), and masks password literals in single or double quotes for the history. Pure functions, no I/O |
 | `db::console` | The SQL console ([ADR 0015](docs/adr/0015-sql-console.md)). `Console` owns one connection detached from the session's pool and runs a script statement by statement over the simple/text protocol: impact guard, row cap, stop flag, tracking of the user's transaction and of MySQL autocommit, detection of a lost connection. It keeps the full rows of the last run for export. `Canceller` interrupts the console's statement from another pooled connection |
-| `db::export` | Writes one stored result to a file as CSV, JSON or XLSX (`rust_xlsxwriter`) |
-| `ai_detect` | Locates `claude` / `codex` and reads their version and sign-in state |
+| `db::export` | Writes one stored result to a file as CSV, JSON or XLSX (`rust_xlsxwriter`). In JSON, columns that share a name get the keys `name`, `name_2`, `name_3`, … |
+| `ai_detect` | Locates `claude` / `codex` and reads their version and sign-in state. `locate`, `path_with` and `Provider::binary` are shared with `agent` |
+| `agent` | The agent chat ([ADR 0016](docs/adr/0016-agent-chat-without-tools.md)). Pure parts: the fixed instructions, `validate_model`, `render_context` (schema text from catalogue metadata), `render_prompt` (instructions for Codex, context block, trimmed conversation), `arguments` (the fixed vector per provider) and `StreamParser` (the CLIs' JSON lines to `Started` / `Delta` / `Message` events and an outcome). I/O: `models` (runs `codex debug models`), `chat` / `chat_with` (one CLI process per turn, in a process group of its own on Unix: prompt on stdin, events from stdout until the first verdict, stop flag, 10-minute timeout, the whole group killed on Stop or timeout). It holds no database session and no state between turns |
 | `error` | `Error` serialised to the UI as `{ kind, message }` |
 
 ## Local data
@@ -59,11 +61,14 @@ The backend also writes export files (CSV, JSON, XLSX) to paths the user picks i
 | Data | Location | Notes |
 |---|---|---|
 | Profiles, UI settings, open tabs | `puricat.db` in the OS app-data directory for identifier `app.puricat.desktop` (macOS: `$HOME/Library/Application Support/app.puricat.desktop/`) | File mode 0600 on Unix. The identifier is a placeholder; changing it later orphans this data |
-| Text of open query tabs | `puricat.db`, table `settings`, key `sql:<tab id>` | Written 600 ms after the last keystroke; set to an empty value when the tab closes |
-| SQL history | `puricat.db`, table `query_history` | The script text of each run with password literals masked, the connection id, database, status, a summary and the duration. The newest 1,000 rows over all connections are kept. Clear text otherwise ([SECURITY.md](SECURITY.md)) |
+| Text of open query tabs | `puricat.db`, table `settings`, key `sql:<tab id>` | Written 600 ms after the last keystroke (a write still pending when the tab closes is dropped); written at once for a tab opened with SQL from the agent chat; set to an empty value when the tab closes |
+| SQL history | `puricat.db`, table `query_history` | The script text of each run with password literals masked, the connection id, database, status, a summary and the duration. The newest 1,000 rows over all connections are kept; a connection's rows are deleted with the connection. Clear text otherwise ([SECURITY.md](SECURITY.md)) |
 | Query results | Backend memory, per query tab | The full rows of the tab's last run, replaced by the next run and dropped with the tab's console. Never written to disk except by an export |
 | Exported files | Wherever the user saves them | Written by the backend; PuriCat keeps no record of them |
 | Passwords | OS credential store | Never written to `puricat.db` |
+| Agent chat preferences | `puricat.db`, table `settings`, key `agent` | Provider, model per provider, the "Share context" switch |
+| Agent conversation | Web view memory (`stores/agent.ts`) | The turns, and with each sent message the exact context that went with it. Gone with "New chat" or when the app closes; never written to disk by PuriCat |
+| AI CLI scratch directory | `agent-scratch` in the app-data directory | The working directory of every chat turn. Created by the first turn; PuriCat writes nothing into it and tests assert that it stays empty |
 | Theme hint | Web view `localStorage` key `puricat.theme` | Avoids a flash of the wrong theme before settings load |
 
 ## IPC surface
@@ -75,7 +80,7 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `list_connections` | — | Profiles, each with `hasPassword` |
 | `save_connection` | `profile`, `password` (`keep` / `set` / `clear`) | Saved profile, `sessionClosed` |
 | `duplicate_connection` | `id`, `name` | New profile (password copied inside the credential store) |
-| `delete_connection` | `id` | — (closes the session, deletes the password) |
+| `delete_connection` | `id` | — (closes the session, deletes the password and the connection's query history) |
 | `test_connection` | `profile`, `password` | `ServerInfo`; nothing is saved |
 | `open_connection` | `id` | `ServerInfo`; session kept in `AppState` |
 | `close_connection` | `id` | — |
@@ -89,7 +94,7 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `unique_keys` | `id`, `table` | The keys a pasted row can be matched on: the primary key first, then plain unique indexes, each with its columns in key order |
 | `analyze_paste` | `id`, `table`, `request` (`mode`, `columns`, `key`, `update`, `rows`) | Smart Paste preview: one report per pasted row (`status`, `message`, `changed` columns), counts (`insert`, `update`, `unchanged`, `unmatched`, `problems`), a `fingerprint` of every row's status and changed columns, set-up problems, elapsed time. Reads only |
 | `apply_paste` | `id`, `table`, `request`, `expected` (the preview's fingerprint), `job` (an id chosen by the UI), `onProgress` (channel) | Counts of updated / inserted rows and elapsed time. Analyses again, refuses with `conflict` unless the fresh analysis produces the fingerprint in `expected`, then runs one transaction. Sends the number of statements done over the channel every 20 statements. Refused up front when the saved profile is read-only |
-| `cancel_job` | `job` | — (sets the job's cancel flag; the run rolls back before its next statement. Unknown ids are ignored) |
+| `cancel_job` | `job` | — (sets the job's cancel flag. A Smart Paste run rolls back before its next statement; an agent turn's CLI process is killed. Unknown ids are ignored) |
 | `analyze_sql` | `id`, `sql` | The script split into statements, each with `text`, `start` (byte offset), `kind` and `danger` (a reason, or null). Nothing is sent to the server |
 | `run_sql` | `id`, `tab`, `database?`, `sql`, `options` (`maxRows` 1–100,000, `changeLimit?`) | `RunOutcome`: one entry per statement that ran (`sql`, `kind`, `status` `ok` / `error` / `blocked` / `cancelled`, `results`, `rowsAffected`, `message`, `elapsedMs`), `skipped`, `resume` (the blocked statement and the rest of the script), `inTransaction`, `connectionLost`, `elapsedMs`. Opens the tab's console on first use, or again when the connection or database differs. Each result carries `id`, `columns`, `rows` with long cells cut, `truncated` and `capped`. Records the run in the history |
 | `cancel_sql` | `tab` | — (sets the tab's stop flag and interrupts its running statement from another pooled connection. Unknown tabs are ignored) |
@@ -100,11 +105,14 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `get_settings` | — | All key/value settings |
 | `set_setting` | `key`, `value` | — |
 | `detect_ai_clis` | — | Install and sign-in status per provider |
+| `agent_models` | `provider` (`claude` / `codex`) | The models offered in the chat's selector: `id`, `label`, `description`. A fixed list of aliases for Claude Code; the output of `codex debug models` for Codex (empty when it cannot be read) |
+| `agent_context` | `id`, `database`, `schema?`, `sql?` | The context text for a chat: engine and version, database, schema, the first 40 tables and views with their columns, the rest by name, and `sql` if given. Reads the catalogue of the open session; sends nothing anywhere |
+| `agent_send` | `job` (an id chosen by the UI), `request` (`provider`, `model?`, `context?`, `messages`), `onEvent` (channel) | The complete answer. Starts the CLI for one turn, streams `started` / `delta` / `message` events over the channel, and fails with the CLI's own message (`unsupported`), with `conflict` "Stopped" after `cancel_job`, with `invalid` for a bad model name or an empty message, or with `not_found` when the CLI is not installed. Uses no database session |
 | `e2e_report` | `text` | Debug builds with `PURICAT_E2E_REPORT` set: writes the report file. Otherwise returns an `unsupported` error |
 
-That is 29 commands. No command returns a stored password. A saved session is closed when the password or any connection-affecting field changes; cosmetic fields (name, environment, favorite, tags, review threshold) leave it open. Closing a session also drops the consoles of its query tabs, interrupting whatever they are running.
+That is 32 commands. No command returns a stored password. A saved session is closed when the password or any connection-affecting field changes; cosmetic fields (name, environment, favorite, tags, review threshold) leave it open. Closing a session also drops the consoles of its query tabs, interrupting whatever they are running.
 
-Besides these commands the web view may call two commands of the official `tauri-plugin-clipboard-manager`, `read_text` and `write_text`, for copy and paste in the grid and for reading the block in Smart Paste (`src/lib/clipboard.ts`), and one command of the official `tauri-plugin-dialog`, `save`, which shows the native Save dialog and returns the chosen path for an export. The browser clipboard API is not used, so no permission prompt appears.
+Besides these commands the web view may call two commands of the official `tauri-plugin-clipboard-manager`, `read_text` and `write_text`, for copy and paste in the grid, for reading the block in Smart Paste and for "Copy" on a code block of an AI answer (`src/lib/clipboard.ts`), and one command of the official `tauri-plugin-dialog`, `save`, which shows the native Save dialog and returns the chosen path for an export. The browser clipboard API is not used, so no permission prompt appears.
 
 ## Data flow: open a table
 
@@ -145,16 +153,32 @@ The rules and their limits are in [SECURITY.md](SECURITY.md) and [DATABASE_COMPA
 
 Decisions and limits: [ADR 0015](docs/adr/0015-sql-console.md).
 
-1. "New query" (explorer context menu on a connection or a database, the command palette, ⌘T) calls `useWorkspace.openSql`, which adds a tab of kind `sql` with an id `sql:<uuid>`, the connection id, a database (or none, for the connection's default) and a title "Query n". The tab view (`src/features/sql/SqlTab.tsx`) and Monaco are separate chunks that load now; the saved text of the tab is read from the settings store.
+1. "New query" (explorer context menu on a connection or a database, the command palette, ⌘T) calls `useWorkspace.openSql`, which adds a tab of kind `sql` with an id `sql:<uuid>`, the connection id, a database (or none, for the connection's default) and a title "Query n". The tab view (`src/features/sql/SqlTab.tsx`) and Monaco are separate chunks that load now; the saved text of the tab is read from the settings store. A tab opened from the agent chat ("Open in query tab") starts instead with the SQL it was opened with, and runs nothing.
 2. ⌘↵ or Run takes the selection, or the whole text when nothing is selected, and calls `analyze_sql`. `script::split` scans the text with the engine's lexical rules and returns the statements with their kind and danger reason. If any statement has a danger reason — or, on a Production-labelled connection, is not a `read` — the tab lists those statements and waits for the user's confirmation.
 3. `run_sql` receives the text, the tab id, the tab's database and the options: `maxRows` from the tab's "Rows per result" selector and `changeLimit` from the connection's `bulkReviewRows`. The command finds the tab's console in `AppState.consoles` or opens one: `Session::open_console` acquires a connection from the session's pool (so strict mode and the read-only statement have run on it), issues `USE` for the chosen database on MySQL or takes the pool of the tab's database on PostgreSQL, detaches the connection from the pool, and notes the server's connection id or backend pid for cancelling.
 4. `Console::run` splits the script again and runs the statements in order. For each one it decides: *guarded* (a `dml` statement while no transaction of the user's is open and, on MySQL, autocommit is on) and *cancel at the cap* (a `read`, and not inside a user's transaction on PostgreSQL).
 5. A guarded statement is wrapped in `START TRANSACTION` / `BEGIN` … `COMMIT`. The statement goes out with `sqlx::raw_sql(...).fetch_many`; rows arrive as text and are decoded per engine (binary as `0x…`, MySQL `BIT` as a number). Rows beyond `maxRows` are not kept; at that point a cancellable statement is interrupted through the `Canceller`, any other is read to its end.
 6. After the statement: an error, a stop request or — for a guarded statement — more affected rows than `changeLimit` turns the `COMMIT` into a `ROLLBACK`, and the statement is reported as `error`, `cancelled` or `blocked`. A `blocked` statement sets `resume` to the text from that statement to the end of the script. Any status other than `ok` ends the run; the statements not reached are counted in `skipped`.
-7. The console then updates what it knows about the session. After a successful statement: `transaction_effect` for a transaction-control statement, and an implicit commit after MySQL DDL. After any `other` statement on MySQL the remembered `@@autocommit` is forgotten and asked again when next needed. A successful `read` that returned no rows is described to get its column names. Each result set is stored in full in the console and returned as a preview with cells cut to 1,000 characters.
+7. The console then updates what it knows about the session. After a successful statement: `transaction_effect` for a transaction-control statement, and an implicit commit after MySQL DDL, except a statement that mentions `TEMPORARY` (`CREATE` / `DROP TEMPORARY TABLE` do not commit). After any `other` statement on MySQL the remembered `@@autocommit` is forgotten and asked again when next needed. A successful `read` that returned no rows is described to get its column names. Each result set is stored in full in the console and returned as a preview with cells cut to 1,000 characters.
 8. The command records the run in `query_history` (text masked by `script::redact`) and, if the connection was lost, removes the console so the next run opens a new one.
 9. The tab shows one result tab per result set in the shared grid (read-only, not sortable) and a Messages list. `inTransaction` sets the tab's dirty flag, which drives the same guards as staged edits. For a `blocked` statement, "Run it without the limit" calls `run_sql` with `resume` and no `changeLimit`.
-10. Stop calls `cancel_sql`: the stop flag is set and the `Canceller` sends `KILL QUERY` or `pg_cancel_backend` on a pooled connection. Export asks the Save dialog for a path and calls `export_result`, which writes the stored result with `db::export`. Closing the tab calls `close_console` and clears the saved text.
+10. Stop calls `cancel_sql`: the stop flag is set and the `Canceller` sends `KILL QUERY` or `pg_cancel_backend` on a pooled connection; if the command fails, the tab shows the error. Export, which is disabled while a run is in flight, asks the Save dialog for a path and calls `export_result`, which writes the stored result with `db::export`. Closing the tab calls `close_console`, clears the saved text and drops a save that was still pending.
+
+## Data flow: one agent chat turn
+
+Decisions and limits: [ADR 0016](docs/adr/0016-agent-chat-without-tools.md) and [AI_INTEGRATION.md](AI_INTEGRATION.md). The model gets no tools and no database access; this flow only moves text.
+
+1. The AI panel (`components/layout/AiPanel.tsx`) calls `detect_ai_clis` when it appears and loads the chat preferences from setting `agent`. It shows the chat (`features/agent/AgentChat.tsx`) for the selected provider only when that CLI is installed and not known to be signed out. The model selector calls `agent_models`.
+2. The chat derives its scope from the tab in front: the connection, database and schema of a table tab, or the connection and database of a query tab together with that tab's id. With no table or query tab, a closed connection or no database there is no scope.
+3. Send (Enter or the button) calls `useAgent.send`. The store appends the user's turn and marks a turn as starting, so a second Enter cannot start another. If "Share context" is on and there is a scope, it calls `agent_context` with the scope and, for a query tab, the editor's current text — read through `sqlEditors`, a map from tab id to a getter that every mounted query tab registers.
+4. `agent_context` takes the open `Session`, reads `server_info`, `list_objects`, and `describe_table` for the first 40 objects one after another, and returns `agent::render_context(...)`: names and types only. The store records that text on the user's turn; it is what "Context sent" shows. If the call fails, the message is sent without context.
+5. The store appends an empty assistant turn and calls `agent_send` with a new job id and the request: the provider, the model chosen for that provider (or none), the context text, and the transcript — every earlier turn except answers that ended in an error.
+6. The command registers a cancel flag under the job id in `AppState.jobs` and calls `agent::chat`, which locates the binary (`ai_detect::locate`), validates the model name, builds the prompt (`render_prompt`: for Codex the fixed instructions, then the context block, then the most recent turns up to 60,000 characters) and creates the scratch directory if it does not exist.
+7. The CLI is spawned with the fixed vector from `arguments(...)`, the scratch directory as its working directory, all three standard streams piped and, on Unix, a process group of its own. Two tasks run beside the turn: one writes the prompt to stdin and closes it, one keeps the tail of stderr. The turn itself reads stdout line by line, each line going through `StreamParser::line`; before every read, and at least every 150 ms, it looks at the stop flag and at the 10-minute deadline.
+8. The parser's events go over the channel as they come: `started` (with the model the CLI names), `delta` (text to append) and `message` (the whole answer so far, replacing what was streamed). The store patches the assistant turn, and the chat renders its text through `parseMarkdown` into React elements on every change.
+9. The turn ends in one of four ways. With the parser's verdict, as soon as a line carries one: success returns the complete answer, failure returns the CLI's own message. With the CLI closing its output without a verdict: exit status 0 with some text is a success, anything else fails with the last line of stderr. In both cases the CLI gets 5 seconds to exit by itself before it is killed. On Stop: `cancel_job` sets the flag, the reader sees it, the CLI's process group is killed and the command returns a `conflict` error "Stopped". On timeout: the same kill, and the error names the limit. The command then removes the job's flag.
+10. The store marks the assistant turn `done`, `stopped` (keeping the text that had arrived) or `error` (keeping the message). "Try again" drops that turn and repeats steps 5–10 with the context recorded in step 4.
+11. "Open in query tab" on a SQL block calls `useWorkspace.openSql(connectionId, database, text)` with the scope recorded on the question. The store keeps the text as the new tab's seed and saves it under the tab's settings key; the tab view starts its editor with it. Nothing is sent to the database. Running it is the flow of the previous section, with its confirmation, impact guard and row cap.
 
 ## Sessions and pools
 
@@ -174,9 +198,10 @@ Session settings: every MySQL connection adds `STRICT_ALL_TABLES` to its session
 | Store (`src/stores`) | Holds | Persisted |
 |---|---|---|
 | `connections` | Profiles, session state per connection, lazily loaded explorer levels, expanded nodes | Profiles only, in the backend store |
-| `workspace` | Tabs (welcome, table, query) and the active tab; `dirty` (table tabs with unsaved edits, query tabs with an open transaction) and `closing` (a dirty tab waiting for the user's confirmation) | Tabs and active tab only, in setting `workspace` |
+| `workspace` | Tabs (welcome, table, query) and the active tab; `dirty` (table tabs with unsaved edits, query tabs with an open transaction) and `closing` (a dirty tab waiting for the user's confirmation). Beside the store, two module-level maps: the text a query tab was opened with (`sqlSeed`, until the tab closes) and a getter for each mounted query tab's editor text (`sqlEditors`, read for the agent's context) | Tabs and active tab only, in setting `workspace` |
 | `settings` | Theme, language, panel visibility and widths | Setting `ui` |
 | `ui` | Dialog and palette open state | No |
+| `agent` | Chat preferences (provider, model per provider, "Share context"); the conversation's turns, each user turn with the context sent and the tab scope it was asked about; the job id of the running turn | Preferences only, in setting `agent` |
 
 The Smart Paste dialog keeps its own state (pasted block, mapping, preview) and is created afresh on every opening. Table data and staged edits (`Pending` plus its undo history) are local component state in the tab view and are never persisted; the tab reports only a dirty flag to the `workspace` store. That flag drives the unsaved dot on the tab, the confirmation before closing a dirty tab, bulk closes that keep dirty tabs open, and the refusal to disconnect, delete or re-save a connection that has dirty tabs. A query tab sets the same flag while the last run reported an open transaction, so all of these apply to it too (the dialog then offers "Roll back and close"). The query tab's results, the chosen row cap and the editor height are local component state and are not persisted; its text is (see "Local data"). `src/lib/types.ts` mirrors the serde types in `crates/core` by hand.
 
@@ -190,5 +215,5 @@ The Smart Paste dialog keeps its own state (pasted block, mapping, preview) and 
 | Imports beyond 10,000 rows, CSV / XLSX files | A batching executor next to `db::write`; `db::smart::Draft` can be reused for matching | 4 |
 | Rest of the SQL workspace (saved scripts, statement at cursor, EXPLAIN view, query parameters, larger or streamed results) | The query tab (`src/features/sql`) and `db::console`; streaming needs a result store that does not hold every row in memory | 4 |
 | Object editing with DDL preview, SQL dump export | New tab kinds or dialogs; DDL generation per engine module, run through the console path | 4 |
-| AI agent | Subprocess runner and a PuriCat-owned MCP server built on `puricat-core`; approval queue in the UI | 5 |
+| AI agent with tools | The subprocess runner exists (`agent`, today without tools). Still to attach: a PuriCat-owned MCP server built on `puricat-core` and handed to the CLI for the turn, read-only tools on the existing sessions, an approval queue in the UI, an audit log | 5 |
 | Backups | `puricat-backup` helper binary on `puricat-core`, run by the OS scheduler | 6 |

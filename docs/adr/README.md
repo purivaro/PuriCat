@@ -13,7 +13,7 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 | [0005](0005-local-store-and-secrets.md) | SQLite settings store + OS credential store | Accepted | Yes |
 | [0006](0006-data-grid.md) | Custom grid on TanStack Virtual | Accepted; performance and multi-range validation still open in Phase 3 | Browsing, editing, single-range selection, paste |
 | [0007](0007-sql-editor.md) | Monaco for the SQL editor | Accepted | Yes (query tabs; T-SQL, inline error markers and a diff view are not built) |
-| [0008](0008-ai-cli-integration.md) | AI agents as CLI subprocesses with a PuriCat-owned MCP server | Proposed (Phase 5) | Detection only |
+| [0008](0008-ai-cli-integration.md) | AI agents as CLI subprocesses with a PuriCat-owned MCP server | Partly implemented: the subprocess transport and the confinement are built (see 0016); the MCP server, tools and approval queue remain Proposed (Phase 5) | Detection and a chat without tools. No MCP server, tools or approval queue |
 | [0009](0009-ssh-tunnels.md) | SSH tunnels with russh | Proposed (Phase 2b) | No |
 | [0010](0010-backup-scheduler.md) | Vendor dump tools + per-user LaunchAgent helper | Proposed (Phase 6) | No |
 | [0011](0011-i18n-and-theming.md) | i18next catalogs, CSS-variable tokens, bundled fonts | Accepted | Yes |
@@ -21,5 +21,6 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 | [0013](0013-staged-edits-and-optimistic-saves.md) | Staged grid edits, plan-then-apply saves, optimistic concurrency on text renderings | Accepted | MySQL and PostgreSQL |
 | [0014](0014-smart-paste-match-then-write.md) | Smart Paste: match on a verified unique key in the database, preview, then plain INSERT / UPDATE in one transaction; no native upsert statements | Accepted | MySQL and PostgreSQL |
 | [0015](0015-sql-console.md) | SQL console: a connection per query tab, simple/text protocol, safeguards that measure what a statement did (impact guard, row cap, Stop), backend-written exports, local history | Accepted | MySQL and PostgreSQL |
+| [0016](0016-agent-chat-without-tools.md) | Agent chat first, with the model given no tools and no database access: the user is the only path from an answer to a database | Accepted | Claude Code (verified on stand-ins and against the real CLI) and Codex (successful path not verified against the real CLI) |
 
 To add a record: copy the section layout of an existing one, use the next number, and add a row here. Do not rewrite an accepted record; supersede it with a new one.
