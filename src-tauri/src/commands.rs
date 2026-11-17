@@ -578,7 +578,7 @@ pub async fn pick_table_file(
     state: State<'_, AppState>,
 ) -> Result<Option<PickedFile>> {
     let path = match e2e_pick(&state) {
-        Some(path) => Some(path),
+        Some(answer) => answer,
         None => {
             use tauri_plugin_dialog::DialogExt;
             let (chosen, answer) = tokio::sync::oneshot::channel();
@@ -612,12 +612,13 @@ pub async fn pick_table_file(
 
 /// The end-to-end test cannot click in a native dialog. A debug build started with
 /// `PURICAT_E2E_PICK` (paths separated by `:`) answers each request with the next path
-/// instead of showing one. Release builds contain none of this.
-fn e2e_pick(state: &AppState) -> Option<std::path::PathBuf> {
+/// instead of showing one, and every request after the last path as a cancelled dialog
+/// (`Some(None)`). Release builds contain none of this.
+fn e2e_pick(state: &AppState) -> Option<Option<std::path::PathBuf>> {
     #[cfg(debug_assertions)]
     if let Some(list) = std::env::var_os("PURICAT_E2E_PICK") {
         let n = state.e2e_picks.fetch_add(1, Ordering::Relaxed);
-        return std::env::split_paths(&list).nth(n);
+        return Some(std::env::split_paths(&list).nth(n));
     }
     let _ = state;
     None
