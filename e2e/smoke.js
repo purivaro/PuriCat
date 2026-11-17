@@ -897,11 +897,15 @@
       return !preview || preview.closest("[data-state]")?.dataset.state === "closed";
     }, "context closed");
 
+    const lastAnswer = () => all('aside [data-agent-turn="assistant"]').at(-1);
     const ask = async (text) => {
+      const answers = all('aside [data-agent-turn="assistant"]').length;
       await setValue(aiCard().querySelector("[data-agent-input]"), text);
       await click(aiCard().querySelector('button[aria-label="Send"]'), "send");
+      // The answer's turn appears a moment after Send. Until it does, the "last answer" is
+      // still the one before, already done: what is read next must be this question's.
+      await waitFor(() => all('aside [data-agent-turn="assistant"]').length > answers, "the answer to appear", 20000);
     };
-    const lastAnswer = () => all('aside [data-agent-turn="assistant"]').at(-1);
     const answered = (status, what) => waitFor(() => lastAnswer()?.dataset.status === status, what, 20000);
     const flat = (el) => el.textContent.replace(/\s+/g, " ").trim();
 

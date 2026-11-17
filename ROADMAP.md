@@ -129,6 +129,7 @@ Remaining:
 |---|---|
 | SQL console: verification gaps | PostgreSQL through the UI; Stop and the lost-connection path through the UI; the confirmation on a Production-labelled connection; completion, formatting, the Save dialog, restoring a tab's text after a relaunch; results near 100,000 rows ([TESTING.md](TESTING.md) gaps) |
 | SQL console: hardening | Transaction tracking is textual (procedures, `XA`, a MySQL deadlock and non-DDL implicit commits are not seen; the exception for `CREATE` / `DROP TEMPORARY TABLE` has no test against a server); the confirmation and the impact threshold are applied by the UI, not enforced by the backend; a read-only connection can be switched back by typed SQL; history has no off switch, and its password mask is a heuristic ([SECURITY.md](SECURITY.md), SQL console) |
+| Saved scripts: beyond the first slice | Scripts belong to one connection and live only in the local settings database: no file on disk, no folders, not listed in the explorer or the command palette, not copied when a connection is duplicated |
 | Alias-aware completion | Today: loaded table names, columns of tables named in the text, keywords. Inline error markers are not built either |
 | Streaming, and results or exports beyond 100,000 rows | Results are held in memory, capped at 100,000 rows; a capped result cannot be continued. Sorting and filtering a result are not available |
 | Switching database inside a PostgreSQL tab | A PostgreSQL tab is bound to the database it was opened on |
