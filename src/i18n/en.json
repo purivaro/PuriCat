@@ -282,6 +282,16 @@
       "isNotNull": "is not NULL"
     }
   },
+  "cell": {
+    "view": "View whole value",
+    "truncatedHint": "Shortened for preview — double-click to see the whole value",
+    "apply": "Apply",
+    "length_one": "{{formatted}} character",
+    "length_other": "{{formatted}} characters",
+    "cutNotice": "Only the first {{shown}} characters are shown: the value is longer than PuriCat reads for one cell. It can be read here, not edited.",
+    "noKeyNotice": "This is the shortened preview. The whole value cannot be fetched, because the row cannot be identified by a primary key.",
+    "binaryNotice": "Binary data, shown as hexadecimal. It cannot be edited here."
+  },
   "ai": {
     "title": "AI agent",
     "provider": "Provider",

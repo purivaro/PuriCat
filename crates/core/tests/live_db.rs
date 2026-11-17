@@ -165,6 +165,49 @@ async fn filter_checks(session: &Session, items: &TableRef) {
         .is_err());
 }
 
+/// One cell read in full, by the row's primary key: what a page shows shortened.
+async fn full_cell_checks(session: &Session, items: &TableRef, keyless: &TableRef) {
+    let key = |id: &str| -> Vec<puricat_core::db::write::CellValue> {
+        serde_json::from_value(serde_json::json!([{"column": "id", "value": id}])).unwrap()
+    };
+    // The page cut this text at 1000 characters; here it is whole, multi-byte and all.
+    let note = session.fetch_cell(items, &key("1"), "note").await.unwrap();
+    assert_eq!(note.value.as_deref(), Some("ก".repeat(1500).as_str()));
+    assert!(!note.cut);
+    // Binary: every byte, as hex.
+    let payload = session
+        .fetch_cell(items, &key("1"), "payload")
+        .await
+        .unwrap();
+    assert!(payload
+        .value
+        .unwrap()
+        .eq_ignore_ascii_case(&format!("0x{}", "ab".repeat(30))));
+    // NULL stays NULL; a short value is itself.
+    let null = session.fetch_cell(items, &key("2"), "note").await.unwrap();
+    assert_eq!((null.value, null.cut), (None, false));
+    let short = session.fetch_cell(items, &key("3"), "note").await.unwrap();
+    assert_eq!(short.value.as_deref(), Some("short"));
+
+    // A row that is gone, an unknown column, an incomplete key, a table without a key.
+    assert!(matches!(
+        session.fetch_cell(items, &key("999"), "note").await,
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        session.fetch_cell(items, &key("1"), "nope").await,
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        session.fetch_cell(items, &[], "note").await,
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        session.fetch_cell(keyless, &[], "v").await,
+        Err(Error::Unsupported(_))
+    ));
+}
+
 const THAI: &str = "สวัสดี \"โลก\"\tแท็บ 'quote'";
 
 // ---- MySQL ---------------------------------------------------------------------------
@@ -447,6 +490,7 @@ async fn mysql_body(t: Target, db: String) {
         name: "odd `name".into(),
         ..items.clone()
     };
+    full_cell_checks(&session, &items, &odd).await;
     let p = session.fetch_rows(&odd, &page(0, 10, None)).await.unwrap();
     assert_eq!(cell(&p, 0, "v").as_deref(), Some("7"));
     assert!(p.ordered_by.is_empty(), "keyless table has no stable order");
@@ -699,6 +743,7 @@ async fn postgres_body(t: Target, db: String) {
         name: "Odd \"Name".into(),
         ..items.clone()
     };
+    full_cell_checks(&session, &items, &odd).await;
     let p = session.fetch_rows(&odd, &page(0, 10, None)).await.unwrap();
     assert_eq!(cell(&p, 0, "v").as_deref(), Some("7"));
     assert!(p.ordered_by.is_empty());

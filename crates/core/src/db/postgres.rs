@@ -428,15 +428,8 @@ fn page_sql(table: &TableRef, meta: &TableMeta, filter: &Where, order: &Order) -
     let schema = super::require_schema(table.schema.as_deref())?;
     let mut exprs = Vec::with_capacity(meta.columns.len());
     for c in &meta.columns {
-        let col = ident::postgres(&c.name)?;
-        exprs.push(if c.kind == ValueKind::Binary {
-            format!(
-                "encode(substring({col} from 1 for {}), 'hex')",
-                MAX_BINARY_BYTES + 1
-            )
-        } else {
-            format!("left({col}::text, {})", MAX_CELL_CHARS + 1)
-        });
+        // One unit more than the preview shows, so a cut value can be told from a short one.
+        exprs.push(cell_expr(c, MAX_CELL_CHARS + 1, MAX_BINARY_BYTES + 1)?);
     }
     let mut sql = format!(
         "SELECT {} FROM {}.{}",
@@ -461,6 +454,16 @@ fn page_sql(table: &TableRef, meta: &TableMeta, filter: &Where, order: &Order) -
     let n = filter.params.len();
     sql.push_str(&format!(" LIMIT ${} OFFSET ${}", n + 1, n + 2));
     Ok(sql)
+}
+
+/// One column as the text the grid shows: at most `chars` characters, or `bytes` bytes in hex.
+pub(super) fn cell_expr(c: &ColumnMeta, chars: usize, bytes: usize) -> Result<String> {
+    let col = ident::postgres(&c.name)?;
+    Ok(if c.kind == ValueKind::Binary {
+        format!("encode(substring({col} from 1 for {bytes}), 'hex')")
+    } else {
+        format!("left({col}::text, {chars})")
+    })
 }
 
 fn value_kind(typcategory: &str, typname: &str) -> ValueKind {

@@ -25,6 +25,10 @@ pub const MAX_CELL_CHARS: usize = 1000;
 /// Longest binary prefix (bytes) sent to the grid for one cell, shown as hex.
 pub const MAX_BINARY_BYTES: usize = 24;
 pub const MAX_PAGE_SIZE: u32 = 1000;
+/// Longest text sent for one cell when its whole value is asked for.
+pub const MAX_FULL_CHARS: usize = 1_000_000;
+/// Longest binary prefix (bytes) sent for one cell when its whole value is asked for.
+pub const MAX_FULL_BYTES: usize = 65_536;
 
 /// What an engine can do. The UI asks instead of guessing from the engine name.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +171,16 @@ pub struct RowPage {
     pub elapsed_ms: u64,
 }
 
+/// The whole value of one cell, for the cells a page shows shortened.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CellContent {
+    /// As the server renders it; binary as `0x` and hex. `null` is SQL NULL.
+    pub value: Option<String>,
+    /// Even this was cut: the value is longer than `MAX_FULL_CHARS` / `MAX_FULL_BYTES`.
+    pub cut: bool,
+}
+
 /// An open, pooled connection to one server.
 pub enum Session {
     MySql(mysql::MySqlSession),
@@ -275,6 +289,64 @@ impl Session {
             Session::Postgres(s) => s.select_page(table, &meta, &filter, &order, req).await?,
         };
         Ok(finish_page(meta, raw, order, req, started))
+    }
+
+    /// Read one cell in full: the row addressed by its complete primary key. Read-only.
+    pub async fn fetch_cell(
+        &self,
+        table: &TableRef,
+        key: &[write::CellValue],
+        column: &str,
+    ) -> Result<CellContent> {
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let col = write::column(&meta, column)?;
+        let engine = self.engine();
+        let expr = match self {
+            Session::MySql(_) => mysql::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?,
+            Session::Postgres(_) => {
+                postgres::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?
+            }
+        };
+        let (clause, params) = write::row_clause(engine, &meta, key)?;
+        let sql = format!(
+            "SELECT {expr} FROM {} WHERE {clause}",
+            write::table_name(engine, table)?
+        );
+        let mut rows = self.query_text(&table.database, &sql, &params).await?;
+        if rows.len() != 1 {
+            return Err(Error::Conflict(
+                "This row is no longer there. Refresh the table.".into(),
+            ));
+        }
+        let Some(mut text) = rows.remove(0).into_iter().next().flatten() else {
+            return Ok(CellContent {
+                value: None,
+                cut: false,
+            });
+        };
+        let binary = col.kind == ValueKind::Binary;
+        let limit = if binary {
+            MAX_FULL_BYTES * 2
+        } else {
+            MAX_FULL_CHARS
+        };
+        let cut = match text.char_indices().nth(limit) {
+            Some((at, _)) => {
+                text.truncate(at);
+                true
+            }
+            None => false,
+        };
+        if binary {
+            text.insert_str(0, "0x");
+        }
+        Ok(CellContent {
+            value: Some(text),
+            cut,
+        })
     }
 
     /// The statements a change set would run, without running them.

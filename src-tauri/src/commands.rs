@@ -14,9 +14,10 @@ use puricat_core::db::console::{RunOptions, RunOutcome, Status};
 use puricat_core::db::export::{self, Format};
 use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
-use puricat_core::db::write::{ApplyResult, ChangeSet, Statement};
+use puricat_core::db::write::{ApplyResult, CellValue, ChangeSet, Statement};
 use puricat_core::db::{
-    DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta, TableRef,
+    CellContent, DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta,
+    TableRef,
 };
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
@@ -257,6 +258,22 @@ pub async fn fetch_rows(
     page: PageRequest,
 ) -> Result<RowPage> {
     state.session(&id).await?.fetch_rows(&table, &page).await
+}
+
+/// The whole value of one cell that a page shows shortened; the row by its primary key.
+#[tauri::command]
+pub async fn fetch_cell(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    key: Vec<CellValue>,
+    column: String,
+) -> Result<CellContent> {
+    state
+        .session(&id)
+        .await?
+        .fetch_cell(&table, &key, &column)
+        .await
 }
 
 /// The exact statements a save would run, for the review step.

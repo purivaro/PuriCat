@@ -33,7 +33,8 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Browse rows of a view | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Filter rows by conditions on columns (see "Row filter") | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Composite primary keys, names needing quotes | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
-| Keyset pagination, exact row count, cell inspector | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
+| One cell read whole, by the row's primary key (a value the page shows shortened) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
+| Keyset pagination, exact row count | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Cancellation of browse and catalogue queries; reconnect of the pooled session | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Edit rows of a table with a primary key (UPDATE by complete key) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
 | Insert rows (omitted columns take server defaults) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
@@ -118,7 +119,7 @@ Notes for both engines:
 
 - NULL is transported separately from text, so NULL and the empty string are distinct in the grid.
 - Temporal values are shown in the session's time zone and format. MySQL sessions keep the server's time zone (verified). PostgreSQL sessions always run in UTC, whatever the server or role default is (see known limitations).
-- Truncated cells are flagged. The full value cannot be viewed or edited yet.
+- Truncated cells are flagged. "View whole value" (or a double-click) fetches the whole value by the row's primary key with the same rendering as the page: up to 1,000,000 characters of text, or the first 65,536 bytes of a binary value in hex. A longer value is shown up to that point and cannot be edited there. Without a primary key, or when a key value is NULL or itself shortened, only the preview is available.
 
 ### Query results (SQL console)
 
@@ -321,7 +322,7 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | **PostgreSQL sessions always use `TimeZone=UTC`** | sqlx 0.8 sends `TimeZone=UTC` at connection start-up, overriding the server and role default. Consequences: `timestamptz` values are displayed in UTC with an explicit `+00` offset (unambiguous, but not the local time other clients show); a `timestamptz` typed without an offset is interpreted as UTC; and `now()`-based defaults of `timestamp without time zone` columns are computed in UTC rather than in the server's configured zone, including for rows inserted through the grid. Not fixed. A per-connection session time zone is Planned (Phase 2b). MySQL is not affected: its sessions keep the server's time zone |
 | DELETE checks the key only | A row that was changed elsewhere after it was loaded, but still exists, is deleted without a conflict. Only an already-deleted row is detected |
 | Concurrency check covers edited columns only | A concurrent change to a column the user did not edit is neither detected nor overwritten |
-| Truncated and binary cells are not editable | A cell cut to the preview length (1000 characters) cannot be edited because its full original value is unknown; binary and MySQL spatial columns are never editable. There is no full-value editor yet (Phase 3) |
+| Binary cells, and some shortened cells, are not editable | A cell cut to the preview length (1000 characters) is edited in the whole-value dialog, which first fetches its complete original. That needs the row's primary key: in a table without one, or beyond 1,000,000 characters, the cell stays read-only. Binary and MySQL spatial columns are never editable |
 | Rows with a NULL or truncated key value are not editable | The row cannot be addressed safely |
 | Keyless tables are read-only in the UI | The backend refuses UPDATE and DELETE on a table without a primary key and would allow INSERT, but the UI keeps such tables fully read-only for now. Unique keys are not used as a substitute in the grid, and Smart Paste is not offered on such tables either |
 | Views and materialized views are read-only | Even where the engine would allow an updatable view |

@@ -106,6 +106,7 @@ The strong control is a database account that lacks write privileges.
 - All values in catalogue and data queries are bind parameters.
 - Identifiers cannot be bound, so every name goes through `db::ident` (backticks, double quotes or brackets doubled; empty names and NUL bytes rejected).
 - Sort columns are checked against the table's metadata before they are quoted.
+- Reading one cell whole (`fetch_cell`) addresses the row by its complete primary key through the write path's own key clause — typed bind parameters — and the column must match the table's metadata before it is quoted.
 - Row filters (`db::filter`) are built from a fixed set of operators. The column of a condition must match the table's metadata and is then quoted; its value — and the pattern of a text search, with `%`, `_` and the escape character made literal — is a bind parameter. Unit tests assert the exact `WHERE` text and that a hostile value appears only in the parameter list.
 - Page size is limited to 1–1000; `LIMIT` and `OFFSET` are bound.
 - On the write path every value — new values, key values and the original values used for the concurrency check — is a bind parameter. Column names from the UI must match the table's metadata and are then quoted by `db::ident`. A unit test confirms that hostile key and cell values never appear in the SQL text.

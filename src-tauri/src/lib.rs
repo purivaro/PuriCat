@@ -32,6 +32,7 @@ pub fn run() {
             commands::list_objects,
             commands::describe_table,
             commands::fetch_rows,
+            commands::fetch_cell,
             commands::plan_changes,
             commands::apply_changes,
             commands::unique_keys,

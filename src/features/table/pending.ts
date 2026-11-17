@@ -59,6 +59,44 @@ function keyColumns(page: RowPage): number[] {
   return page.primaryKey.map((name) => page.columns.findIndex((col) => col.name === name));
 }
 
+/**
+ * The complete primary key of a loaded row, or `null` when the row cannot be addressed:
+ * the table has no key, or a key value is NULL or was cut for preview.
+ */
+export function rowKey(page: RowPage, r: number): { column: string; value: string }[] | null {
+  const keys = keyColumns(page);
+  if (keys.length === 0) return null;
+  const out = [];
+  for (const k of keys) {
+    const value = page.rows[r]?.[k];
+    if (k < 0 || value == null || isTruncated(page, r, k)) return null;
+    out.push({ column: page.columns[k]!.name, value });
+  }
+  return out;
+}
+
+/** Position of a cell in `withFull`'s map. */
+export const cellIndex = (page: RowPage, r: number, c: number): number => r * page.columns.length + c;
+
+/**
+ * The page with the cells whose whole stored value is known (`full`, by `cellIndex`) holding
+ * it, and no longer marked as cut. From there such a cell is like any other: its edit carries
+ * the complete original for the concurrency check.
+ */
+export function withFull(page: RowPage, full: Record<number, string | null>): RowPage {
+  const known = Object.keys(full).map(Number);
+  if (known.length === 0) return page;
+  const width = page.columns.length;
+  const rows = page.rows.slice();
+  for (const i of known) {
+    const r = Math.floor(i / width);
+    if (!rows[r]) continue;
+    if (rows[r] === page.rows[r]) rows[r] = rows[r].slice();
+    rows[r]![i % width] = full[i]!;
+  }
+  return { ...page, rows, truncated: page.truncated.filter(([r, c]) => !(r * width + c in full)) };
+}
+
 /** Why a cell cannot be edited, or `null` when it can. */
 export function blocker(page: RowPage, p: Pending, r: number, c: number): Blocker | null {
   const col = page.columns[c];

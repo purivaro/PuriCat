@@ -6,6 +6,7 @@ import type {
   AppError,
   ApplyResult,
   AuditEntry,
+  CellContent,
   ChangeSet,
   ChatRequest,
   CliStatus,
@@ -61,6 +62,8 @@ export const ipc = {
     invoke<DbObject[]>("list_objects", { id, database, schema }),
   fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null; filters: RowFilter[] }) =>
     invoke<RowPage>("fetch_rows", { id, table, page }),
+  fetchCell: (id: string, table: TableRef, key: { column: string; value: string }[], column: string) =>
+    invoke<CellContent>("fetch_cell", { id, table, key, column }),
   planChanges: (id: string, table: TableRef, changes: ChangeSet) =>
     invoke<Statement[]>("plan_changes", { id, table, changes }),
   applyChanges: (id: string, table: TableRef, changes: ChangeSet) =>

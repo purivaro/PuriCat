@@ -259,6 +259,25 @@ fn key_clause(
     Ok((parts.join(" AND "), label))
 }
 
+/// `WHERE` text and parameters that address one row by its complete primary key.
+pub(crate) fn row_clause(
+    engine: Engine,
+    meta: &TableMeta,
+    key: &[CellValue],
+) -> Result<(String, Vec<Option<String>>)> {
+    if meta.primary_key.is_empty() {
+        return Err(Error::Unsupported(
+            "This table has no primary key, so one row cannot be addressed".into(),
+        ));
+    }
+    let mut params = Params {
+        engine,
+        values: Vec::new(),
+    };
+    let (clause, _) = key_clause(engine, meta, &meta.primary_key, key, &mut params)?;
+    Ok((clause, params.values))
+}
+
 /// Turn a change set into statements, in execution order: deletes, updates, inserts
 /// (so a deleted row's unique values can be reused by an inserted one in the same save).
 pub fn plan(

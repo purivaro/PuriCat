@@ -19,7 +19,7 @@ import {
   Undo2,
   Unplug,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -30,12 +30,15 @@ import { errorMessage, ipc } from "../../lib/ipc";
 import type { ApplyResult, RowFilter, RowPage, SortSpec } from "../../lib/types";
 import { sessionOf, useConnections } from "../../stores/connections";
 import { type TableTab, useWorkspace } from "../../stores/workspace";
+import { CellDialog } from "./CellDialog";
 import { DataGrid, rangeOf, type Selection } from "./DataGrid";
 import { sameFilters } from "./filter";
 import { FilterBar } from "./FilterBar";
 import {
   addRows,
+  type Cell,
   canRedo,
+  cellIndex,
   canUndo,
   current,
   EMPTY,
@@ -44,10 +47,12 @@ import {
   type Pending,
   record,
   redo,
+  setCells,
   setDeleted,
   summarize,
   toChangeSet,
   undo,
+  withFull,
 } from "./pending";
 import { ReviewDialog } from "./ReviewDialog";
 import { SmartPasteDialog } from "./SmartPasteDialog";
@@ -73,7 +78,13 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [filters, setFilters] = useState<RowFilter[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterFocus, setFilterFocus] = useState(0);
-  const [page, setPage] = useState<RowPage | null>(null);
+  const [loaded, setPage] = useState<RowPage | null>(null);
+  // Whole values learned for cells the page shows shortened, by `cellIndex`. With them such
+  // a cell can be edited: its original is complete.
+  const [full, setFull] = useState<Record<number, string | null>>({});
+  const page = useMemo(() => loaded && withFull(loaded, full), [loaded, full]);
+  const [loadId, setLoadId] = useState(0);
+  const [inspect, setInspect] = useState<Cell | null>(null);
   const [load, setLoad] = useState<Load>({ status: "idle" });
   const [reloads, setReloads] = useState(0);
   const request = useRef(0);
@@ -101,6 +112,9 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       .then((rows) => {
         if (id !== request.current) return; // a newer request superseded this one
         setPage(rows);
+        setFull({});
+        setLoadId((n) => n + 1);
+        setInspect(null);
         // Row indexes belong to the old page: staged edits and the selection end with it.
         setHistory(NO_HISTORY);
         setSelection(null);
@@ -119,6 +133,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     if (!connected) {
       request.current++;
       setPage(null);
+      setFull({});
+      setInspect(null);
       setHistory(NO_HISTORY);
       setSelection(null);
       setLoad({ status: "idle" });
@@ -414,6 +430,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
               sort={sort}
               onSort={changeSort}
               sortDisabled={locked}
+              loadId={loadId}
+              onInspect={setInspect}
               filtered={filters.map((f) => f.column)}
               onFilter={(f) => {
                 changeFilters([...filters.filter((x) => !sameFilters([x], [f])), f]);
@@ -582,6 +600,25 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
             setSmartPaste(false);
             toast.success(t("smart.done", { ...result }));
             refresh();
+          }}
+        />
+      )}
+      {page && loaded && view === "data" && (
+        <CellDialog
+          cell={inspect}
+          onClose={() => setInspect(null)}
+          connectionId={connection.id}
+          table={tab.table}
+          page={page}
+          pending={pending}
+          editable={editable && !saving}
+          onApply={(cell, original, value) => {
+            // The whole original makes a shortened cell editable; the edit is staged as usual.
+            const known = { ...full, [cellIndex(loaded, cell.r, cell.c)]: original };
+            const next = cell.r < loaded.rows.length ? known : full;
+            setFull(next);
+            commit(setCells(withFull(loaded, next), pending, [{ ...cell, value }]).pending);
+            setInspect(null);
           }}
         />
       )}

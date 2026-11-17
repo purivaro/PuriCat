@@ -281,6 +281,54 @@
     await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
     await waitFor(() => !filterBar(), "filter bar hidden");
 
+    // ---- one cell, whole: a note longer than a page shows (MySQL orders) ----------------
+    // The row is found with the filter, which this also exercises on MySQL.
+    await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("orders") && x.textContent.includes("Demo MySQL")), "mysql orders tab");
+    await click(await waitFor(() => editState() === "editable" && document.querySelector(`${panelSel} [data-filter-toggle]`), "mysql orders tab"), "filter button");
+    await waitFor(filterBar, "filter bar on mysql");
+    await condition(0, "id", "equals", "3");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => dataRows().length === 1 && cellText(0, 1) === "SO-10003", "order 3 alone");
+    const NOTE = 6;
+    const cellDialog = () => document.querySelector("[data-cell-dialog]");
+    const wholeBox = () => waitFor(() => cellDialog()?.querySelector("[data-cell-value]"), "the whole value", 15000);
+    const shownInGrid = cellText(0, NOTE).length;
+    // A double-click on a shortened cell opens the dialog; the value is fetched by the row's key.
+    mouse(cellAt(0, NOTE), "dblclick");
+    let box = await wholeBox();
+    const whole = box.value;
+    if (whole.length !== 2502 || !whole.startsWith("บันทึกยาว ") || !whole.endsWith("จบ")) throw new Error(`the whole note should be 2502 characters, got ${whole.length}`);
+    const wholeCell = {
+      shownInGrid,
+      where: cellDialog().querySelector("[data-cell-where]").textContent.trim(),
+      size: cellDialog().querySelector("[data-cell-size]").textContent.trim(),
+      applyDisabledUntilChanged: cellDialog().querySelector("[data-cell-apply]").disabled,
+    };
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, `${whole} (ตรวจแล้ว)`);
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(100);
+    await stage("cell-whole", { wholeCell });
+    // The edit is staged like any other, with the complete original for the concurrency check.
+    await click(cellDialog().querySelector("[data-cell-apply]"), "apply the edit");
+    await waitFor(() => !cellDialog() && cellAt(0, NOTE)?.dataset.edited === "true", "edit staged");
+    const stagedSummary = dirtySummary();
+    await click(panelButton("Save"), "save the long value");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellAt(0, NOTE) && cellAt(0, NOTE).dataset.edited !== "true", "long value saved", 15000);
+    // Read it back through the cell's menu.
+    await selectCell(0, NOTE);
+    await rightClick(cellAt(0, NOTE));
+    await click(await waitFor(() => exact('[role="menuitem"]', "View whole value"), "cell menu"), "view whole value");
+    box = await wholeBox();
+    const savedBack = { length: box.value.length, tail: box.value.slice(-14) };
+    if (box.value !== `${whole} (ตรวจแล้ว)`) throw new Error(`the saved note is not what was typed: ${savedBack.length} characters ending ${savedBack.tail}`);
+    await click(all("[data-cell-dialog] button").find((b) => b.textContent.trim() === "Cancel"), "close the cell dialog");
+    await waitFor(() => !cellDialog(), "cell dialog closed");
+    log.push({ stage: "cell-whole-saved", stagedSummary, savedBack });
+    await click(panelButton("Clear filter"), "clear the mysql filter");
+    await waitFor(() => filterCount() === "0" && dataRows().length > 20, "mysql rows again");
+    await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
+    await waitFor(() => !filterBar(), "filter bar hidden");
+
     await click(treeRow("customers"), "mysql customers");
     await waitFor(() => cellText(0, 1) === "สมชาย ใจดี", "customers rows");
     if (editState() !== "editable") throw new Error("customers should be editable");

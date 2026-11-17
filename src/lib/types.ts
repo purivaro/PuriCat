@@ -85,6 +85,13 @@ export interface SortSpec {
   descending: boolean;
 }
 
+/** One cell read in full (`db::CellContent`). */
+export interface CellContent {
+  value: string | null;
+  /** Even this was cut: the value is longer than the backend sends for one cell. */
+  cut: boolean;
+}
+
 export type FilterOp =
   | "equals"
   | "notEquals"
