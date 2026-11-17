@@ -843,6 +843,10 @@
     await openFile();
     await sleep(400);
     const afterCancel = !!smart().querySelector("[data-smart-too-many]");
+    // The runner's list is used up: a request must come back as cancelled, at once. A native
+    // dialog would leave it unanswered (and open on the screen for the rest of the run).
+    const pastTheList = await Promise.race([invoke("pick_table_file"), sleep(3000).then(() => "no answer")]);
+    if (pastTheList !== null) throw new Error(`a file request past the runner's list was not a cancelled dialog: ${JSON.stringify(pastTheList)}`);
     await stage("smart-file-limit", { tooMany, afterCancel });
     await click(smart().querySelector('button[aria-label="Close"]'), "close smart paste");
     await waitFor(() => !smart(), "smart paste closed");
