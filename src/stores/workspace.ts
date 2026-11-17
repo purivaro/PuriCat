@@ -23,6 +23,8 @@ export interface SqlTab {
   /** Database the tab's connection is on; `null` uses the connection's default. */
   database: string | null;
   title: string;
+  /** The saved script this tab is editing, when it is one; the title is then its name. */
+  scriptId?: number;
 }
 
 export type Tab = WelcomeTab | TableTab | SqlTab;
@@ -70,9 +72,12 @@ interface WorkspaceState {
   activeId: string;
   /** Tabs with unsaved edits. */
   dirty: Record<string, true>;
-  /** A dirty tab the user asked to close; the workspace asks before discarding. */
+  /** Query tabs whose text differs from the saved script they are editing. */
+  edited: Record<string, true>;
+  /** A dirty or edited tab the user asked to close; the workspace asks before discarding. */
   closing: string | null;
   setDirty: (id: string, dirty: boolean) => void;
+  setEdited: (id: string, edited: boolean) => void;
   hasUnsavedFor: (connectionId: string) => boolean;
   /** Close even if dirty (after the user confirmed). */
   forceClose: (id: string) => void;
@@ -81,6 +86,14 @@ interface WorkspaceState {
   openTable: (connectionId: string, table: TableRef, objectKind: ObjectKind) => void;
   /** Open a new query tab, optionally with `text` already in the editor. */
   openSql: (connectionId: string, database: string | null, text?: string) => void;
+  /** Show a saved script: the tab that already has it, or a new one. */
+  openScript: (database: string | null, script: { id: number; connectionId: string; name: string; sql: string }) => void;
+  /** A query tab becomes a saved script (it was saved under a name, or a script was loaded into it). */
+  bindScript: (id: string, script: { id: number; name: string }) => void;
+  /** A script was renamed: its tabs follow. */
+  renameScript: (scriptId: number, name: string) => void;
+  /** A script was deleted: its tabs keep their text and are plain query tabs again. */
+  unbindScript: (scriptId: number) => void;
   setSqlDatabase: (id: string, database: string | null) => void;
   openWelcome: () => void;
   activate: (id: string) => void;
@@ -98,7 +111,14 @@ function isTab(v: unknown): v is Tab {
   if (!v || typeof v !== "object") return false;
   const t = v as Record<string, unknown>;
   if (t.kind === "welcome") return t.id === "welcome";
-  if (t.kind === "sql") return typeof t.id === "string" && typeof t.connectionId === "string" && typeof t.title === "string";
+  if (t.kind === "sql") {
+    return (
+      typeof t.id === "string" &&
+      typeof t.connectionId === "string" &&
+      typeof t.title === "string" &&
+      (t.scriptId === undefined || typeof t.scriptId === "number")
+    );
+  }
   const table = t.table as Record<string, unknown> | undefined;
   return (
     t.kind === "table" &&
@@ -156,6 +176,39 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       commit({ tabs: [...tabs, { id, kind: "sql", connectionId, database, title: `Query ${n}` }], activeId: id });
     },
 
+    openScript: (database, script) => {
+      const { tabs } = get();
+      const open = tabs.find((t) => t.kind === "sql" && t.scriptId === script.id);
+      if (open) return commit({ tabs, activeId: open.id });
+      const id = `sql:${crypto.randomUUID()}`;
+      seeds.set(id, script.sql);
+      void ipc.setSetting(sqlTextKey(id), script.sql);
+      const tab: SqlTab = { id, kind: "sql", connectionId: script.connectionId, database, title: script.name, scriptId: script.id };
+      commit({ tabs: [...tabs, tab], activeId: id });
+    },
+
+    bindScript: (id, script) =>
+      commit({
+        tabs: get().tabs.map((t) => (t.id === id && t.kind === "sql" ? { ...t, title: script.name, scriptId: script.id } : t)),
+        activeId: get().activeId,
+      }),
+
+    renameScript: (scriptId, name) =>
+      commit({
+        tabs: get().tabs.map((t) => (t.kind === "sql" && t.scriptId === scriptId ? { ...t, title: name } : t)),
+        activeId: get().activeId,
+      }),
+
+    unbindScript: (scriptId) =>
+      commit({
+        tabs: get().tabs.map((t) => {
+          if (t.kind !== "sql" || t.scriptId !== scriptId) return t;
+          const { scriptId: _gone, ...plain } = t;
+          return plain;
+        }),
+        activeId: get().activeId,
+      }),
+
     setSqlDatabase: (id, database) =>
       commit({
         tabs: get().tabs.map((t) => (t.id === id && t.kind === "sql" ? { ...t, database } : t)),
@@ -168,6 +221,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     },
 
     dirty: {},
+    edited: {},
     closing: null,
     setDirty: (id, dirty) =>
       set((s) => {
@@ -176,6 +230,14 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         if (dirty) next[id] = true;
         else delete next[id];
         return { dirty: next };
+      }),
+    setEdited: (id, edited) =>
+      set((s) => {
+        if (!!s.edited[id] === edited) return s;
+        const next = { ...s.edited };
+        if (edited) next[id] = true;
+        else delete next[id];
+        return { edited: next };
       }),
     hasUnsavedFor: (connectionId) =>
       get().tabs.some((t) => t.kind !== "welcome" && t.connectionId === connectionId && get().dirty[t.id]),
@@ -187,16 +249,16 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     activate: (id) => commit({ tabs: get().tabs, activeId: id }),
     close: (id) => {
-      if (get().dirty[id]) return set({ closing: id, activeId: id });
+      if (get().dirty[id] || get().edited[id]) return set({ closing: id, activeId: id });
       commit(closeTabIn(get().tabs, get().activeId, id));
     },
     // Bulk closes never discard work: tabs with unsaved edits stay open.
     closeOthers: (id) => {
-      const keep = get().tabs.filter((t) => t.id === id || get().dirty[t.id]);
+      const keep = get().tabs.filter((t) => t.id === id || get().dirty[t.id] || get().edited[t.id]);
       if (keep.length) commit({ tabs: keep, activeId: id });
     },
     closeAll: () => {
-      const keep = get().tabs.filter((t) => get().dirty[t.id]);
+      const keep = get().tabs.filter((t) => get().dirty[t.id] || get().edited[t.id]);
       if (keep.length) commit({ tabs: keep, activeId: keep.some((t) => t.id === get().activeId) ? get().activeId : keep[0]!.id });
       else commit({ tabs: [WELCOME], activeId: WELCOME.id });
     },

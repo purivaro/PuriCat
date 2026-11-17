@@ -1,13 +1,15 @@
 import { Eye, Home, Table2, TerminalSquare, X } from "lucide-react";
 import { AlertDialog, ContextMenu } from "radix-ui";
-import { lazy, Suspense, useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import { TableTabView } from "../../features/table/TableTab";
 import { WelcomeTab } from "../../features/welcome/WelcomeTab";
 import { cn } from "../../lib/cn";
+import { errorMessage, ipc } from "../../lib/ipc";
 import { useConnections } from "../../stores/connections";
-import { type Tab, useWorkspace } from "../../stores/workspace";
+import { sqlEditors, type Tab, useWorkspace } from "../../stores/workspace";
 import { ENV_TONE } from "../Brand";
 import { Button, menuContentClass, menuItemClass, menuSeparatorClass } from "../ui/primitives";
 
@@ -18,6 +20,9 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
     tab.kind === "welcome" ? undefined : s.connections.find((c) => c.id === tab.connectionId),
   );
   const dirty = useWorkspace((s) => !!s.dirty[tab.id]);
+  const edited = useWorkspace((s) => !!s.edited[tab.id]);
+  // An open transaction is the weightier of the two things a query tab can hold.
+  const pending = dirty ? (tab.kind === "sql" ? "sql.transactionOpen" : "table.unsaved") : edited ? "sql.scriptEditedHint" : null;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -56,14 +61,7 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
           {active && <span aria-hidden className="absolute inset-x-2 top-0 h-0.5 rounded-b bg-accent" />}
           <Icon className={cn("size-3.5 shrink-0", active ? "text-accent-text" : "text-fg-subtle")} />
           <span className="min-w-0 flex-1 truncate">{title}</span>
-          {dirty && (
-            <span
-              role="img"
-              aria-label={t(tab.kind === "sql" ? "sql.transactionOpen" : "table.unsaved")}
-              title={t(tab.kind === "sql" ? "sql.transactionOpen" : "table.unsaved")}
-              className="size-2 shrink-0 rounded-full bg-accent"
-            />
-          )}
+          {pending && <span role="img" aria-label={t(pending)} title={t(pending)} className="size-2 shrink-0 rounded-full bg-accent" />}
           {connection && (
             // The colour ties the tab to its environment even when the name is cut off.
             <span className={cn("max-w-20 shrink truncate rounded px-1 text-[10px] font-semibold", ENV_TONE[connection.environment])}>
@@ -107,31 +105,77 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
 
 const SqlTabView = lazy(() => import("../../features/sql/SqlTab"));
 
-/** Closing a tab with staged edits, or a query tab with an open transaction, asks first. */
+/**
+ * Closing a tab with staged edits, a query tab with an open transaction, or a saved script
+ * with changes that were not saved, asks first.
+ */
 function DiscardDialog() {
   const { t } = useTranslation();
   const closing = useWorkspace((s) => s.tabs.find((x) => x.id === s.closing));
+  const dirty = useWorkspace((s) => !!closing && !!s.dirty[closing.id]);
+  const edited = useWorkspace((s) => !!closing && !!s.edited[closing.id]);
   const { cancelClose, forceClose } = useWorkspace.getState();
+  const [saving, setSaving] = useState(false);
   const sql = closing?.kind === "sql";
+  // Only the script is at stake: it can be saved from here.
+  const script = sql && !dirty && closing.scriptId !== undefined ? closing.scriptId : null;
+
+  const saveAndClose = async () => {
+    const text = closing && sqlEditors.get(closing.id)?.();
+    if (!closing || script === null || text === undefined) return;
+    setSaving(true);
+    try {
+      await ipc.updateScript(script, text);
+      forceClose(closing.id);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <AlertDialog.Root open={!!closing} onOpenChange={(open) => !open && cancelClose()}>
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="animate-fade fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px] dark:bg-black/55" />
-        <AlertDialog.Content className="animate-pop fixed top-1/2 left-1/2 z-50 w-[min(92vw,420px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-raised p-5 shadow-pop outline-none">
+        <AlertDialog.Content
+          data-close-dialog
+          className="animate-pop fixed top-1/2 left-1/2 z-50 w-[min(92vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-raised p-5 shadow-pop outline-none"
+        >
           <AlertDialog.Title className="text-[15px] leading-snug font-semibold break-words">
-            {sql ? t("closeDirty.titleSql", { name: closing.title }) : t("closeDirty.title", { name: closing?.kind === "table" ? closing.table.name : "" })}
+            {script !== null
+              ? t("closeDirty.titleScript", { name: closing?.kind === "sql" ? closing.title : "" })
+              : sql
+                ? t("closeDirty.titleSql", { name: closing.title })
+                : t("closeDirty.title", { name: closing?.kind === "table" ? closing.table.name : "" })}
           </AlertDialog.Title>
           <AlertDialog.Description className="mt-1.5 text-[13px] leading-relaxed text-fg-muted">
-            {t(sql ? "closeDirty.bodySql" : "closeDirty.body")}
+            {t(script !== null ? "closeDirty.bodyScript" : sql ? "closeDirty.bodySql" : "closeDirty.body")}
+            {/* A transaction and unsaved script text: closing loses both. */}
+            {sql && dirty && edited && ` ${t("closeDirty.alsoScript")}`}
           </AlertDialog.Description>
-          <div className="mt-5 flex justify-end gap-2">
-            <AlertDialog.Cancel asChild>
-              <Button variant="primary">{t(sql ? "closeDirty.keepSql" : "closeDirty.keep")}</Button>
-            </AlertDialog.Cancel>
-            <Button variant="danger" onClick={() => closing && forceClose(closing.id)}>
-              {t(sql ? "closeDirty.discardSql" : "closeDirty.discard")}
-            </Button>
-          </div>
+          {script !== null ? (
+            <div className="mt-5 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <Button variant="ghost">{t("common.cancel")}</Button>
+              </AlertDialog.Cancel>
+              <Button data-close-discard onClick={() => closing && forceClose(closing.id)}>
+                {t("closeDirty.discardScript")}
+              </Button>
+              <Button variant="primary" data-close-save loading={saving} onClick={() => void saveAndClose()}>
+                {t("common.save")}
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-5 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <Button variant="primary">{t(sql ? "closeDirty.keepSql" : "closeDirty.keep")}</Button>
+              </AlertDialog.Cancel>
+              <Button variant="danger" onClick={() => closing && forceClose(closing.id)}>
+                {t(sql ? "closeDirty.discardSql" : "closeDirty.discard")}
+              </Button>
+            </div>
+          )}
         </AlertDialog.Content>
       </AlertDialog.Portal>
     </AlertDialog.Root>

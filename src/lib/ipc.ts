@@ -25,6 +25,7 @@ import type {
   RowFilter,
   PasteRequest,
   RowPage,
+  SavedScript,
   RunOutcome,
   ServerInfo,
   SortSpec,
@@ -98,6 +99,12 @@ export const ipc = {
   closeConsole: (tab: string) => invoke<void>("close_console", { tab }),
   listHistory: (id: string, limit: number) => invoke<HistoryEntry[]>("list_history", { id, limit }),
   clearHistory: (id: string) => invoke<void>("clear_history", { id }),
+  listScripts: (id: string) => invoke<SavedScript[]>("list_scripts", { id }),
+  getScript: (script: number) => invoke<SavedScript>("get_script", { script }),
+  createScript: (id: string, name: string, sql: string) => invoke<SavedScript>("create_script", { id, name, sql }),
+  updateScript: (script: number, sql: string) => invoke<SavedScript>("update_script", { script, sql }),
+  renameScript: (script: number, name: string) => invoke<SavedScript>("rename_script", { script, name }),
+  deleteScript: (script: number) => invoke<void>("delete_script", { script }),
   exportResult: (tab: string, result: number, format: ExportFormat, path: string) =>
     invoke<number>("export_result", { tab, result, format, path }),
   /** Shows the native Open dialog (CSV, Excel). `null` when it was cancelled. */

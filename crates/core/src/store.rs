@@ -52,6 +52,16 @@ const MIGRATIONS: &[&str] = &[
         sql             TEXT NOT NULL,
         detail          TEXT NOT NULL
      );",
+    // 4 — scripts the user saved for a connection, kept exactly as written.
+    "CREATE TABLE saved_scripts (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection_id TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        sql           TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL
+     );
+     CREATE UNIQUE INDEX saved_scripts_name ON saved_scripts (connection_id, name COLLATE NOCASE);",
 ];
 
 /// Entries kept; older ones are dropped as new ones arrive.
@@ -91,6 +101,75 @@ pub struct AuditEntry {
 
 /// Audit entries kept; older ones are dropped as new ones arrive.
 const AUDIT_LIMIT: i64 = 5000;
+
+/// A script saved for one connection. Unlike the history it is the user's own text, stored
+/// exactly as written: nothing is masked.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedScript {
+    pub id: i64,
+    pub connection_id: String,
+    pub name: String,
+    pub sql: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Longest name of a saved script, in characters.
+pub const SCRIPT_NAME_MAX: usize = 120;
+/// Largest saved script, in bytes of UTF-8.
+pub const SCRIPT_MAX_BYTES: usize = 1024 * 1024;
+
+const SCRIPT_COLUMNS: &str = "id, connection_id, name, sql, created_at, updated_at";
+
+fn script_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("Give the script a name.".into()));
+    }
+    if name.chars().count() > SCRIPT_NAME_MAX {
+        return Err(Error::Invalid(format!(
+            "A script name can be {SCRIPT_NAME_MAX} characters at most."
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Error::Invalid(
+            "A script name must be a single line of text.".into(),
+        ));
+    }
+    Ok(name)
+}
+
+fn script_text(sql: &str) -> Result<()> {
+    if sql.len() > SCRIPT_MAX_BYTES {
+        return Err(Error::Invalid(
+            "This script is larger than 1 MB, the most a saved script can hold.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A name that is already taken is a conflict the user can resolve; anything else is the
+/// store failing.
+fn script_error(name: &str) -> impl FnOnce(sqlx::Error) -> Error + '_ {
+    move |e| match &e {
+        sqlx::Error::Database(db) if db.is_unique_violation() => Error::Conflict(format!(
+            "This connection already has a script named “{name}”."
+        )),
+        _ => Error::store(e),
+    }
+}
+
+fn row_to_script(r: &sqlx::sqlite::SqliteRow) -> Result<SavedScript> {
+    Ok(SavedScript {
+        id: r.try_get(0).map_err(Error::store)?,
+        connection_id: r.try_get(1).map_err(Error::store)?,
+        name: r.try_get(2).map_err(Error::store)?,
+        sql: r.try_get(3).map_err(Error::store)?,
+        created_at: r.try_get(4).map_err(Error::store)?,
+        updated_at: r.try_get(5).map_err(Error::store)?,
+    })
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -303,6 +382,103 @@ impl Store {
 
     pub async fn clear_history(&self, connection_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM query_history WHERE connection_id = ?")
+            .bind(connection_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
+    // ---- saved scripts -------------------------------------------------------------------
+
+    /// The scripts of one connection, by name.
+    pub async fn list_scripts(&self, connection_id: &str) -> Result<Vec<SavedScript>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SCRIPT_COLUMNS} FROM saved_scripts WHERE connection_id = ?
+             ORDER BY name COLLATE NOCASE, id"
+        ))
+        .bind(connection_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        rows.iter().map(row_to_script).collect()
+    }
+
+    pub async fn get_script(&self, id: i64) -> Result<SavedScript> {
+        let row = sqlx::query(&format!(
+            "SELECT {SCRIPT_COLUMNS} FROM saved_scripts WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::store)?
+        .ok_or_else(|| Error::NotFound("Saved script".into()))?;
+        row_to_script(&row)
+    }
+
+    /// Save a new script. A name is used once per connection, whatever its letter case.
+    pub async fn create_script(
+        &self,
+        connection_id: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<SavedScript> {
+        let name = script_name(name)?;
+        script_text(sql)?;
+        let now = now_ms();
+        let done = sqlx::query(
+            "INSERT INTO saved_scripts (connection_id, name, sql, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(connection_id)
+        .bind(name)
+        .bind(sql)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(script_error(name))?;
+        self.get_script(done.last_insert_rowid()).await
+    }
+
+    /// Replace the text of a saved script.
+    pub async fn update_script(&self, id: i64, sql: &str) -> Result<SavedScript> {
+        script_text(sql)?;
+        sqlx::query("UPDATE saved_scripts SET sql = ?, updated_at = ? WHERE id = ?")
+            .bind(sql)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        // Not found when the script was deleted meanwhile: nothing was written.
+        self.get_script(id).await
+    }
+
+    pub async fn rename_script(&self, id: i64, name: &str) -> Result<SavedScript> {
+        let name = script_name(name)?;
+        sqlx::query("UPDATE saved_scripts SET name = ?, updated_at = ? WHERE id = ?")
+            .bind(name)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(script_error(name))?;
+        self.get_script(id).await
+    }
+
+    pub async fn delete_script(&self, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM saved_scripts WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
+    /// Every script of a connection, when the connection itself is deleted.
+    pub async fn clear_scripts(&self, connection_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM saved_scripts WHERE connection_id = ?")
             .bind(connection_id)
             .execute(&self.pool)
             .await
@@ -563,6 +739,93 @@ mod tests {
         store.clear_history("a").await.unwrap();
         assert!(store.list_history("a", 10).await.unwrap().is_empty());
         assert!(!store.list_history("b", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn saved_scripts_belong_to_a_connection_and_keep_their_text() {
+        let store = Store::open_in_memory().await.unwrap();
+        let text = "-- รายงานประจำวัน\nSELECT 'it''s' AS a;\nSET PASSWORD = 'secret'";
+        let report = store.create_script("a", "  Report  ", text).await.unwrap();
+        assert_eq!(report.name, "Report");
+        // Stored as written: nothing is masked, unlike the history.
+        assert_eq!(report.sql, text);
+        assert!(report.id > 0 && report.created_at > 0);
+        store.create_script("a", "audit", "SELECT 2").await.unwrap();
+        store
+            .create_script("b", "Report", "SELECT 3")
+            .await
+            .unwrap();
+
+        // By name, without regard to case; another connection's scripts stay out.
+        let names: Vec<_> = store
+            .list_scripts("a")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["audit", "Report"]);
+
+        // One name per connection, whatever its case.
+        assert!(matches!(
+            store.create_script("a", "REPORT", "SELECT 4").await,
+            Err(Error::Conflict(_))
+        ));
+        let audit = store.list_scripts("a").await.unwrap().remove(0);
+        assert!(matches!(
+            store.rename_script(audit.id, "report").await,
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(store.get_script(audit.id).await.unwrap().name, "audit");
+        // A script may change the case of its own name.
+        assert_eq!(
+            store.rename_script(report.id, "REPORT").await.unwrap().name,
+            "REPORT"
+        );
+
+        let saved = store.update_script(report.id, "SELECT 5").await.unwrap();
+        assert_eq!(
+            (saved.sql.as_str(), saved.name.as_str()),
+            ("SELECT 5", "REPORT")
+        );
+        assert_eq!(saved.created_at, report.created_at);
+
+        store.delete_script(report.id).await.unwrap();
+        assert!(matches!(
+            store.update_script(report.id, "SELECT 6").await,
+            Err(Error::NotFound(_))
+        ));
+        store.clear_scripts("a").await.unwrap();
+        assert!(store.list_scripts("a").await.unwrap().is_empty());
+        assert_eq!(store.list_scripts("b").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn saved_scripts_refuse_bad_names_and_oversized_text() {
+        let store = Store::open_in_memory().await.unwrap();
+        for name in ["", "   ", "two\nlines", &"x".repeat(SCRIPT_NAME_MAX + 1)] {
+            assert!(
+                matches!(
+                    store.create_script("a", name, "SELECT 1").await,
+                    Err(Error::Invalid(_))
+                ),
+                "{name:?}"
+            );
+        }
+        // The limit counts characters, not bytes.
+        let thai = "ก".repeat(SCRIPT_NAME_MAX);
+        let kept = store.create_script("a", &thai, "").await.unwrap();
+        assert_eq!(kept.name, thai);
+        let big = " ".repeat(SCRIPT_MAX_BYTES + 1);
+        assert!(matches!(
+            store.create_script("a", "big", &big).await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            store.update_script(kept.id, &big).await,
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(store.list_scripts("a").await.unwrap().len(), 1);
     }
 
     #[tokio::test]

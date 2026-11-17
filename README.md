@@ -52,7 +52,7 @@ Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose 
 
 ### A SQL console with guard rails
 
-Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
+Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Run the whole script, the selection, or only the statement the cursor is in (⇧⌘↵). Save a script under a name (⌘S) and open it again later from the connection's saved scripts. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
 
 ![A query tab with two statements and one result tab for each](docs/images/sql-console.png)
 

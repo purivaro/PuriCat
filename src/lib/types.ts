@@ -228,7 +228,10 @@ export type SqlKind = "read" | "dml" | "ddl" | "transaction" | "other";
 
 export interface SqlStatement {
   text: string;
+  /** Byte offset (UTF-8) of the statement in the script. */
   start: number;
+  /** Byte offset of its first word, after the comments that lead it. */
+  body: number;
   kind: SqlKind;
   danger: string | null;
 }
@@ -278,6 +281,16 @@ export interface HistoryEntry {
   summary: string;
   elapsedMs: number;
   startedAt: number;
+}
+
+/** A script saved for one connection, stored exactly as written. */
+export interface SavedScript {
+  id: number;
+  connectionId: string;
+  name: string;
+  sql: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export type ExportFormat = "csv" | "json" | "xlsx";

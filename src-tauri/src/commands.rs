@@ -21,7 +21,7 @@ use puricat_core::db::{
 };
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
-use puricat_core::store::{AuditEntry, HistoryEntry};
+use puricat_core::store::{AuditEntry, HistoryEntry, SavedScript};
 use puricat_core::table_file::{self, FileKind, FileTable, ReadOptions};
 use puricat_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -158,9 +158,10 @@ pub async fn duplicate_connection(
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<()> {
     state.remove_session(&id).await;
     let key = password_key(&id);
-    // What was run on a connection goes with it. First, so that a failure here leaves the
+    // What was run on a connection, and the scripts saved for it, go with it. First, so that a failure here leaves the
     // connection whole rather than without its password.
     state.store.clear_history(&id).await?;
+    state.store.clear_scripts(&id).await?;
     state.with_secrets(move |s| s.delete(&key)).await?;
     state.store.delete_connection(&id).await
 }
@@ -538,6 +539,53 @@ pub async fn list_history(
 #[tauri::command]
 pub async fn clear_history(state: State<'_, AppState>, id: String) -> Result<()> {
     state.store.clear_history(&id).await
+}
+
+// ---- saved scripts ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_scripts(state: State<'_, AppState>, id: String) -> Result<Vec<SavedScript>> {
+    state.store.list_scripts(&id).await
+}
+
+#[tauri::command]
+pub async fn get_script(state: State<'_, AppState>, script: i64) -> Result<SavedScript> {
+    state.store.get_script(script).await
+}
+
+/// Save a new script for a connection that exists.
+#[tauri::command]
+pub async fn create_script(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    sql: String,
+) -> Result<SavedScript> {
+    state.store.get_connection(&id).await?;
+    state.store.create_script(&id, &name, &sql).await
+}
+
+#[tauri::command]
+pub async fn update_script(
+    state: State<'_, AppState>,
+    script: i64,
+    sql: String,
+) -> Result<SavedScript> {
+    state.store.update_script(script, &sql).await
+}
+
+#[tauri::command]
+pub async fn rename_script(
+    state: State<'_, AppState>,
+    script: i64,
+    name: String,
+) -> Result<SavedScript> {
+    state.store.rename_script(script, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_script(state: State<'_, AppState>, script: i64) -> Result<()> {
+    state.store.delete_script(script).await
 }
 
 /// Write one result of the tab's last run to a file the user chose. Returns rows written.

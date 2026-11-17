@@ -118,6 +118,8 @@ Done (MySQL and PostgreSQL; evidence in [TESTING.md](TESTING.md), design in [ADR
 - Export of a result to CSV, JSON and XLSX, written by the backend through the native Save dialog.
 - History per connection in the local store, with password literals masked (single- and double-quoted); a connection's history is deleted with it.
 - Completion (table names, columns, keywords) and formatting.
+- Run the statement at the cursor (⇧⌘↵, or the menu beside Run), marked in the editor's margin when the script has several.
+- Saved scripts per connection in the local store: ⌘S names a query tab's text and later writes it back; a list to open, rename and delete them; a tab says when its text differs from the saved script and asks before closing.
 
 Verified in the backend on both engines; through the UI on MySQL only.
 
@@ -127,8 +129,6 @@ Remaining:
 |---|---|
 | SQL console: verification gaps | PostgreSQL through the UI; Stop and the lost-connection path through the UI; the confirmation on a Production-labelled connection; completion, formatting, the Save dialog, restoring a tab's text after a relaunch; results near 100,000 rows ([TESTING.md](TESTING.md) gaps) |
 | SQL console: hardening | Transaction tracking is textual (procedures, `XA`, a MySQL deadlock and non-DDL implicit commits are not seen; the exception for `CREATE` / `DROP TEMPORARY TABLE` has no test against a server); the confirmation and the impact threshold are applied by the UI, not enforced by the backend; a read-only connection can be switched back by typed SQL; history has no off switch, and its password mask is a heuristic ([SECURITY.md](SECURITY.md), SQL console) |
-| Saved scripts | Today a tab's text lives only as long as the tab |
-| Run the statement at the cursor | Today: the selection, or the whole script |
 | Alias-aware completion | Today: loaded table names, columns of tables named in the text, keywords. Inline error markers are not built either |
 | Streaming, and results or exports beyond 100,000 rows | Results are held in memory, capped at 100,000 rows; a capped result cannot be continued. Sorting and filtering a result are not available |
 | Switching database inside a PostgreSQL tab | A PostgreSQL tab is bound to the database it was opened on |

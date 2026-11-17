@@ -75,7 +75,9 @@
   "deleteConnection": {
     "title": "Delete “{{name}}”?",
     "body": "The saved settings and the password stored in your system keychain will be removed. The database itself is not touched.",
-    "confirm": "Delete connection"
+    "confirm": "Delete connection",
+    "scripts_one": "{{count}} script saved for this connection will be deleted too.",
+    "scripts_other": "{{count}} scripts saved for this connection will be deleted too."
   },
   "connection": {
     "newTitle": "New connection",
@@ -525,7 +527,11 @@
     "titleSql": "Close “{{name}}” with a transaction open?",
     "bodySql": "Closing the tab rolls back everything in the transaction that has not been committed.",
     "keepSql": "Keep the tab",
-    "discardSql": "Roll back and close"
+    "discardSql": "Roll back and close",
+    "titleScript": "Save the changes to “{{name}}”?",
+    "bodyScript": "This script has changes that have not been saved. Closing the tab without saving loses them.",
+    "discardScript": "Don't save",
+    "alsoScript": "The changes to the script that were not saved are lost too."
   },
   "smart": {
     "open": "Smart Paste…",
@@ -641,7 +647,7 @@
     "maxRows": "Rows per result",
     "database": "Database",
     "defaultDatabase": "default database",
-    "placeholder": "Write SQL here. ⌘↵ runs the selection, or the whole script.",
+    "placeholder": "Write SQL here.\n⌘↵ runs the selection, or the whole script. ⇧⌘↵ runs only the statement the cursor is in.",
     "notConnected": "This connection is closed",
     "notConnectedBody": "Connect to “{{name}}” to run queries.",
     "messages": "Messages",
@@ -686,6 +692,33 @@
       "ddl": "schema",
       "transaction": "transaction",
       "other": "other"
-    }
+    },
+    "runMore": "More ways to run",
+    "runAll": "Run the selection, or the whole script",
+    "runCurrent": "Run the statement at the cursor",
+    "scripts": "Saved scripts",
+    "scriptsOn": "On {{name}}",
+    "scriptsEmpty": "No saved scripts yet",
+    "scriptsEmptyBody": "Press ⌘S in a query tab to keep its SQL under a name. Scripts are saved for this connection, on this computer.",
+    "scriptsNoMatch": "No script matches “{{text}}”.",
+    "scriptSearch": "Search scripts",
+    "scriptSaveNew": "Save this query…",
+    "scriptSaveAs": "Save as a new script…",
+    "scriptNothing": "There is nothing in the editor to save.",
+    "scriptName": "Name of the script",
+    "scriptNamePlaceholder": "For example: Monthly totals",
+    "scriptCopyName": "{{name}} copy",
+    "scriptSaveNewHint": "Save as a script… (⌘S)",
+    "scriptSaveHint": "Save “{{name}}” (⌘S)",
+    "scriptSaved": "Saved “{{name}}”",
+    "scriptEdited": "Edited",
+    "scriptEditedHint": "This script has changes that are not saved",
+    "scriptThisTab": "This tab",
+    "scriptBlank": "empty",
+    "scriptRename": "Rename",
+    "scriptDelete": "Delete",
+    "scriptDeleteAsk": "Delete “{{name}}”? It cannot be brought back.",
+    "scriptDeleted": "Deleted “{{name}}”",
+    "scriptNameTaken": "This connection already has a script named “{{name}}”. Names do not differ by upper or lower case."
   }
 }

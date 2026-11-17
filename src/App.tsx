@@ -14,7 +14,7 @@ import { Workspace } from "./components/layout/Workspace";
 import { Button, StateMessage } from "./components/ui/primitives";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
 import i18n from "./i18n";
-import { errorMessage } from "./lib/ipc";
+import { errorMessage, ipc } from "./lib/ipc";
 import { useConnections } from "./stores/connections";
 import { resolveTheme, useSettings } from "./stores/settings";
 import { useUi } from "./stores/ui";
@@ -55,6 +55,21 @@ function DeleteConnectionDialog() {
   const target = useUi((s) => s.deleteTarget);
   const askDelete = useUi((s) => s.askDelete);
   const [busy, setBusy] = useState(false);
+  // The scripts saved for the connection go with it: say how many before they do.
+  const [scripts, setScripts] = useState(0);
+  const targetId = target?.id;
+  useEffect(() => {
+    setScripts(0);
+    if (!targetId) return;
+    let stale = false;
+    void ipc
+      .listScripts(targetId)
+      .then((list) => !stale && setScripts(list.length))
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [targetId]);
 
   const confirm = async () => {
     if (!target) return;
@@ -85,6 +100,11 @@ function DeleteConnectionDialog() {
               </AlertDialog.Title>
               <AlertDialog.Description className="mt-1.5 text-[13px] leading-relaxed text-fg-muted">
                 {t("deleteConnection.body")}
+                {scripts > 0 && (
+                  <span data-delete-scripts className="mt-1.5 block font-medium text-danger">
+                    {t("deleteConnection.scripts", { count: scripts })}
+                  </span>
+                )}
               </AlertDialog.Description>
             </div>
           </div>

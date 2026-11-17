@@ -29,6 +29,9 @@ pub struct Statement {
     pub text: String,
     /// Byte offset of the statement in the script.
     pub start: usize,
+    /// Byte offset of its first word: where the statement proper begins, after the
+    /// comments that lead it.
+    pub body: usize,
     pub kind: Kind,
     /// Why this statement deserves a second look, if it does.
     pub danger: Option<&'static str>,
@@ -160,13 +163,14 @@ pub fn split(engine: Engine, sql: &str) -> Vec<Statement> {
             },
             |_| {},
         );
-        if first_word.is_some() {
+        if let Some(word) = first_word {
             let lead = piece.len() - piece.trim_start().len();
             let text = piece.trim().to_string();
             let (kind, danger) = classify(engine, &text);
             out.push(Statement {
                 text,
                 start: from + lead,
+                body: from + word,
                 kind,
                 danger,
             });
@@ -467,6 +471,12 @@ mod tests {
         assert!(split(Engine::Postgres, " ; -- nothing\n /* still nothing */ ;").is_empty());
         let second = &split(Engine::Postgres, "SELECT 1;\n  SELECT 2")[1];
         assert_eq!((second.start, second.text.as_str()), (12, "SELECT 2"));
+        assert_eq!(second.body, 12);
+        // A statement starts with the comments that lead it; its body is its first word.
+        let sql = "SELECT 'ก'; -- เสร็จ\n/* สอง */ (SELECT 2)";
+        let second = &split(Engine::Mysql, sql)[1];
+        assert_eq!(&sql[second.start..second.start + 2], "--");
+        assert_eq!(&sql[second.body..], "SELECT 2)");
     }
 
     #[test]

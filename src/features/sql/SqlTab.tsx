@@ -1,6 +1,7 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   AlignLeft,
+  ChevronDown,
   CircleAlert,
   CircleCheck,
   CircleSlash,
@@ -9,9 +10,11 @@ import {
   OctagonX,
   Play,
   Plug,
+  Save,
   ShieldAlert,
   Square,
   TerminalSquare,
+  TextCursorInput,
   Trash2,
   TriangleAlert,
   Unplug,
@@ -33,13 +36,14 @@ import {
   StateMessage,
 } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
-import { errorMessage, ipc } from "../../lib/ipc";
+import { errorMessage, ipc, toAppError } from "../../lib/ipc";
 import type {
   ExportFormat,
   HistoryEntry,
   ResultPreview,
   RowPage,
   RunOutcome,
+  SavedScript,
   SqlStatement,
   SqlStatus,
   StatementOutcome,
@@ -49,6 +53,8 @@ import { useSettings } from "../../stores/settings";
 import { type SqlTab, sqlEditors, sqlSeed, sqlTextKey, useWorkspace } from "../../stores/workspace";
 import { DataGrid, type Selection } from "../table/DataGrid";
 import { EMPTY } from "../table/pending";
+import { ScriptsMenu, type ScriptsMode } from "./ScriptsMenu";
+import { type Span, spans, statementAt } from "./statements";
 
 type Monaco = typeof import("./monaco");
 type Editor = ReturnType<Monaco["createEditor"]>;
@@ -115,6 +121,9 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   const [selection, setSelection] = useState<Selection | null>(null);
   const [confirm, setConfirm] = useState<{ sql: string; limit: number | null; risky: SqlStatement[] } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[] | null>(null);
+  const [scriptsMode, setScriptsMode] = useState<ScriptsMode>("closed");
+  // The text differs from the saved script this tab is editing.
+  const [modified, setModified] = useState(false);
 
   // ---- saved text ------------------------------------------------------------------
   useEffect(() => {
@@ -131,17 +140,150 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
     };
   }, [tab.id]);
 
+  // ---- the statement at the cursor ---------------------------------------------------
+  // The backend splits the script (it knows the dialect); the answer is kept with the
+  // version of the text it was given for, and re-asked a moment after the text changes.
+  const connectedRef = useRef(connected);
+  connectedRef.current = connected;
+  const markerRef = useRef<ReturnType<Monaco["statementMarker"]> | null>(null);
+  const analysis = useRef<{ version: number; text: string; list: Span[] } | null>(null);
+  const mark = useCallback(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const known = analysis.current;
+    if (!editor || !monaco || !markerRef.current) return;
+    // While the text is ahead of what was analysed the mark stays where it is.
+    if (known && known.version !== editor.getModel()?.getVersionId()) return;
+    // A script of one statement needs no pointing out.
+    const at = known && known.list.length > 1 ? known.list[statementAt(known.text, known.list, monaco.cursorOffset(editor))] : undefined;
+    markerRef.current.show(at ? { start: at.body, end: at.end } : null);
+  }, []);
+  const analyze = useCallback(() => {
+    const editor = editorRef.current;
+    const version = editor?.getModel()?.getVersionId();
+    if (!editor || version === undefined || !connectedRef.current) return;
+    const text = editor.getValue();
+    ipc
+      .analyzeSql(tab.connectionId, text)
+      .then((statements) => {
+        if (editorRef.current !== editor || editor.getModel()?.getVersionId() !== version) return;
+        analysis.current = { version, text, list: spans(text, statements) };
+        mark();
+      })
+      .catch(() => {}); // the mark is a convenience; running asks again and reports
+  }, [tab.connectionId, mark]);
+  useEffect(() => {
+    if (connected) analyze();
+  }, [connected, analyze]);
+
+  // ---- the saved script behind this tab ----------------------------------------------
+  /** The script's text as stored; `null` when the tab is not a saved script (or it is not read yet). */
+  const savedRef = useRef<string | null>(null);
+  const compare = useCallback(() => {
+    const editor = editorRef.current;
+    setModified(savedRef.current !== null && !!editor && editor.getValue() !== savedRef.current);
+  }, []);
+  useEffect(() => {
+    savedRef.current = null;
+    compare();
+    const id = tab.scriptId;
+    if (id === undefined) return;
+    let stale = false;
+    ipc
+      .getScript(id)
+      .then((script) => {
+        if (stale) return;
+        savedRef.current = script.sql;
+        compare();
+        // Renamed while this tab was not there to hear of it.
+        if (script.name !== tab.title) useWorkspace.getState().renameScript(id, script.name);
+      })
+      // Deleted meanwhile: the tab keeps its text and is a plain query tab again.
+      .catch((e: unknown) => !stale && toAppError(e).kind === "not_found" && useWorkspace.getState().unbindScript(id));
+    return () => {
+      stale = true;
+    };
+    // The title is only compared with the stored name, once per script.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab.scriptId, compare]);
+  useEffect(() => {
+    useWorkspace.getState().setEdited(tab.id, modified);
+  }, [tab.id, modified]);
+  useEffect(() => () => useWorkspace.getState().setEdited(tab.id, false), [tab.id]);
+
   const saveTimer = useRef<number | undefined>(undefined);
+  const analyzeTimer = useRef<number | undefined>(undefined);
   const onChange = useCallback(
     (value: string) => {
       setEmpty(value.trim() === "");
+      compare();
       window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => void ipc.setSetting(sqlTextKey(tab.id), value), 600);
+      window.clearTimeout(analyzeTimer.current);
+      analyzeTimer.current = window.setTimeout(analyze, 200);
     },
-    [tab.id],
+    [tab.id, compare, analyze],
   );
   // A save still pending when the tab closes must not write the text back after it was cleared.
-  useEffect(() => () => window.clearTimeout(saveTimer.current), []);
+  useEffect(
+    () => () => {
+      window.clearTimeout(saveTimer.current);
+      window.clearTimeout(analyzeTimer.current);
+    },
+    [],
+  );
+
+  /** Save the editor's text as a new script; this tab becomes that script. */
+  const createScript = useCallback(
+    async (name: string) => {
+      const script = await ipc.createScript(tab.connectionId, name, editorRef.current?.getValue() ?? "");
+      savedRef.current = script.sql;
+      useWorkspace.getState().bindScript(tab.id, script);
+      compare();
+      toast.success(i18n.t("sql.scriptSaved", { name: script.name }), { id: "script-saved", duration: 2000 });
+    },
+    [tab.connectionId, tab.id, compare, i18n],
+  );
+
+  /** ⌘S: write the text to the tab's script, or ask what to call a new one. */
+  const saveScript = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    if (tab.scriptId === undefined) {
+      if (editor.getValue().trim()) setScriptsMode("name");
+      return;
+    }
+    try {
+      const script = await ipc.updateScript(tab.scriptId, editor.getValue());
+      savedRef.current = script.sql;
+      compare();
+      toast.success(i18n.t("sql.scriptSaved", { name: script.name }), { id: "script-saved", duration: 2000 });
+    } catch (e) {
+      if (toAppError(e).kind === "not_found") useWorkspace.getState().unbindScript(tab.scriptId);
+      toast.error(errorMessage(e));
+    }
+  }, [tab.scriptId, compare, i18n]);
+  const saveRef = useRef(saveScript);
+  saveRef.current = saveScript;
+
+  /** A script chosen from the list: into this tab while it is still blank, else a tab of its own. */
+  const openScript = useCallback(
+    (script: SavedScript) => {
+      const editor = editorRef.current;
+      const monaco = monacoRef.current;
+      const workspace = useWorkspace.getState();
+      const elsewhere = workspace.tabs.some((x) => x.kind === "sql" && x.scriptId === script.id);
+      if (!elsewhere && tab.scriptId === undefined && editor && monaco && !editor.getValue().trim()) {
+        monaco.replaceText(editor, script.sql, true);
+        savedRef.current = script.sql;
+        workspace.bindScript(tab.id, script);
+        compare();
+      } else {
+        workspace.openScript(tab.database, script);
+      }
+    },
+    [tab.id, tab.scriptId, tab.database, compare],
+  );
 
   // ---- completion sources ----------------------------------------------------------
   const columnCache = useRef(new Map<string, Promise<string[]>>());
@@ -241,6 +383,28 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   const runRef = useRef(runEditor);
   runRef.current = runEditor;
 
+  /** ⇧⌘↵: only the statement the cursor is in, whatever is selected. */
+  const runCurrent = useCallback(async () => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco || running || !connected) return;
+    const text = editor.getValue();
+    const offset = monaco.cursorOffset(editor);
+    if (!text.trim()) return;
+    try {
+      // Asked afresh: the mark in the margin may be a keystroke behind.
+      const statements = await ipc.analyzeSql(tab.connectionId, text);
+      const list = spans(text, statements);
+      const at = list[statementAt(text, list, offset)];
+      if (at) await run(text.slice(at.start, at.end), limit);
+    } catch (e) {
+      setView("messages");
+      setFailure(errorMessage(e));
+    }
+  }, [running, connected, tab.connectionId, run, limit]);
+  const runCurrentRef = useRef(runCurrent);
+  runCurrentRef.current = runCurrent;
+
   // An open transaction is uncommitted work: the tab asks before closing, and the
   // connection refuses to disconnect, exactly as for staged edits in a table tab.
   const inTransaction = connected && !!outcome?.inTransaction;
@@ -269,8 +433,15 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
         schema,
         onChange,
         onRun: () => runRef.current(),
+        onRunCurrent: () => void runCurrentRef.current(),
+        onSave: () => void saveRef.current(),
+        onCursor: mark,
       });
       editorRef.current = editor;
+      markerRef.current = monaco.statementMarker(editor);
+      analysis.current = null;
+      analyze();
+      compare();
       sqlEditors.set(tab.id, () => editor?.getValue() ?? "");
       setEmpty(initial.trim() === "");
       // Lets the end-to-end test type into the real editor.
@@ -281,6 +452,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
       sqlEditors.delete(tab.id);
       editor?.dispose();
       editorRef.current = null;
+      markerRef.current = null;
     };
     // The editor is created once per tab; `schema` and callbacks are read through refs/closures.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -356,13 +528,30 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   }
 
   return (
-    <div ref={rootRef} data-sql-tab className="flex h-full flex-col">
+    <div
+      ref={rootRef}
+      data-sql-tab
+      // ⌘S with the keyboard outside the editor (the editor handles its own).
+      onKeyDown={(e) => {
+        if (e.defaultPrevented || e.key.toLowerCase() !== "s" || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        void saveScript();
+      }}
+      className="flex h-full flex-col"
+    >
       {/* Identity and controls */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-2">
         <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
           <TerminalSquare className="size-4" />
         </div>
-        <span className="shrink-0 text-[14px] font-semibold">{tab.title}</span>
+        <span data-sql-title className="max-w-64 min-w-0 truncate text-[14px] font-semibold" title={tab.title}>
+          {tab.title}
+        </span>
+        {modified && (
+          <span data-sql-edited className="-ml-0.5 flex shrink-0 items-center gap-1 text-[11px] font-medium text-accent-text">
+            <span aria-hidden className="size-1.5 rounded-full bg-accent" /> {t("sql.scriptEdited")}
+          </span>
+        )}
         <div className="flex h-7 max-w-52 shrink-0 items-center gap-1.5 rounded-lg border border-border px-1.5 text-xs">
           <EngineTag engine={connection.engine} />
           <span className="truncate font-medium">{connection.name}</span>
@@ -405,6 +594,25 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
         <IconButton label={t("sql.format")} disabled={empty || running} onClick={() => void format()}>
           <AlignLeft className="size-4" />
         </IconButton>
+        <IconButton
+          label={t(tab.scriptId === undefined ? "sql.scriptSaveNewHint" : "sql.scriptSaveHint", { name: tab.title })}
+          data-sql-save
+          disabled={empty || (tab.scriptId !== undefined && !modified)}
+          onClick={() => void saveScript()}
+        >
+          <Save className="size-4" />
+        </IconButton>
+        <ScriptsMenu
+          connectionId={connection.id}
+          connectionName={connection.name}
+          scriptId={tab.scriptId}
+          suggested={tab.scriptId === undefined ? "" : t("sql.scriptCopyName", { name: tab.title })}
+          mode={scriptsMode}
+          onMode={setScriptsMode}
+          empty={empty}
+          onCreate={createScript}
+          onOpen={openScript}
+        />
         <DropdownMenu.Root onOpenChange={(open) => open && !history && void ipc.listHistory(connection.id, 100).then(setHistory)}>
           <DropdownMenu.Trigger asChild>
             <IconButton label={t("sql.history")}>
@@ -456,9 +664,46 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
             {t("sql.stop")}
           </Button>
         ) : (
-          <Button size="sm" variant="primary" disabled={!connected || empty} title={t("sql.runHint")} icon={<Play className="size-3 fill-current" />} onClick={runEditor}>
-            {t("sql.run")} <kbd className="font-sans text-[11px] opacity-80">⌘↵</kbd>
-          </Button>
+          <div className="flex shrink-0">
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={!connected || empty}
+              title={t("sql.runHint")}
+              icon={<Play className="size-3 fill-current" />}
+              onClick={runEditor}
+              className="rounded-r-none"
+            >
+              {t("sql.run")} <kbd className="font-sans text-[11px] opacity-80">⌘↵</kbd>
+            </Button>
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={!connected || empty}
+                  aria-label={t("sql.runMore")}
+                  title={t("sql.runMore")}
+                  data-sql-run-menu
+                  className="rounded-l-none border-l border-accent-fg/25 px-1"
+                >
+                  <ChevronDown className="size-3.5" />
+                </Button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content align="end" sideOffset={6} className={menuContentClass}>
+                  <DropdownMenu.Item className={menuItemClass} onSelect={runEditor}>
+                    <Play className="size-3.5" /> {t("sql.runAll")}
+                    <span className="ml-auto pl-6 text-xs text-fg-subtle">⌘↵</span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item className={menuItemClass} data-sql-run-current onSelect={() => void runCurrent()}>
+                    <TextCursorInput className="size-3.5" /> {t("sql.runCurrent")}
+                    <span className="ml-auto pl-6 text-xs text-fg-subtle">⇧⌘↵</span>
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </div>
         )}
       </div>
 
@@ -466,7 +711,9 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
       <div style={{ height: editorHeight }} className="relative shrink-0">
         <div ref={hostRef} className="absolute inset-0" />
         {empty && initial !== null && (
-          <div className="pointer-events-none absolute top-[10px] left-[52px] font-mono text-[13px] leading-[21px] text-fg-subtle">{t("sql.placeholder")}</div>
+          <div className="pointer-events-none absolute top-[10px] right-4 left-[52px] font-mono text-[13px] leading-[21px] whitespace-pre-line text-fg-subtle">
+            {t("sql.placeholder")}
+          </div>
         )}
       </div>
       <div
@@ -566,7 +813,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
                       onSelect={setSelection}
                       onUndo={() => {}}
                       onRedo={() => {}}
-                      onSave={() => {}}
+                      onSave={() => void saveScript()}
                     />
                   </div>
                 </div>

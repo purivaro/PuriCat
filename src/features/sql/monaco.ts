@@ -147,7 +147,14 @@ export interface EditorOptions {
   value: string;
   schema: Schema;
   onChange: (value: string) => void;
+  /** ⌘↵ */
   onRun: () => void;
+  /** ⇧⌘↵ */
+  onRunCurrent: () => void;
+  /** ⌘S */
+  onSave: () => void;
+  /** The cursor moved (typing moves it too). */
+  onCursor: () => void;
 }
 
 export function createEditor(o: EditorOptions): monaco.editor.IStandaloneCodeEditor {
@@ -175,8 +182,21 @@ export function createEditor(o: EditorOptions): monaco.editor.IStandaloneCodeEdi
     scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
   });
   editor.onDidChangeModelContent(() => o.onChange(editor.getValue()));
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, o.onRun);
+  editor.onDidChangeCursorPosition(o.onCursor);
+  // Actions, not `addCommand`: a command's key binding is shared by every editor in the page,
+  // and the last editor created answers for all of them. An action belongs to its editor.
+  const keys = [
+    editor.addAction({ id: "puricat.run", label: "Run", keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter], run: o.onRun }),
+    editor.addAction({
+      id: "puricat.runCurrent",
+      label: "Run the statement at the cursor",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter],
+      run: o.onRunCurrent,
+    }),
+    editor.addAction({ id: "puricat.save", label: "Save", keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS], run: o.onSave }),
+  ];
   editor.onDidDispose(() => {
+    for (const key of keys) key.dispose();
     schemas.delete(model.uri.toString());
     model.dispose();
   });
@@ -188,6 +208,29 @@ export function textToRun(editor: monaco.editor.IStandaloneCodeEditor): string {
   const selection = editor.getSelection();
   const selected = selection && !selection.isEmpty() ? editor.getModel()?.getValueInRange(selection) : "";
   return selected?.trim() ? selected : editor.getValue();
+}
+
+/** Where the cursor is, as an offset into the editor's text. */
+export function cursorOffset(editor: monaco.editor.IStandaloneCodeEditor): number {
+  const position = editor.getPosition();
+  return position ? (editor.getModel()?.getOffsetAt(position) ?? 0) : 0;
+}
+
+/**
+ * A bar in the margin beside one stretch of the text: the statement ⇧⌘↵ would run.
+ * `show(null)` removes it.
+ */
+export function statementMarker(editor: monaco.editor.IStandaloneCodeEditor) {
+  const marks = editor.createDecorationsCollection();
+  return {
+    show(range: { start: number; end: number } | null) {
+      const model = editor.getModel();
+      if (!range || !model) return marks.clear();
+      const from = model.getPositionAt(range.start).lineNumber;
+      const to = model.getPositionAt(range.end).lineNumber;
+      marks.set([{ range: new monaco.Range(from, 1, to, 1), options: { isWholeLine: true, linesDecorationsClassName: "sql-current-statement" } }]);
+    },
+  };
 }
 
 /** Replace the selection (or everything) through the undo stack. */
