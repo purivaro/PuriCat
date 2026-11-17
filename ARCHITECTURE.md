@@ -263,7 +263,6 @@ The Smart Paste dialog keeps its own state (pasted block, mapping, preview) and 
 |---|---|---|
 | SQL Server adapter | New `Session` variant and module; the compiler lists every `match` to extend. `ident::sqlserver` already exists | 2b |
 | SSH tunnels | In `puricat-core`, before `Session::connect`: open a local forward, connect the driver to it, tie its lifetime to the session | 2b |
-| Rest of editing (full-value editor, Smart Paste follow-ups) | The tab view's `Pending` model for staging; `db::smart` for value-aware comparison | 3 |
 | Imports beyond 10,000 rows, CSV / XLSX files | A batching executor next to `db::write`; `db::smart::Draft` can be reused for matching | 4 |
 | Rest of the SQL workspace (EXPLAIN view, query parameters, larger or streamed results) | The query tab (`src/features/sql`) and `db::console`; streaming needs a result store that does not hold every row in memory | 4 |
 | Object editing with DDL preview, SQL dump export | New tab kinds or dialogs; DDL generation per engine module, run through the console path | 4 |

@@ -155,7 +155,7 @@ Smart Paste limitations:
 
 - **The preview requirement is a UI rule plus a fingerprint check.** The backend cannot tell whether a human saw the preview; it only requires the caller to state the fingerprint a fresh analysis produces, which `analyze_paste` returns.
 - **The re-analysis is not in the write transaction.** Its lookups run on pooled connections just before the transaction starts. A change made in between is caught by the optimistic check (updates) or by the unique index (inserts), and the run rolls back; a row classified as unchanged or unmatched is simply not touched.
-- **"Update" is a text comparison.** A pasted `1.5` against a stored `1.500000` is counted and run as an update that stores the same number.
+- **"Unchanged" is decided by PuriCat, not by the server.** A pasted value that is plainly the stored one in another spelling (a decimal number, a date or time without a time zone, a PostgreSQL boolean) is not a change; everything else that differs as text is counted and run as an update, even when it stores the same value. The rule errs towards "changed": a wrong "unchanged" would leave a row alone that the user meant to change, so only spellings the servers were seen to store identically are accepted (live tests on both engines).
 - **Key values of non-integer types are pre-checked only generically.** Integer keys must be whole numbers (see the table). A key value of another type that the database coerces, such as a date, gets only the number-shape and length checks and is then cast and compared by the server; a malformed one has not been tested on either engine.
 - **The SQL statements are not shown.** The preview lists the operation per row and the changed columns, not the statement text that the grid's review dialog shows.
 - **A stop request that arrives after the last statement has started does not prevent the commit.**
@@ -347,7 +347,6 @@ One hook is not debug-only: a query tab attaches its Monaco editor object to the
 | Verification of the production and bulk-threshold review paths through the UI | 3 |
 | Client-side validation before save | 3 |
 | Per-connection session time zone (PostgreSQL) | 2b |
-| Smart Paste: value-aware comparison | 3 |
 | Smart Paste: pre-check of key values of non-integer types that the database coerces (dates, for example) | Not scheduled |
 | Row-content check on DELETE; backend enforcement of the review policy | Not scheduled |
 | SQL console: backend enforcement of the confirmation and the impact threshold; a read-only refusal in `run_sql` that SQL cannot switch off | Not scheduled |

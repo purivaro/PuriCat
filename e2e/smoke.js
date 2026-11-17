@@ -62,6 +62,12 @@
       return l.querySelector("input, select");
     };
     const dialog = () => document.querySelector('[role="dialog"], [role="alertdialog"]');
+    // A menu or popover that was closed can stay in the page, closed, when the window is
+    // covered and its exit animation never runs. Only what is open counts: an item of the
+    // same name in a menu that was closed earlier belongs to something else.
+    const OPEN = '[data-state="open"]';
+    const menuItem = (text) => all(`[role="menu"]${OPEN} [role="menuitem"]`).find((e) => e.textContent.replace(/\s+/g, " ").trim() === text);
+    const menuItemWith = (text) => all(`[role="menu"]${OPEN} [role="menuitem"]`).find((e) => e.textContent.replace(/\s+/g, " ").trim().includes(text));
     // Rows are matched on their label, not on badges or engine tags around it.
     const rowLabel = (r) => r.querySelector(".truncate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
     const treeRows = (text) => all("[data-tree-row]").filter((r) => rowLabel(r) === text);
@@ -266,7 +272,7 @@
     // 5. From a cell: "Filter by this value" adds the condition and shows it in the bar.
     await selectCell(0, STATUS);
     await rightClick(cellAt(0, STATUS));
-    await click(await waitFor(() => exact('[role="menuitem"]', "Filter by this value"), "cell menu"), "filter by this value");
+    await click(await waitFor(() => menuItem("Filter by this value"), "cell menu"), "filter by this value");
     await waitFor(() => filterCount() === "1" && new Set(columnCells(STATUS)).size === 1, "filter from a cell");
     const fromCell = {
       column: filterRows()[0].querySelectorAll("select")[0].value,
@@ -317,7 +323,7 @@
     // Read it back through the cell's menu.
     await selectCell(0, NOTE);
     await rightClick(cellAt(0, NOTE));
-    await click(await waitFor(() => exact('[role="menuitem"]', "View whole value"), "cell menu"), "view whole value");
+    await click(await waitFor(() => menuItem("View whole value"), "cell menu"), "view whole value");
     box = await wholeBox();
     const savedBack = { length: box.value.length, tail: box.value.slice(-14) };
     if (box.value !== `${whole} (ตรวจแล้ว)`) throw new Error(`the saved note is not what was typed: ${savedBack.length} characters ending ${savedBack.tail}`);
@@ -502,6 +508,8 @@
       box: problemBox.textContent.replace(/\s+/g, " ").trim(),
       runDisabled: smartButton("Run").disabled,
       listed: listedStatuses(),
+      // The stored total is 10.00 and the pasted one is 10: the same number, so not a change.
+      update: smartRows().find((r) => r.includes("SO-99001")),
     };
     await click(smartCheck("only-problems"), "list only the rows with problems");
     await waitFor(() => listedStatuses() === "invalid,duplicate,duplicate", "only the rows with problems");
@@ -517,6 +525,7 @@
       JSON.stringify(skipOffer.counts) !== JSON.stringify({ insert: 1, update: 1, unchanged: 0, unmatched: 0, problems: 3 }) ||
       !skipOffer.runDisabled ||
       skipOffer.listed !== "insert,invalid,update,duplicate,duplicate" ||
+      !skipOffer.update?.endsWith("| changes status") ||
       skipOffer.copied.length !== 4 ||
       skipOffer.copied[0] !== "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\tProblem" ||
       !skipOffer.copied[1].startsWith("SO-99004\tPending\tlots\t") ||
@@ -548,7 +557,7 @@
     // 8c. SQL console (MySQL): run a script, confirmation for a destructive statement,
     //     the impact guard, an error, the history, and exports
     await rightClick(treeRow("Demo MySQL"));
-    await click(await waitFor(() => withText('[role="menuitem"]', "New query"), "new query menu"), "new query");
+    await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
     const sqlTab = () => document.querySelector(`${panelSel} [data-sql-tab]`);
     await waitFor(() => sqlTab()?.__editor, "sql editor", 30000);
     const sqlButton = (label) => all(`${panelSel} button`).find((b) => b.textContent.trim().startsWith(label));
@@ -669,13 +678,10 @@
     // A key pressed in the editor itself, so that its own key bindings are what answers.
     const editorKey = (init) =>
       sqlTab().querySelector("textarea, .native-edit-context").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
-    const closed = (sel) => {
-      const el = document.querySelector(sel);
-      return !el || el.dataset.state === "closed";
-    };
+    const closed = (sel) => all(sel).every((el) => el.dataset.state === "closed");
     const newQueryTab = async (title) => {
       await rightClick(treeRow("Demo MySQL"));
-      await click(await waitFor(() => withText('[role="menuitem"]', "New query"), "new query menu"), "new query");
+      await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
       await waitFor(() => sqlTitle() === title && sqlTab()?.__editor, `query tab ${title}`, 30000);
     };
     const scriptsOf = JSON.parse((await invoke("get_settings")).workspace).tabs.find((x) => x.kind === "sql").connectionId;
@@ -724,7 +730,7 @@
     sqlEditor().setValue(scriptText);
     await waitFor(() => !saveButton().disabled, "save button enabled");
     editorKey({ key: "s", code: "KeyS", keyCode: 83, metaKey: true });
-    const nameBox = await waitFor(() => document.querySelector("[data-sql-scripts] [data-script-name] input"), "name of the new script");
+    const nameBox = await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-name] input"), "name of the new script");
     await type(nameBox, `  ${scriptName} `);
     await stage("sql-script-name", { nothingToSave });
     await click(document.querySelector("[data-script-create]"), "save the new script");
@@ -757,14 +763,14 @@
     // From a third, blank tab: the script is already open, so its tab comes to the front.
     await newQueryTab("Query 2");
     const scriptsToggle = () => document.querySelector(`${panelSel} [data-sql-scripts-toggle]`);
-    const scriptRows = () => all("[data-sql-scripts] [data-script-row]");
+    const scriptRows = () => all("[data-sql-scripts][data-state=open] [data-script-row]");
     const openScripts = async () => {
       await click(scriptsToggle(), "saved scripts");
-      return waitFor(() => document.querySelector("[data-sql-scripts]") && scriptRows()[0], "saved scripts list");
+      return waitFor(() => scriptRows()[0], "saved scripts list");
     };
     const closeScripts = () =>
       waitFor(() => {
-        document.querySelector("[data-sql-scripts]")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        document.querySelector("[data-sql-scripts][data-state=open]")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
         return closed("[data-sql-scripts]");
       }, "saved scripts closed");
     await openScripts();
@@ -776,18 +782,18 @@
     // A name is used once per connection, whatever its case; then the script is renamed.
     await openScripts();
     const listedHere = scriptRows().map((r) => r.textContent.replace(/\s+/g, " ").trim());
-    await click(exact("[data-sql-scripts] button", "Save as a new script…"), "save as");
-    const copyBox = await waitFor(() => document.querySelector("[data-sql-scripts] [data-script-name] input"), "name box");
+    await click(exact("[data-sql-scripts][data-state=open] button", "Save as a new script…"), "save as");
+    const copyBox = await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-name] input"), "name box");
     await waitFor(() => copyBox.value !== "", "a suggested name");
     const suggestedName = copyBox.value;
     await type(copyBox, scriptName.toUpperCase());
     await click(document.querySelector("[data-script-create]"), "save under a taken name");
-    const taken = (await waitFor(() => document.querySelector("[data-sql-scripts] [data-script-problem]"), "name taken")).textContent.trim();
+    const taken = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-problem]"), "name taken")).textContent.trim();
     await stage("sql-scripts", { listedElsewhere, listedHere, suggestedName, taken });
-    await click(exact("[data-sql-scripts] [data-script-name] button", "Cancel"), "cancel the name");
+    await click(exact("[data-sql-scripts][data-state=open] [data-script-name] button", "Cancel"), "cancel the name");
     await click(scriptRows()[0].querySelector('button[aria-label="Rename"]'), "rename");
-    await type(await waitFor(() => document.querySelector('[data-sql-scripts] input[aria-label="Name of the script"]'), "rename box"), "Status totals");
-    await click(exact("[data-sql-scripts] button", "Rename"), "confirm rename");
+    await type(await waitFor(() => document.querySelector('[data-sql-scripts][data-state=open] input[aria-label="Name of the script"]'), "rename box"), "Status totals");
+    await click(exact("[data-sql-scripts][data-state=open] button", "Rename"), "confirm rename");
     await waitFor(() => sqlTitle() === "Status totals" && tabNamed("Status totals"), "the tab follows its script's name");
     await closeScripts();
 
@@ -818,9 +824,9 @@
     // Deleting asks in place; the tab keeps its text and is a plain query tab again.
     await openScripts();
     await click(scriptRows()[0].querySelector('button[aria-label="Delete"]'), "delete");
-    const deleteAsk = (await waitFor(() => document.querySelector("[data-sql-scripts] [data-script-deleting]"), "delete question")).textContent.replace(/\s+/g, " ").trim();
-    await click(exact("[data-sql-scripts] [data-script-deleting] button", "Delete"), "confirm delete");
-    await waitFor(() => document.querySelector("[data-sql-scripts] [data-script-empty]"), "no script left");
+    const deleteAsk = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-deleting]"), "delete question")).textContent.replace(/\s+/g, " ").trim();
+    await click(exact("[data-sql-scripts][data-state=open] [data-script-deleting] button", "Delete"), "confirm delete");
+    await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-empty]"), "no script left");
     await closeScripts();
     const afterDelete = {
       stored: (await storedScripts()).length,
@@ -1195,15 +1201,15 @@
 
     // ---- duplicate + delete through context menus -----------------------------------
     await rightClick(treeRow("Demo MySQL"));
-    await click(await waitFor(() => exact('[role="menuitem"]', "Duplicate"), "context menu"), "duplicate");
+    await click(await waitFor(() => menuItem("Duplicate"), "context menu"), "duplicate");
     const copy = await waitFor(() => treeRow("Demo MySQL copy"), "duplicated connection");
-    // The first menu is still in the page while it fades out; its "Delete…" belongs to the original.
-    await waitFor(() => !document.querySelector('[role="menu"]'), "first context menu to close");
+    // The first menu's "Delete…" belongs to the original: wait until no menu is open.
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "first context menu to close");
     // A script saved for the copy goes with it, and the dialog says so.
     const copyId = (await invoke("list_connections")).find((c) => c.name === "Demo MySQL copy").id;
     await invoke("create_script", { id: copyId, name: "left behind", sql: "SELECT 1" });
     await rightClick(copy);
-    await click(await waitFor(() => exact('[role="menuitem"]', "Delete…"), "context menu"), "delete");
+    await click(await waitFor(() => menuItem("Delete…"), "context menu of the copy"), "delete");
     await waitFor(() => document.querySelector('[role="alertdialog"]'), "confirm dialog");
     const deleteText = document.querySelector('[role="alertdialog"]').textContent.replace(/\s+/g, " ").trim();
     if (!deleteText.includes("Demo MySQL copy")) throw new Error(`the delete dialog is not about the copy: ${deleteText}`);
@@ -1255,7 +1261,7 @@
     cursorTo(4, 5);
     await waitFor(() => markedLines() === "4", "mark in the margin");
     await click(scriptsToggle(), "saved scripts");
-    const thaiScripts = (await waitFor(() => document.querySelector("[data-sql-scripts] [data-script-empty]"), "empty list in Thai")).parentElement.parentElement.textContent.replace(/\s+/g, " ").trim();
+    const thaiScripts = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-empty]"), "empty list in Thai")).parentElement.parentElement.textContent.replace(/\s+/g, " ").trim();
     await stage("thai-dark-sql", { thaiScripts, save: saveButton().getAttribute("aria-label") });
     await closeScripts();
     await palette("ธีมสว่าง");
