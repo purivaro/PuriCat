@@ -106,7 +106,7 @@ Side effects to know about:
 
 ## What each suite covers
 
-### Rust unit tests (64, plus 2 ignored)
+### Rust unit tests (70, plus 2 ignored)
 
 | Module | Covers |
 |---|---|
@@ -116,6 +116,7 @@ Side effects to know about:
 | `db::ident` | Quoting for MySQL, PostgreSQL and SQL Server, escaping of the quote character, rejection of empty and NUL names |
 | `db` | Default order by primary key, validation of the sort column, page limit, truncation on character boundaries, binary prefix |
 | `db::mysql`, `db::postgres` | The generated `SELECT` text, type classification; MySQL expression defaults (`DEFAULT_GENERATED`) not treated as generated columns |
+| `db::filter` (6, new) | The exact `WHERE` text and parameter list on both engines: typed comparison (integers, decimals, dates, text), a hostile value only in the parameters, `%`, `_` and `!` made literal in a search, NULL kept by "≠" and "does not contain", NULL tests without a value and on a binary column, the shown text for JSON and for equality on a MySQL `FLOAT`. Refusals: unknown column, a missing value, anything but a NULL test on a binary or a MySQL spatial column, ordering on JSON, more than 20 conditions, and on MySQL text that is not a number (`abc`, empty, `nan`, `0x10`) or not a complete date or time (`2026`, `2026-01`, `2026-13-01`) |
 | `db::write` | The exact MySQL plan and the exact PostgreSQL plan for one change set (statement order, typed key comparison, bare-type casts, `BIT` handling, concurrency conditions, parameter order, empty insert); refusal of empty, incomplete-key, NULL-key, wrong-key, unknown-column, generated-column, duplicate-column and no-change updates; keyless tables (delete refused, insert planned); hostile key and cell values absent from the SQL text |
 | `db::smart` (8) | Number recognition for the pre-check (signs, decimals, exponents, `NaN` / `Infinity`; thousands separators and non-ASCII digits rejected). UPSERT on a unique key: every status in one paste (update with the changed column, unchanged, insert with an empty NOT NULL-with-default cell left out, missing key, exact-text duplicates, not a number, longer than `varchar(8)`), the counts, the lookup SQL shape for PostgreSQL and its parameters, the resulting change set. A generated key: blank means new, unknown means skipped, the key is never written, the MySQL lookup shape. INSERT with a key (existing rows refused), INSERT without a key (no lookup), UPDATE never inserting. Two spellings of one key (`7`, `007`) matching one existing row reported as duplicates. One existing row is claimed once even across lookup chunks: two spellings (`abc`, `ABC`) answered by separate lookups are both duplicates. Key values must be well formed for their type: `12abc`, `1.9` and `1e2` for an integer key are invalid and never looked up, `-7` is looked up. Refused set-ups: a key that is not unique, no key, nothing to update, unknown / doubly mapped / non-writable columns, a key column in the update list, a required column not mapped, ragged rows. The database answers are simulated in these tests |
 | `db::script` (7) | Splitting on real semicolons only (not in strings, quoted identifiers, line or block comments), empty statements dropped, byte offsets of statements. Dialect rules: MySQL backticks, `#` comments, backslash escapes and `--` without a following space not being a comment; PostgreSQL dollar-quoted bodies, nested block comments, literal backslashes, `E''` strings, `$1` not opening a dollar quote. Classification: reads (`SELECT`, `WITH`, `SHOW`, `EXPLAIN DELETE`, `VALUES`), row-changing statements (including a data-modifying `WITH`, `EXPLAIN ANALYZE UPDATE`, `MERGE`), DDL, transaction control, `SELECT ... INTO` and `CALL` as `other`, keywords inside a string or an identifier ignored. Danger reasons: `DELETE` and `UPDATE` without `WHERE` (a `WHERE` only in a subquery still counts as none), `DROP`, `TRUNCATE`, `ALTER ... DROP`, and their harmless counterparts. Transaction effect: `BEGIN`, `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `ROLLBACK TO` and `SAVEPOINT` (no change), a comment in front, a keyword inside a comment, `AND CHAIN` / `AND NO CHAIN`, `START REPLICA`. Masking of password literals after `IDENTIFIED BY` and `PASSWORD`, in single quotes and in double quotes (`IDENTIFIED BY "x"`), including the over-masking of a literal after a column named `password`. `mentions`: the keyword `TEMPORARY` is found in `create temporary table …` and not inside a string. **`single_read`** (1 test, new), the text check of the AI's query tool. Accepted, 7 texts: a `SELECT` with `LIMIT`, a `SELECT` followed by a semicolon and a comment, `SHOW CREATE TABLE`, `EXPLAIN SELECT`, a `WITH … SELECT`, a `SELECT` whose string literal says `for update`, PostgreSQL `TABLE orders`. Refused, 28 texts: empty text and a lone comment; two statements (`SELECT 1; SELECT 2`, `SELECT 1; DELETE …`, `COMMIT; DELETE …`); `DELETE`, `UPDATE`, `SET … READ WRITE`, `SET default_transaction_read_only = off`, `CALL`, `DO`, `COPY … TO PROGRAM`; a data-modifying `WITH`; `EXPLAIN ANALYZE DELETE`; `INTO OUTFILE` after a `SELECT` and after `TABLE`, `INTO @n`, `SELECT * INTO copy`; `FOR UPDATE`, `FOR SHARE`, `FOR NO KEY UPDATE`, `LOCK IN SHARE MODE`; MySQL version comments `/*! … */` and `/*M! … */`; `LOAD_FILE`, `pg_terminate_backend`, `dblink` and `"pg_read_file"` written as a quoted identifier |
@@ -134,6 +135,7 @@ Side effects to know about:
 | `postgres_browse_and_page` | The same shape for PostgreSQL, plus schemas, system schema flags, enum, array, `uuid`, `jsonb`, `bytea`, `timestamptz`, identity column, view and materialized view listing, reading rows through a view, a name containing a double quote, a profile without a default database, server-confirmed read-only on a named database, failure on an unknown database |
 | `unreachable_server_fails_fast_with_the_real_reason` | Both engines against a closed port: a "refused" error in under 5 seconds. Needs no server |
 | `sort_spec_wire_format` | Default of `descending`. Needs no server |
+| Row filter, inside both browse tests (`filter_checks`, new) | On the same three rows on each engine: equality on a 64-bit integer beyond 2^53 (the neighbouring value finds nothing), on a decimal written two ways, ordering on decimals and timestamps; "≠" and "does not contain" keeping NULL rows; case-insensitive search including Thai text and quotes, `%` and `_` finding nothing, a search in a number, a timestamp and JSON; NULL tests including a binary column; two conditions together; a filter with a sort and a page of one row; the refusals, and a non-number or a non-date as an error. MySQL only: `TINYINT(1)` and `BIT`. PostgreSQL only: case-sensitive text equality, `boolean`, `uuid`, enum, array, ordering on an enum refused |
 
 ### Live database tests: `live_write` (4 tests)
 
@@ -272,13 +274,14 @@ Not covered by `live_agent_tools`: the IPC commands (`agent_send` with tools, `a
 
 Not covered by the live tests: a wrong password on PostgreSQL, a wrong password (as opposed to an unknown user) on MySQL, reading rows through a PostgreSQL materialized view, any TLS mode other than the default, the 10,000-change limit, two PuriCat sessions editing the same row, a foreign-key or unique-constraint failure (the end-to-end test covers one foreign-key refusal), the PostgreSQL `TimeZone=UTC` behaviour (documented in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), not asserted), and the types listed there as not verified on the write path.
 
-### Frontend unit tests (47 cases in 7 files)
+### Frontend unit tests (52 cases in 8 files)
 
 | File | Cases | Covers |
 |---|---|---|
 | `src/lib/clipboard.test.ts` | 7 | Parsing spreadsheet clipboard text: plain ranges and the final line break, empty cells and rows, Unicode, quoted cells with tabs / line breaks / doubled quotes, ragged rows, an unterminated quote, no reinterpretation of numbers, dates or leading zeros; serialising back with quotes only where needed |
 | `src/features/table/pending.test.ts` | 11 | Staging and un-staging an edit, immutability of earlier states (undo relies on it), blockers (non-editable column, truncated cell, deleted row, unaddressable row), empty input vs NULL, adding / filling / dropping new rows, marking and restoring rows, block paste with appended rows and overflow reporting, single-cell fill of a selection, empty clipboard, change-set building with original values, composite keys in key order, undo / redo history |
 | `src/features/table/smartPaste.test.ts` | 9 | Spreadsheet column letters; header-row detection by column names (case-insensitive, a lone header row is data); automatic mapping by header name and by position, each table column used once; keys offered only when all their columns are mapped; update columns limited to writable non-key columns; request building: header, unmapped columns and blank rows left out, source row numbers kept, empty cells typed (NULL for a nullable number and for a blank key, empty string for text), an empty cell of a NOT NULL non-text column sent as NULL so the default can apply, the `NULL`-text option, no update list for INSERT |
+| `src/features/table/filter.test.ts` | 5 (new) | The filter bar's logic: the operators offered per column kind, the operator kept or replaced when a condition moves to another column, incomplete conditions left out and no value sent with a NULL test, a filter on the empty text surviving the bar, comparison of applied filters, the filter built from a cell (NULL, binary, a value cut for preview) |
 | `src/stores/workspace.test.ts` | 5 | Tab closing and neighbour activation, tab id uniqueness across connection / database / schema |
 | `src/features/table/sort.test.ts` | 2 | The sort cycle of a header click |
 | `src/features/agent/markdown.test.ts` | 5 | The Markdown reader for AI answers: paragraphs, fenced code with its language, headings and lists in one answer; a code block still streaming (no closing fence) and the text inside a fence kept verbatim; simple tables, and a line with a pipe character that is not a table; markup-looking text (`<img … onerror=…>`) stays text and single asterisks are not emphasis; which code blocks count as runnable SQL (by tag, or untagged by first keyword; `bash` and `json` blocks do not) |
@@ -289,6 +292,8 @@ There are no component tests: `DataGrid`, `TableTab`, `ReviewDialog`, `SmartPast
 ### End-to-end smoke test
 
 Empty welcome state; create and test a MySQL and a PostgreSQL connection through the dialog and save them; a clear error for an unreachable server and the production read-only hint; browse MySQL (tree groups, grid rows, footer); sort ascending and descending; next page; structure view; browse PostgreSQL at the same time in a second tab; the AI panel, the agent chat and the AI's database tools on stand-in CLIs (below); duplicate and delete through the context menu and confirmation dialog; dark theme and Thai through the command palette; finally the stored connections, UI settings and tab list are read back over IPC.
+
+Row filter, in the real window on the PostgreSQL `orders` table (stages `table-filter`, `table-filter-empty`, `table-filter-cell`): the Filter button opens the bar and a new condition on a number offers the comparisons; a search in an enum column whatever the case, sent with Enter, leaves only matching rows, marks the column header and shows "1 condition applied" in the footer; a second condition on a number, sent with "Apply" after the bar said it was not applied yet, leaves exactly the 4 rows that meet both; a filter nothing matches shows the no-match state, whose button clears it and resets the bar; text in a numeric condition shows the server's own refusal, and "Clear filter" there brings the rows back; "Filter by this value" in a cell's menu adds the condition and shows it in the bar. Before the theme and language stages the bar is opened again with one condition applied and one unwritten, so `dark` and `thai-dark` show it, and the Thai footer is asserted. Not covered: MySQL, ⌘F and Escape, a view, the lock while edits are unsaved, the narrow header (looked at in the screenshots only).
 
 Editing, in the real window against both engines:
 
@@ -367,6 +372,20 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-17 (row filter)
+
+Same machine and servers as below. Only what was run for the row filter is listed; the 2026-11-16 results stand for everything else.
+
+| Check | Result |
+|---|---|
+| `pnpm check` (type-check, Vitest, `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace`) | Pass on the final code: 70 Rust unit tests (2 ignored), 52 Vitest cases in 8 files |
+| `cargo test -p puricat-core --test live_db` with both servers configured | Pass: 4 passed, with the filter checks inside both browse tests, on MySQL 9.3.0 and PostgreSQL 16.13 |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the three filter stages | Pass, once, with an empty `problems` list — on the code before three later changes (the header that keeps the table's name in a narrow tab, the refusal of filters on MySQL spatial columns, a stricter check in the test itself) |
+| `APP=<bundle binary> e2e/run.sh` (debug bundle, embedded assets, production CSP), the whole smoke test | Pass, once, on the final code, with an empty `problems` list |
+| Screenshots of the filter stages (`SHOTS=1`): English and light; the bar in the dark theme; the bar in Thai with the AI panel open (a narrow tab) | Looked at by hand after the runs. Not an automated check |
+
+One run of the dev-server mode failed before these, at `delete-confirm`, for a reason in the test and not in the app: the script right-clicked the duplicated connection while the first context menu was still fading out, and clicked that menu's "Delete…". Deleting the original was refused (it had a query tab with an open transaction), so nothing was lost. The script now waits for the first menu to close and checks that the dialog names the copy.
+
 ## Results — 2026-11-16
 
 Environment: macOS 26 on Apple Silicon, Rust 1.99, Node 25, pnpm 10, local MySQL 9.3.0 and PostgreSQL 16.13. Run on the development machine, not in CI.
@@ -437,6 +456,8 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 
 | Not verified | Why |
 |---|---|
+| Row filter through the UI on MySQL, on a view, with ⌘F / Escape, and its lock while edits are unsaved | The end-to-end stages use the PostgreSQL `orders` table and the mouse. The backend is live-tested on both engines; MySQL's own checks (number, date) are unit-tested and live-tested below the UI |
+| Row filter on large tables | No test of its speed. Conditions that compare the shown text (JSON, uuid, enum, a search in a non-text column) cannot use an index |
 | SQL Server | No adapter; no disposable instance available (no Docker on the development machine) |
 | SSH tunnels | Not implemented |
 | TLS `require` / `verify-ca` / `verify-full` and custom CA | Only local servers were used; no TLS-enforcing server |

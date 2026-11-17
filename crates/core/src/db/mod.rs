@@ -5,6 +5,7 @@
 
 pub mod console;
 pub mod export;
+pub mod filter;
 pub mod ident;
 mod mysql;
 mod postgres;
@@ -142,6 +143,9 @@ pub struct PageRequest {
     pub limit: u32,
     #[serde(default)]
     pub sort: Option<SortSpec>,
+    /// Conditions a row must meet, all of them. Empty shows every row.
+    #[serde(default)]
+    pub filters: Vec<filter::Filter>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -265,9 +269,10 @@ impl Session {
             return Err(Error::NotFound(format!("Table {}", table.name)));
         }
         let order = resolve_order(&meta, req.sort.as_ref())?;
+        let filter = filter::where_clause(self.engine(), &meta, &req.filters)?;
         let raw = match self {
-            Session::MySql(s) => s.select_page(table, &meta, &order, req).await?,
-            Session::Postgres(s) => s.select_page(table, &meta, &order, req).await?,
+            Session::MySql(s) => s.select_page(table, &meta, &filter, &order, req).await?,
+            Session::Postgres(s) => s.select_page(table, &meta, &filter, &order, req).await?,
         };
         Ok(finish_page(meta, raw, order, req, started))
     }
@@ -592,6 +597,7 @@ mod tests {
             offset: 40,
             limit: 2,
             sort: None,
+            filters: Vec::new(),
         };
         let page = finish_page(
             meta(),

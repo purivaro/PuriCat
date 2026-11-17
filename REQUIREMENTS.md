@@ -52,6 +52,7 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | Virtualized grid | Only visible rows are rendered | Done |
 | Exact values | Decimals, 64-bit integers, timestamps, JSON, Unicode shown without loss | Done |
 | Paging and sorting | Stable order by primary key; sort column validated against metadata | Done (OFFSET paging; keyset is Planned, Phase 2b) |
+| Filtering | Conditions on columns narrow the rows; values are never part of the SQL text; a value the column cannot hold is an error, not a silent result | Done for MySQL and PostgreSQL: twelve operators joined with AND, typed comparison for numbers, dates and text, "Filter by this value" on a cell. Verified in the backend on both engines, through the UI on PostgreSQL only. OR, value lists, a free `WHERE` box and an exact count of the matching rows are not built ([DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), "Row filter") |
 | NULL vs empty, truncated previews flagged | Distinct rendering; flag on shortened cells | Done; a cell inspector for full values is Planned (Phase 2b) |
 | Structure view | Columns, types, nullability, defaults, keys | Done |
 | Exact row count on demand | Estimate is labelled; exact count is opt-in | Partial: estimate shown and labelled; exact count Planned (Phase 2b) |

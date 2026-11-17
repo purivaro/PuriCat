@@ -4,6 +4,7 @@ import {
   CircleAlert,
   ClipboardPaste,
   Eye,
+  Funnel,
   KeyRound,
   Lock,
   Pencil,
@@ -26,10 +27,12 @@ import { EngineTag, EnvBadge } from "../../components/Brand";
 import { Button, IconButton, Segmented, Spinner, StateMessage, Tooltip } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
-import type { ApplyResult, RowPage, SortSpec } from "../../lib/types";
+import type { ApplyResult, RowFilter, RowPage, SortSpec } from "../../lib/types";
 import { sessionOf, useConnections } from "../../stores/connections";
 import { type TableTab, useWorkspace } from "../../stores/workspace";
 import { DataGrid, rangeOf, type Selection } from "./DataGrid";
+import { sameFilters } from "./filter";
+import { FilterBar } from "./FilterBar";
 import {
   addRows,
   canRedo,
@@ -67,6 +70,9 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [limit, setLimit] = useState(200);
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<SortSpec | null>(null);
+  const [filters, setFilters] = useState<RowFilter[]>([]);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterFocus, setFilterFocus] = useState(0);
   const [page, setPage] = useState<RowPage | null>(null);
   const [load, setLoad] = useState<Load>({ status: "idle" });
   const [reloads, setReloads] = useState(0);
@@ -83,7 +89,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const summary = summarize(pending);
   const dirty = summary.rows > 0;
 
-  // Load when the tab is first shown and whenever paging, sorting or the session changes.
+  // Load when the tab is first shown and whenever paging, sorting, the filter or the session changes.
   // Hidden tabs do not query: a restored workspace must not hit every server at once.
   const wanted = connected && (active || page !== null);
   useEffect(() => {
@@ -91,7 +97,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     const id = ++request.current;
     setLoad({ status: "loading" });
     ipc
-      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort })
+      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort, filters })
       .then((rows) => {
         if (id !== request.current) return; // a newer request superseded this one
         setPage(rows);
@@ -106,7 +112,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       });
     // `page` is intentionally not a dependency: it only gates the first load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, reloads]);
+  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, filters, reloads]);
 
   // A closed session invalidates what is on screen.
   useEffect(() => {
@@ -130,6 +136,19 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     setSort(next);
     setOffset(0);
   };
+  const changeFilters = useCallback(
+    (next: RowFilter[]) => {
+      if (sameFilters(next, filters)) return;
+      setFilters(next);
+      setOffset(0);
+    },
+    [filters],
+  );
+  const openFilter = useCallback(() => {
+    setView("data");
+    setFilterOpen(true);
+    setFilterFocus((n) => n + 1);
+  }, []);
 
   const commit = useCallback((next: Pending) => {
     setSaveError(null);
@@ -185,7 +204,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     [page, connection, dirty, saving, reviewing, summary.deleted, summary.rows, tab.table, pending, saved],
   );
 
-  // Tab-level shortcuts: ⌘S saves, ⌘R reloads (unless that would drop edits).
+  // Tab-level shortcuts: ⌘S saves, ⌘R reloads (unless that would drop edits), ⌘F filters.
   useEffect(() => {
     if (!active || !connected) return;
     const onKey = (e: KeyboardEvent) => {
@@ -197,11 +216,14 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       } else if (key === "s") {
         e.preventDefault();
         save();
+      } else if (key === "f" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        openFilter();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, connected, dirty, refresh, save]);
+  }, [active, connected, dirty, refresh, save, openFilter]);
 
   if (!connection) {
     return (
@@ -246,7 +268,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   return (
     <div className="flex h-full flex-col">
       {/* Identity: what this is, and exactly which server it comes from. */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
+      {/* A container: when the tab is narrow (the AI panel open), the buttons keep their icons and give the name its room. */}
+      <div className="@container flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
         <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-text">
           <Icon className="size-[18px]" />
         </div>
@@ -267,12 +290,37 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
           </div>
         </div>
 
+        {page && (
+          <Tooltip label={`${t("filter.open")} (⌘F)`}>
+            <Button
+              size="sm"
+              data-filter-toggle
+              aria-label={t("filter.open")}
+              aria-pressed={filterOpen}
+              icon={<Funnel className="size-3.5" />}
+              onClick={() => (filterOpen && view === "data" ? setFilterOpen(false) : openFilter())}
+            >
+              <span className="hidden @3xl:inline">{t("filter.title")}</span>
+              {filters.length > 0 && (
+                <span data-filter-count className="flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-accent-fg tabular-nums">
+                  {filters.length}
+                </span>
+              )}
+            </Button>
+          </Tooltip>
+        )}
         {editable && (
           <div className="flex shrink-0 items-center gap-1">
             <Tooltip label={dirty ? t("table.dirtyLocked") : t("smart.openHint")}>
               <span>
-                <Button size="sm" disabled={dirty || saving} icon={<ClipboardPaste className="size-3.5" />} onClick={() => setSmartPaste(true)}>
-                  {t("smart.open")}
+                <Button
+                  size="sm"
+                  aria-label={t("smart.open")}
+                  disabled={dirty || saving}
+                  icon={<ClipboardPaste className="size-3.5" />}
+                  onClick={() => setSmartPaste(true)}
+                >
+                  <span className="hidden @3xl:inline">{t("smart.open")}</span>
                 </Button>
               </span>
             </Tooltip>
@@ -308,6 +356,18 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
         </div>
       </div>
 
+      {filterOpen && connected && page && view === "data" && (
+        <FilterBar
+          columns={page.columns}
+          applied={filters}
+          onApply={changeFilters}
+          onClose={() => setFilterOpen(false)}
+          locked={locked}
+          suggested={selection ? (page.columns[selection.focus.c]?.name ?? null) : null}
+          focusSignal={filterFocus}
+        />
+      )}
+
       <div className="relative min-h-0 flex-1">
         {!connected ? (
           <StateMessage
@@ -333,9 +393,12 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
             title={t("table.loadFailed")}
             body={load.message}
             action={
-              <Button icon={<RefreshCw className="size-3.5" />} onClick={refresh}>
-                {t("common.retry")}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button icon={<RefreshCw className="size-3.5" />} onClick={refresh}>
+                  {t("common.retry")}
+                </Button>
+                {filters.length > 0 && <Button onClick={() => changeFilters([])}>{t("filter.clear")}</Button>}
+              </div>
             }
           />
         ) : !page ? (
@@ -351,6 +414,11 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
               sort={sort}
               onSort={changeSort}
               sortDisabled={locked}
+              filtered={filters.map((f) => f.column)}
+              onFilter={(f) => {
+                changeFilters([...filters.filter((x) => !sameFilters([x], [f])), f]);
+                setFilterOpen(true);
+              }}
               editable={editable && !saving}
               pending={pending}
               onChange={commit}
@@ -360,11 +428,21 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
               onRedo={() => setHistory(redo)}
               onSave={() => save()}
             />
-            {page.rows.length === 0 && pending.inserts.length === 0 && (
-              <div className="pointer-events-none absolute inset-x-0 top-24 text-center text-[13px] text-fg-muted">
-                {t("table.empty")}
-              </div>
-            )}
+            {page.rows.length === 0 &&
+              pending.inserts.length === 0 &&
+              (filters.length > 0 ? (
+                <div data-filter-empty className="absolute inset-x-0 top-24 flex flex-col items-center gap-3 text-center">
+                  <div>
+                    <div className="text-[13px] font-medium">{t("filter.noMatch")}</div>
+                    <div className="mt-0.5 text-xs text-fg-muted">{t("filter.noMatchBody")}</div>
+                  </div>
+                  <Button size="sm" disabled={busy} onClick={() => changeFilters([])}>
+                    {t("filter.clear")}
+                  </Button>
+                </div>
+              ) : (
+                <div className="pointer-events-none absolute inset-x-0 top-24 text-center text-[13px] text-fg-muted">{t("table.empty")}</div>
+              ))}
           </>
         )}
         {busy && page && <div aria-hidden className="animate-fade absolute inset-x-0 top-0 h-0.5 animate-pulse bg-accent" />}
@@ -436,8 +514,15 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
                       to: number.format(page.offset + page.rows.length),
                     })}
               </span>
+              {filters.length > 0 && (
+                <span data-filter-status className="shrink-0 font-medium text-accent-text">
+                  · {t("filter.applied", { count: filters.length })}
+                </span>
+              )}
               {page.estimatedRows != null && (
-                <span className="shrink-0">· {t("table.estimated", { total: number.format(page.estimatedRows) })}</span>
+                <span className="shrink-0">
+                  · {t(filters.length > 0 ? "filter.estimatedTable" : "table.estimated", { total: number.format(page.estimatedRows) })}
+                </span>
               )}
               <span className="shrink-0 tabular-nums">· {t("table.elapsed", { ms: page.elapsedMs })}</span>
               {page.orderedBy.length > 0 ? (

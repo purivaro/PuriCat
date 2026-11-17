@@ -60,6 +60,111 @@ fn cell(page: &puricat_core::db::RowPage, row: usize, column: &str) -> Option<St
     page.rows[row][c].clone()
 }
 
+/// The `name` cells of the rows a filter leaves, in primary-key order.
+async fn names(
+    session: &Session,
+    table: &TableRef,
+    filters: serde_json::Value,
+) -> Result<Vec<String>, Error> {
+    let req: PageRequest = serde_json::from_value(serde_json::json!({
+        "offset": 0, "limit": 100, "filters": filters,
+    }))
+    .unwrap();
+    let p = session.fetch_rows(table, &req).await?;
+    Ok((0..p.rows.len())
+        .map(|r| cell(&p, r, "name").unwrap())
+        .collect())
+}
+
+/// Filters on the three `items` rows, which hold the same values on both engines.
+async fn filter_checks(session: &Session, items: &TableRef) {
+    use serde_json::json;
+    let one =
+        |column: &str, op: &str, value: &str| json!([{"column": column, "op": op, "value": value}]);
+    let is = |column: &str, op: &str| json!([{"column": column, "op": op}]);
+    macro_rules! leaves {
+        ($filters:expr, $expected:expr) => {
+            let filters = $filters;
+            let expected: &[&str] = &$expected;
+            assert_eq!(
+                names(session, items, filters.clone()).await.unwrap(),
+                expected,
+                "{filters}"
+            );
+        };
+    }
+
+    // Typed comparisons: exact on 64-bit integers and decimals, whatever the spelling.
+    leaves!(one("id", "equals", "2"), ["second"]);
+    leaves!(one("big", "equals", "9007199254740993"), [THAI]);
+    leaves!(one("big", "equals", "9007199254740992"), []);
+    leaves!(one("price", "equals", "0.5"), ["third"]);
+    leaves!(one("price", "equals", ".50"), ["third"]);
+    leaves!(one("price", "greater", "1"), [THAI]);
+    leaves!(one("price", "lessOrEqual", "0.5"), ["third"]);
+    leaves!(one("created", "greaterOrEqual", "2026-01-01"), [THAI]);
+    leaves!(one("name", "equals", "second"), ["second"]);
+    // "Is not" keeps the rows that hold NULL.
+    leaves!(one("price", "notEquals", "0.5"), [THAI, "second"]);
+    leaves!(one("note", "notContains", "sho"), [THAI, "second"]);
+
+    // Text search: case-insensitive, on the text the grid shows, wildcards taken literally.
+    leaves!(one("name", "contains", "ECON"), ["second"]);
+    leaves!(one("name", "contains", "'quote'"), [THAI]);
+    leaves!(one("name", "contains", "โลก"), [THAI]);
+    leaves!(one("name", "contains", "%"), []);
+    leaves!(one("name", "contains", "_"), []);
+    leaves!(one("name", "startsWith", "th"), ["third"]);
+    leaves!(one("name", "endsWith", "d"), ["second", "third"]);
+    leaves!(one("created", "contains", "2026-01"), [THAI]);
+    leaves!(one("big", "startsWith", "-"), ["third"]);
+    leaves!(one("doc", "contains", "\"a\""), [THAI]);
+    leaves!(one("doc", "equals", "{\"a\": 1}"), [THAI]);
+
+    // NULL tests, also on a binary column.
+    leaves!(is("doc", "isNull"), ["second", "third"]);
+    leaves!(is("payload", "isNotNull"), [THAI, "third"]);
+
+    // Several conditions must all hold; paging and sorting apply to what is left.
+    leaves!(
+        json!([{"column": "price", "op": "isNotNull"}, {"column": "note", "op": "equals", "value": "short"}]),
+        ["third"]
+    );
+    let req: PageRequest = serde_json::from_value(json!({
+        "offset": 0, "limit": 1,
+        "sort": {"column": "name", "descending": true},
+        "filters": is("created", "isNull"),
+    }))
+    .unwrap();
+    let p = session.fetch_rows(items, &req).await.unwrap();
+    assert!(p.has_more && p.rows.len() == 1);
+    assert_eq!(cell(&p, 0, "name").as_deref(), Some("third"));
+
+    // Refused before anything is sent.
+    for filters in [
+        one("nope", "equals", "1"),
+        one("payload", "equals", "00"),
+        one("payload", "contains", "00"),
+        one("doc", "greater", "1"),
+        is("id", "equals"),
+    ] {
+        assert!(
+            matches!(
+                names(session, items, filters.clone()).await,
+                Err(Error::Invalid(_))
+            ),
+            "{filters}"
+        );
+    }
+    // A value the column's type cannot hold is an error, never a silent match on 0.
+    assert!(names(session, items, one("id", "equals", "abc"))
+        .await
+        .is_err());
+    assert!(names(session, items, one("created", "equals", "garbage"))
+        .await
+        .is_err());
+}
+
 const THAI: &str = "สวัสดี \"โลก\"\tแท็บ 'quote'";
 
 // ---- MySQL ---------------------------------------------------------------------------
@@ -263,6 +368,29 @@ async fn mysql_body(t: Target, db: String) {
         session.fetch_rows(&missing, &page(0, 10, None)).await,
         Err(Error::NotFound(_))
     ));
+
+    filter_checks(&session, &items).await;
+    // MySQL only: the grid shows 1 and 0 for TINYINT(1) and a number for BIT.
+    assert_eq!(
+        names(
+            &session,
+            &items,
+            serde_json::json!([{"column": "flag", "op": "equals", "value": "1"}])
+        )
+        .await
+        .unwrap(),
+        [THAI]
+    );
+    assert_eq!(
+        names(
+            &session,
+            &items,
+            serde_json::json!([{"column": "bits", "op": "equals", "value": "5"}])
+        )
+        .await
+        .unwrap(),
+        [THAI]
+    );
 
     // The session keeps the server's time zone and SQL dialect; only strict mode is added.
     // (Read through PuriCat's own session, from MySQL's variable tables.)
@@ -518,6 +646,44 @@ async fn postgres_body(t: Target, db: String) {
         session
             .fetch_rows(&items, &page(0, 10, Some(("nope", false))))
             .await,
+        Err(Error::Invalid(_))
+    ));
+
+    filter_checks(&session, &items).await;
+    // PostgreSQL only: equality on text is case-sensitive, and types of its own
+    // (uuid, enum, array) are compared as the text the grid shows.
+    for (column, op, value, expected) in [
+        ("name", "equals", "Second", vec![]),
+        ("flag", "equals", "true", vec![THAI]),
+        (
+            "uid",
+            "equals",
+            "6f1c1c9e-0b0f-4c4e-9a52-0d6b7c0a1f11",
+            vec![THAI],
+        ),
+        ("state", "equals", "busy", vec!["third"]),
+        ("state", "notEquals", "busy", vec![THAI, "second"]),
+        ("tags", "contains", "y z", vec![THAI]),
+    ] {
+        assert_eq!(
+            names(
+                &session,
+                &items,
+                serde_json::json!([{"column": column, "op": op, "value": value}])
+            )
+            .await
+            .unwrap(),
+            expected,
+            "{column} {op} {value}"
+        );
+    }
+    assert!(matches!(
+        names(
+            &session,
+            &items,
+            serde_json::json!([{"column": "state", "op": "greater", "value": "a"}])
+        )
+        .await,
         Err(Error::Invalid(_))
     ));
 

@@ -18,6 +18,7 @@ import type {
   Namespace,
   PasswordChange,
   PasteAnalysis,
+  RowFilter,
   PasteRequest,
   RowPage,
   RunOutcome,
@@ -55,7 +56,7 @@ export const ipc = {
   listSchemas: (id: string, database: string) => invoke<Namespace[]>("list_schemas", { id, database }),
   listObjects: (id: string, database: string, schema: string | null) =>
     invoke<DbObject[]>("list_objects", { id, database, schema }),
-  fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null }) =>
+  fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null; filters: RowFilter[] }) =>
     invoke<RowPage>("fetch_rows", { id, table, page }),
   planChanges: (id: string, table: TableRef, changes: ChangeSet) =>
     invoke<Statement[]>("plan_changes", { id, table, changes }),

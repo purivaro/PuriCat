@@ -40,7 +40,7 @@ All versions and checksums are on the [Releases](https://github.com/purivaro/Pur
 
 ### Edit tables like a spreadsheet, and read the SQL before it runs
 
-Type in cells, add and delete rows, paste a block copied from Excel or Google Sheets, undo and redo. Nothing touches the database until you press Save. For deletes, larger changes and Production connections, a review shows **every statement with its values** first. Everything is saved in **one transaction**: if a row was changed by someone else in the meantime, nothing is saved.
+Type in cells, add and delete rows, paste a block copied from Excel or Google Sheets, undo and redo. Find rows with a **filter**: conditions on any column (⌘F), or right-click a cell and choose *Filter by this value*. Nothing touches the database until you press Save. For deletes, larger changes and Production connections, a review shows **every statement with its values** first. Everything is saved in **one transaction**: if a row was changed by someone else in the meantime, nothing is saved.
 
 ![The review dialog: each DELETE, UPDATE and INSERT with its values, saved in one transaction](docs/images/edit-review.png)
 
@@ -87,7 +87,7 @@ The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY
 
 ## Not there yet
 
-SQL Server, SSH tunnels, creating and altering tables, import from files, backups, filtering in the grid, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+SQL Server, SSH tunnels, creating and altering tables, import from files, backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
 
 ## Build from source
 

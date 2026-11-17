@@ -6,6 +6,7 @@ use sqlx::{ConnectOptions, Executor, Row};
 use tokio::sync::Mutex;
 
 use super::console::Console;
+use super::filter::Where;
 use super::smart::UniqueKey;
 use super::write::{self, Statement};
 use super::{
@@ -285,11 +286,16 @@ impl PgSession {
         &self,
         table: &TableRef,
         meta: &TableMeta,
+        filter: &Where,
         order: &Order,
         req: &PageRequest,
     ) -> Result<Vec<Vec<Option<String>>>> {
-        let sql = page_sql(table, meta, order)?;
-        let rows = sqlx::query(&sql)
+        let sql = page_sql(table, meta, filter, order)?;
+        let mut query = sqlx::query(&sql);
+        for param in &filter.params {
+            query = query.bind(param);
+        }
+        let rows = query
             .bind(req.limit as i64 + 1)
             .bind(req.offset as i64)
             .fetch_all(&self.pool(&table.database).await?)
@@ -418,7 +424,7 @@ impl PgSession {
 
 /// Every projected value is cast to text by the server (`numeric`, `timestamptz`, arrays,
 /// enums, ...), so nothing is reinterpreted on the way to the grid.
-fn page_sql(table: &TableRef, meta: &TableMeta, order: &Order) -> Result<String> {
+fn page_sql(table: &TableRef, meta: &TableMeta, filter: &Where, order: &Order) -> Result<String> {
     let schema = super::require_schema(table.schema.as_deref())?;
     let mut exprs = Vec::with_capacity(meta.columns.len());
     for c in &meta.columns {
@@ -438,6 +444,7 @@ fn page_sql(table: &TableRef, meta: &TableMeta, order: &Order) -> Result<String>
         ident::postgres(schema)?,
         ident::postgres(&table.name)?
     );
+    sql.push_str(&filter.sql);
     if !order.is_empty() {
         let mut parts = Vec::with_capacity(order.len());
         for (col, desc) in order {
@@ -450,7 +457,9 @@ fn page_sql(table: &TableRef, meta: &TableMeta, order: &Order) -> Result<String>
         sql.push_str(" ORDER BY ");
         sql.push_str(&parts.join(", "));
     }
-    sql.push_str(" LIMIT $1 OFFSET $2");
+    // The filter's parameters come first; the page bounds follow them.
+    let n = filter.params.len();
+    sql.push_str(&format!(" LIMIT ${} OFFSET ${}", n + 1, n + 2));
     Ok(sql)
 }
 
@@ -497,15 +506,28 @@ mod tests {
             name: "Files".into(),
         };
         assert_eq!(
-            page_sql(&table, &meta, &vec![]).unwrap(),
+            page_sql(&table, &meta, &Where::default(), &vec![]).unwrap(),
             "SELECT left(\"id\"::text, 1001), encode(substring(\"da\"\"ta\" from 1 for 25), 'hex') \
              FROM \"public\".\"Files\" LIMIT $1 OFFSET $2"
         );
         let no_schema = TableRef {
             schema: None,
-            ..table
+            ..table.clone()
         };
-        assert!(page_sql(&no_schema, &meta, &vec![]).is_err());
+        assert!(page_sql(&no_schema, &meta, &Where::default(), &vec![]).is_err());
+
+        // A filter's parameters are numbered first; the page bounds follow them.
+        let filter = Where {
+            sql: " WHERE \"id\" = $1::bigint".into(),
+            params: vec!["7".into()],
+        };
+        let sql = page_sql(&table, &meta, &filter, &vec![("id".into(), false)]).unwrap();
+        assert!(
+            sql.ends_with(
+                "FROM \"public\".\"Files\" WHERE \"id\" = $1::bigint ORDER BY \"id\" LIMIT $2 OFFSET $3"
+            ),
+            "{sql}"
+        );
     }
 
     #[test]

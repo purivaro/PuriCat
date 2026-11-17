@@ -85,6 +85,28 @@ export interface SortSpec {
   descending: boolean;
 }
 
+export type FilterOp =
+  | "equals"
+  | "notEquals"
+  | "contains"
+  | "notContains"
+  | "startsWith"
+  | "endsWith"
+  | "greater"
+  | "greaterOrEqual"
+  | "less"
+  | "lessOrEqual"
+  | "isNull"
+  | "isNotNull";
+
+/** One condition on the rows of a table. All conditions of a request must hold. */
+export interface RowFilter {
+  column: string;
+  op: FilterOp;
+  /** `null` for the NULL tests, which take no value. */
+  value: string | null;
+}
+
 export interface RowPage {
   columns: ColumnMeta[];
   rows: (string | null)[][];

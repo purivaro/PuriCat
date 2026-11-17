@@ -9,6 +9,7 @@ import {
   CircleSlash,
   ClipboardPaste,
   Copy,
+  Funnel,
   Hash,
   KeyRound,
   Lock,
@@ -27,7 +28,8 @@ import { menuContentClass, menuDangerClass, menuItemClass, menuSeparatorClass } 
 import { clipboard, parseClipboardTable, toClipboardTable } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { errorMessage } from "../../lib/ipc";
-import type { ColumnMeta, RowPage, SortSpec, ValueKind } from "../../lib/types";
+import type { ColumnMeta, RowFilter, RowPage, SortSpec, ValueKind } from "../../lib/types";
+import { cellFilter } from "./filter";
 import {
   addRows,
   blocker,
@@ -98,6 +100,10 @@ interface Props {
   onSort?: (sort: SortSpec | null) => void;
   /** Sorting reloads the page, which is not allowed while edits are pending. */
   sortDisabled: boolean;
+  /** Names of the columns the page is filtered on; their headers say so. */
+  filtered?: string[];
+  /** "Filter by this value" on a cell. Follows `sortDisabled`: it reloads the page too. */
+  onFilter?: (filter: RowFilter) => void;
   /** `false` renders a plain read-only grid. */
   editable: boolean;
   pending: Pending;
@@ -116,7 +122,7 @@ interface Editing extends Cell {
 }
 
 export function DataGrid(props: Props) {
-  const { page, sort, onSort, sortDisabled, editable, pending, onChange, selection, onSelect } = props;
+  const { page, sort, onSort, sortDisabled, filtered, onFilter, editable, pending, onChange, selection, onSelect } = props;
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
@@ -180,6 +186,12 @@ export function DataGrid(props: Props) {
   const range = selection ? rangeOf(selection) : null;
   const selectedRows = range ? Array.from({ length: range.bottom - range.top + 1 }, (_, i) => range.top + i) : [];
   const allSelectedDeleted = selectedRows.length > 0 && selectedRows.every((r) => pending.deletes[r]);
+  // One stored cell, as the server sent it: the only thing "filter by this value" can mean.
+  const oneCell = range && range.top === range.bottom && range.left === range.right && !isInserted(page, range.top) ? range : null;
+  const filterForCell =
+    oneCell && page.columns[oneCell.left]
+      ? cellFilter(page.columns[oneCell.left]!, page.rows[oneCell.top]?.[oneCell.left] ?? null, isTruncated(page, oneCell.top, oneCell.left))
+      : null;
 
   const clampCell = (r: number, c: number): Cell => ({
     r: Math.min(rows - 1, Math.max(0, r)),
@@ -386,6 +398,7 @@ export function DataGrid(props: Props) {
                   column={col}
                   width={widths[c] ?? MIN_WIDTH}
                   sort={sort?.column === col.name ? sort : null}
+                  filtered={!!filtered?.includes(col.name)}
                   sortDisabled={sortDisabled || !onSort}
                   sortHint={onSort ? t("table.dirtyLocked") : undefined}
                   showLock={editable && !col.editable}
@@ -502,6 +515,15 @@ export function DataGrid(props: Props) {
             <Copy className="size-3.5" /> {t("common.copy")}
             <Shortcut>⌘C</Shortcut>
           </ContextMenu.Item>
+          {onFilter && (
+            <ContextMenu.Item
+              className={menuItemClass}
+              disabled={!filterForCell || sortDisabled}
+              onSelect={() => filterForCell && onFilter(filterForCell)}
+            >
+              <Funnel className="size-3.5" /> {t("filter.byValue")}
+            </ContextMenu.Item>
+          )}
           {editable && (
             <>
               <ContextMenu.Item className={menuItemClass} disabled={!range} onSelect={() => void paste()}>
@@ -595,6 +617,7 @@ interface HeaderCellProps {
   column: ColumnMeta;
   width: number;
   sort: SortSpec | null;
+  filtered: boolean;
   sortDisabled: boolean;
   sortHint?: string;
   showLock: boolean;
@@ -602,7 +625,7 @@ interface HeaderCellProps {
   onResizeStart: (e: PointerEvent<HTMLSpanElement>) => void;
 }
 
-function HeaderCell({ column, width, sort, sortDisabled, sortHint, showLock, onSort, onResizeStart }: HeaderCellProps) {
+function HeaderCell({ column, width, sort, filtered, sortDisabled, sortHint, showLock, onSort, onResizeStart }: HeaderCellProps) {
   const { t } = useTranslation();
   const Icon = column.primaryKey ? KeyRound : KIND_ICON[column.kind];
   return (
@@ -622,6 +645,7 @@ function HeaderCell({ column, width, sort, sortDisabled, sortHint, showLock, onS
         <Icon className={cn("size-3.5 shrink-0", column.primaryKey ? "text-accent-text" : "text-fg-subtle")} />
         <span className="truncate">{column.name}</span>
         {showLock && <Lock aria-label={t("table.notEditable.column")} className="size-3 shrink-0 text-fg-subtle" />}
+        {filtered && <Funnel aria-label={t("filter.filteredColumn")} className="size-3 shrink-0 text-accent-text" />}
         {sort && (sort.descending ? <ArrowDown className="size-3 shrink-0 text-accent-text" /> : <ArrowUp className="size-3 shrink-0 text-accent-text" />)}
       </button>
       <span

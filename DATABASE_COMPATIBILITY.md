@@ -31,6 +31,7 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Describe table (columns, types, defaults, primary key, generated flag) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Browse rows: page, sort | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Browse rows of a view | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
+| Filter rows by conditions on columns (see "Row filter") | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Composite primary keys, names needing quotes | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Keyset pagination, exact row count, cell inspector | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Cancellation of browse and catalogue queries; reconnect of the pooled session | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
@@ -139,6 +140,27 @@ The tables above describe the browse path, where PuriCat writes the `SELECT`. In
 - Nothing is cut on the server. The backend keeps full values; the grid shows the first 1,000 characters of a long cell and flags it; an export has the whole value (verified with a 1,500-character Thai value).
 - A column's kind (number, text, temporal, binary, JSON, bool) is derived from the driver's type name. It decides alignment in the grid, which values are shown as hex, and which XLSX cells may become numbers. The name is matched by substring; `INTERVAL` is temporal and `POINT` is text although both contain "int" (unit-tested). Other type names that happen to contain a matched word are not checked one by one.
 - A query that returns no rows still shows its column names (verified on both engines).
+
+## Row filter
+
+A table tab can be narrowed with conditions on its columns; all of them must hold. The conditions become one `WHERE` clause in the page query. Every value is a bind parameter, and a column name must exist in the table's metadata before it is quoted (`db::filter`).
+
+| Condition | MySQL | PostgreSQL |
+|---|---|---|
+| `=`, `≠`, `>`, `≥`, `<`, `≤` on a number, boolean, date / time or text column | The column against the typed value: `CAST(? AS SIGNED / UNSIGNED)` for integers, `CAST(? AS DECIMAL(65,30))` for decimals, the bare parameter otherwise. Text follows the column's collation, so it usually ignores case | The column against `$n::<bare type>`. Text is case-sensitive |
+| The same on a `FLOAT` column | `=` and `≠` compare the text the grid shows (a `FLOAT` widened to double never equals the double parsed from the same digits); the ordering comparisons are typed | Typed, as above |
+| `=`, `≠` on JSON and other types (uuid, enum, array, …) | JSON: the text the grid shows, `CAST(col AS CHAR)`. Spatial columns: refused (NULL tests only) — the grid shows their WKT text, the column itself is binary | The text the grid shows: `col::text` |
+| `>`, `≥`, `<`, `≤` on those types | Refused | Refused |
+| contains, does not contain, starts with, ends with | `LIKE … ESCAPE '!'` on a text column itself (its own collation), on `CAST(col AS CHAR)` otherwise; refused on spatial columns | `ILIKE … ESCAPE '!'` on a text column itself, on `col::text` otherwise: always case-insensitive |
+| is NULL, is not NULL | Any column, including binary | Any column, including binary |
+| Anything else on a binary column | Refused | Refused |
+
+- `%`, `_` and `!` in a search text are taken literally.
+- "≠" and "does not contain" keep the rows whose value is NULL (`NOT (a <=> b)` on MySQL, `IS DISTINCT FROM` on PostgreSQL, `… OR col IS NULL` for the text search). A person reading the grid sees an empty cell as "not X".
+- **A value the column cannot hold is an error, never a silent result.** PostgreSQL refuses the cast itself and its message is shown. MySQL would read text that is not a number as `0` (and show the rows holding 0) and text that is not a date as NULL (and show no rows), each with only a warning, so PuriCat checks these itself before sending anything: a number must look like one, and a date or time must be complete (`2026-01-31`, `2026-01-31 13:45:00`, `13:45:00`). To find part of a date, use "starts with" or "contains".
+- Filters do not use an index when they compare the shown text (JSON, uuid, enum, the text searches on non-text columns). On a large table an equality filter on a `uuid` column scans the table.
+- At most 20 conditions. They are joined with AND only; there is no OR, no list of values and no free `WHERE` text. Use a query tab for those.
+- Sorting and paging apply to the rows that are left. The row estimate in the footer is still the whole table's; there is no count of the matching rows.
 
 ## Writing values
 

@@ -4,6 +4,7 @@ use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, My
 use sqlx::{ConnectOptions, Executor, Row};
 
 use super::console::Console;
+use super::filter::Where;
 use super::smart::UniqueKey;
 use super::write::{self, Statement};
 use super::{
@@ -234,11 +235,16 @@ impl MySqlSession {
         &self,
         table: &TableRef,
         meta: &TableMeta,
+        filter: &Where,
         order: &Order,
         req: &PageRequest,
     ) -> Result<Vec<Vec<Option<String>>>> {
-        let sql = page_sql(table, meta, order)?;
-        let rows = sqlx::query(&sql)
+        let sql = page_sql(table, meta, filter, order)?;
+        let mut query = sqlx::query(&sql);
+        for param in &filter.params {
+            query = query.bind(param);
+        }
+        let rows = query
             .bind(req.limit as u64 + 1)
             .bind(req.offset)
             .fetch_all(&self.pool)
@@ -363,7 +369,7 @@ impl MySqlSession {
 
 /// Every projected value is rendered to text by the server, so decimals, dates and
 /// 64-bit integers reach the grid without a lossy trip through floats.
-fn page_sql(table: &TableRef, meta: &TableMeta, order: &Order) -> Result<String> {
+fn page_sql(table: &TableRef, meta: &TableMeta, filter: &Where, order: &Order) -> Result<String> {
     let mut exprs = Vec::with_capacity(meta.columns.len());
     for c in &meta.columns {
         let col = ident::mysql(&c.name)?;
@@ -390,6 +396,7 @@ fn page_sql(table: &TableRef, meta: &TableMeta, order: &Order) -> Result<String>
         ident::mysql(&table.database)?,
         ident::mysql(&table.name)?
     );
+    sql.push_str(&filter.sql);
     if !order.is_empty() {
         let mut parts = Vec::with_capacity(order.len());
         for (col, desc) in order {
@@ -479,7 +486,7 @@ mod tests {
             schema: None,
             name: "items".into(),
         };
-        let sql = page_sql(&table, &meta, &vec![("id".into(), true)]).unwrap();
+        let sql = page_sql(&table, &meta, &Where::default(), &vec![("id".into(), true)]).unwrap();
         assert_eq!(
             sql,
             "SELECT LEFT(CAST(`id` AS CHAR), 1001), LEFT(CAST(`we``ird` AS CHAR), 1001), \

@@ -1,13 +1,13 @@
 # Roadmap
 
-Status on 2026-11-16. Phases follow the delivery plan in the [product brief](docs/PuriCat_Master_Requirements.md). No dates are committed. Per-requirement status is in [REQUIREMENTS.md](REQUIREMENTS.md); evidence is in [TESTING.md](TESTING.md).
+Status on 2026-11-17. Phases follow the delivery plan in the [product brief](docs/PuriCat_Master_Requirements.md). No dates are committed. Per-requirement status is in [REQUIREMENTS.md](REQUIREMENTS.md); evidence is in [TESTING.md](TESTING.md).
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Discovery and decisions | Done |
 | 1 | Runnable foundation | Done |
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
-| 3 | Flagship editing | Partial (grid editing and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
+| 3 | Flagship editing | Partial (grid editing, the row filter and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
 | 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; object editing, import and the rest are listed below) |
 | 5 | AI agent | Partial (CLI detection, an agent chat, and — off by default — database tools for the model: catalogue lookups, a read-only query, proposals the user approves, an activity log. Verified for Claude Code; no Codex turn with tools has been observed. Redaction, version checks and the gaps listed below remain) |
 | 6 | Backups | Not started |
@@ -64,6 +64,7 @@ Done (MySQL and PostgreSQL, tables with a primary key; evidence in [TESTING.md](
 - Review dialog with the exact statements and bound values; mandatory for Production-labelled connections, deletes and saves above the per-connection row threshold (default 10).
 - Guards for unsaved edits: tab dot, close confirmation, locked paging / sorting / refresh, refusal to disconnect or change a connection with dirty tabs.
 - Read-only presentation, with the reason, for views, materialized views, keyless tables and read-only connections.
+- Row filter (2026-11-17): a bar of conditions on columns, joined with AND, sent on Enter or "Apply"; twelve operators; "Filter by this value" on a cell; values as bind parameters, typed comparison for numbers, dates and text and the shown text for other types; a value the column cannot hold is an error instead of a silent result. Verified in the backend on both engines; through the UI on PostgreSQL only ([DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), "Row filter").
 - Smart Paste wizard ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)): clipboard block, header-row detection, column mapping, INSERT / UPDATE / UPSERT matched on the primary key or a plain unique index read from the catalogue, generated keys used for matching only, duplicate detection, cheap pre-checks, a read-only preview with one outcome per pasted row, re-analysis at run time, one transaction of at most 10,000 rows through the same planner as grid saves, progress and "Stop and roll back". Verified in the backend on both engines; through the UI for UPSERT on MySQL only.
 
 Remaining:
@@ -75,7 +76,7 @@ Remaining:
 | Smart Paste: verification gaps | PostgreSQL, INSERT and UPDATE modes, composite keys, the progress bar, Stop and the blocked dismissal during a run through the UI (composite-key matching itself is verified in the backend on both engines); pastes near the 10,000-row limit and their duration on a remote server |
 | Smart Paste: more than 10,000 rows, CSV / XLSX files | One run is one transaction of single-row statements. Multi-batch or streamed imports and file sources belong to the Phase 4 import tool |
 | Full-value cell inspector / editor | For long values (beyond the 1000-character preview) and binary values; until then such cells are not editable. The read-only inspector is also listed under Phase 2b |
-| Filtering | Not started |
+| Filter: follow-ups | OR and groups of conditions, a list of values (`IN`), a free `WHERE` box; the filter kept with the tab across a restart; an exact count of the matching rows; typed comparison (and index use) for `uuid` and other PostgreSQL types that have an equality operator. Verification gaps: MySQL, ⌘F and Escape, a view, the lock while edits are unsaved — all through the UI |
 | Column reorder / hide, pinned key columns | Not started |
 | Multi-range (non-contiguous) selection | Only one rectangular range today |
 | Keyset pagination | Also listed under Phase 2b |

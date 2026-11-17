@@ -202,6 +202,85 @@
     const panelButton = (label) => all(`${panelSel} button`).find((b) => b.textContent.trim().startsWith(label) || b.getAttribute("aria-label") === label);
     const editState = () => document.querySelector(`${panelSel} [data-edit-state]`)?.dataset.editState;
 
+    // ---- filter rows: the PostgreSQL orders table is still in front ----------------------
+    const filterBar = () => document.querySelector(`${panelSel} [data-filter-bar]`);
+    const filterRows = () => all(`${panelSel} [data-filter-row]`);
+    const filterCount = () => document.querySelector(`${panelSel} [data-filter-count]`)?.textContent.trim() ?? "0";
+    const columnCells = (c) => dataRows().map((r) => r.querySelectorAll('[role="gridcell"]')[c]?.textContent.trim());
+    const choose = async (select, value) => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(60);
+    };
+    const condition = async (row, column, op, value) => {
+      await choose(filterRows()[row].querySelectorAll("select")[0], column);
+      await choose(filterRows()[row].querySelectorAll("select")[1], op);
+      await type(filterRows()[row].querySelector("input"), value);
+    };
+    const STATUS = 4;
+    const TOTAL = 5;
+
+    await click(document.querySelector(`${panelSel} [data-filter-toggle]`), "filter button");
+    await waitFor(filterBar, "filter bar");
+    // A new condition starts on the first column; a number is offered comparisons.
+    const offered = [...filterRows()[0].querySelectorAll("select")[1].options].map((o) => o.value);
+
+    // 1. An enum column, matched as the text the grid shows whatever the case; sent with Enter.
+    await condition(0, "status", "contains", "PEND");
+    filterRows()[0].querySelector("input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => footer()?.includes("1 condition applied") && columnCells(STATUS).every((v) => v === "Pending"), "one condition");
+    const oneCondition = {
+      footer: footer(),
+      statuses: [...new Set(columnCells(STATUS))],
+      headerMarks: all(`${panelSel} [role="columnheader"]`).filter((h) => h.querySelector('[aria-label="Filtered"]')).map((h) => h.textContent.trim()),
+    };
+
+    // 2. A second condition, on a number, sent with the button. Both must hold.
+    await click(panelButton("Add condition"), "add condition");
+    await condition(1, "total_amount", "greaterOrEqual", "9000");
+    const note = document.querySelector(`${panelSel} [data-filter-note]`).textContent.trim();
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "2" && columnCells(TOTAL).every((v) => Number(v) >= 9000), "two conditions");
+    const twoConditions = { note, footer: footer(), rows: dataRows().length, statuses: [...new Set(columnCells(STATUS))], smallest: Math.min(...columnCells(TOTAL).map(Number)) };
+    if (twoConditions.rows !== 4) throw new Error(`the two conditions should leave 4 rows, not ${twoConditions.rows}`);
+    await stage("table-filter", { offered, oneCondition, twoConditions });
+
+    // 3. Nothing matches: the grid says so, and offers the way back.
+    await condition(0, "order_no", "equals", "SO-NOPE");
+    await click(panelButton("Apply"), "apply");
+    const emptyState = await waitFor(() => document.querySelector(`${panelSel} [data-filter-empty]`), "no-match state");
+    await stage("table-filter-empty", { text: emptyState.textContent.replace(/\s+/g, " ").trim(), footer: footer() });
+    await click(emptyState.querySelector("button"), "clear from the empty state");
+    await waitFor(() => filterCount() === "0" && dataRows().length > 20 && !footer().includes("condition"), "filter cleared");
+    const barReset = filterRows().length === 1 && filterRows()[0].querySelector("input").value === "";
+
+    // 4. A value the column's type cannot hold: the server's refusal is shown, not an empty grid.
+    await condition(0, "total_amount", "equals", "abc");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => activePanel().textContent.includes("Could not load the table"), "filter error");
+    const filterRefusal = all(`${panelSel} *`).find((e) => e.children.length === 0 && e.textContent.includes("invalid input syntax"))?.textContent.trim();
+    if (!filterRefusal) throw new Error("the server's refusal of the filter value is not shown");
+    await click(all(`${panelSel} button`).filter((b) => b.textContent.trim() === "Clear filter").pop(), "clear after the error");
+    await waitFor(() => filterCount() === "0" && dataRows().length > 20, "rows after the error");
+
+    // 5. From a cell: "Filter by this value" adds the condition and shows it in the bar.
+    await selectCell(0, STATUS);
+    await rightClick(cellAt(0, STATUS));
+    await click(await waitFor(() => exact('[role="menuitem"]', "Filter by this value"), "cell menu"), "filter by this value");
+    await waitFor(() => filterCount() === "1" && new Set(columnCells(STATUS)).size === 1, "filter from a cell");
+    const fromCell = {
+      column: filterRows()[0].querySelectorAll("select")[0].value,
+      op: filterRows()[0].querySelectorAll("select")[1].value,
+      value: filterRows()[0].querySelector("input").value,
+      statuses: [...new Set(columnCells(STATUS))],
+      footer: footer(),
+    };
+    await stage("table-filter-cell", { barReset, filterRefusal, fromCell });
+    await click(panelButton("Clear filter"), "clear filter");
+    await waitFor(() => filterCount() === "0" && new Set(columnCells(STATUS)).size > 1, "every row again");
+    await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
+    await waitFor(() => !filterBar(), "filter bar hidden");
+
     await click(treeRow("customers"), "mysql customers");
     await waitFor(() => cellText(0, 1) === "สมชาย ใจดี", "customers rows");
     if (editState() !== "editable") throw new Error("customers should be editable");
@@ -738,10 +817,14 @@
     await rightClick(treeRow("Demo MySQL"));
     await click(await waitFor(() => exact('[role="menuitem"]', "Duplicate"), "context menu"), "duplicate");
     const copy = await waitFor(() => treeRow("Demo MySQL copy"), "duplicated connection");
+    // The first menu is still in the page while it fades out; its "Delete…" belongs to the original.
+    await waitFor(() => !document.querySelector('[role="menu"]'), "first context menu to close");
     await rightClick(copy);
     await click(await waitFor(() => exact('[role="menuitem"]', "Delete…"), "context menu"), "delete");
     await waitFor(() => document.querySelector('[role="alertdialog"]'), "confirm dialog");
-    await stage("delete-confirm", { text: document.querySelector('[role="alertdialog"]').textContent.replace(/\s+/g, " ").trim() });
+    const deleteText = document.querySelector('[role="alertdialog"]').textContent.replace(/\s+/g, " ").trim();
+    if (!deleteText.includes("Demo MySQL copy")) throw new Error(`the delete dialog is not about the copy: ${deleteText}`);
+    await stage("delete-confirm", { text: deleteText });
     await click(exact('[role="alertdialog"] button', "Delete connection"), "confirm delete");
     await waitFor(() => !treeRow("Demo MySQL copy"), "connection removed");
 
@@ -757,12 +840,28 @@
       await waitFor(() => !document.querySelector("[cmdk-input]"), "palette to close");
       return label;
     };
+    // The filter bar is looked at in both themes and both languages: put it in front, in use.
+    await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("orders") && x.textContent.includes("Demo Postgr")), "postgres orders tab");
+    await click(await waitFor(() => document.querySelector(`${panelSel} [data-filter-toggle]`), "filter button"), "filter button");
+    await waitFor(filterBar, "filter bar");
+    await condition(0, "status", "contains", "pend");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "1" && columnCells(STATUS).every((v) => v === "Pending"), "filter in front");
+    await click(panelButton("Add condition"), "a second, unwritten condition");
     const darkItem = await palette("dark theme");
     await waitFor(() => document.documentElement.dataset.theme === "dark", "dark theme");
     await stage("dark", { ran: darkItem, bg: getComputedStyle(document.body).backgroundColor });
     const thaiItem = await palette("language");
     await waitFor(() => document.documentElement.lang === "th", "thai");
-    await stage("thai-dark", { ran: thaiItem, footer: footer() });
+    const thaiFilter = {
+      button: document.querySelector(`${panelSel} [data-filter-toggle]`).textContent.trim(),
+      labels: all(`${panelSel} [data-filter-row] > span`).map((x) => x.textContent.trim()),
+      conditions: [...filterRows()[0].querySelectorAll("select")[1].options].map((o) => o.textContent.trim()),
+      note: document.querySelector(`${panelSel} [data-filter-note]`).textContent.trim(),
+      buttons: all(`${panelSel} [data-filter-bar] button`).map((b) => b.textContent.trim()).filter(Boolean),
+    };
+    if (!footer().includes("ใช้อยู่ 1 เงื่อนไข")) throw new Error(`the footer does not show the filter in Thai: ${footer()}`);
+    await stage("thai-dark", { ran: thaiItem, footer: footer(), thaiFilter });
     await palette("ธีมสว่าง");
     await waitFor(() => document.documentElement.dataset.theme === "light", "light theme");
     await click(all('[role="tab"]')[0], "welcome tab");
