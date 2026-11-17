@@ -45,6 +45,8 @@ pub fn run() {
             commands::list_history,
             commands::clear_history,
             commands::export_result,
+            commands::pick_table_file,
+            commands::read_table_file,
             commands::get_settings,
             commands::set_setting,
             commands::detect_ai_clis,

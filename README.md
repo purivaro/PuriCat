@@ -44,9 +44,9 @@ Type in cells, add and delete rows, paste a block copied from Excel or Google Sh
 
 ![The review dialog: each DELETE, UPDATE and INSERT with its values, saved in one transaction](docs/images/edit-review.png)
 
-### Smart Paste: update a table from a spreadsheet
+### Smart Paste: update a table from a spreadsheet or a file
 
-Copy rows from a spreadsheet and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs.
+Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs.
 
 ![Smart Paste: columns mapped to the table, and a preview of which rows will be inserted or updated](docs/images/smart-paste.png)
 
@@ -87,7 +87,7 @@ The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY
 
 ## Not there yet
 
-SQL Server, SSH tunnels, creating and altering tables, import from files, backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+SQL Server, SSH tunnels, creating and altering tables, imports of more than 10,000 rows, backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
 
 ## Build from source
 
@@ -105,7 +105,7 @@ Tests against real MySQL and PostgreSQL servers, and the end-to-end test that dr
 A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them (in a fork, for example) it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain; v0.1.0 was published that way, before the secrets were set.
 
 ```
-crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the SQL console,
+crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the file reader, the SQL console,
                the AI chat runner and the tools it serves (no Tauri dependency)
 src-tauri/     the Tauri app: IPC commands, app state, bundle configuration
 src/           the React frontend

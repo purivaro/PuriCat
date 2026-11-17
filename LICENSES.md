@@ -17,6 +17,9 @@ Status on 2026-11-16. This is a hand-maintained summary of **direct** dependenci
 | `tauri-plugin-clipboard-manager` (+ `@tauri-apps/plugin-clipboard-manager`) | 2 | MIT OR Apache-2.0 | Plain-text copy and paste in the data grid |
 | `tauri-plugin-dialog` (+ `@tauri-apps/plugin-dialog`) | 2 | Apache-2.0 OR MIT (npm package: MIT OR Apache-2.0) | Native Save dialog for exports; only the `save` permission is granted |
 | rust_xlsxwriter | 0.96 | MIT OR Apache-2.0 | Writing XLSX exports |
+| csv (+ csv-core) | 1 | Unlicense OR MIT | Reading CSV and TSV files for Smart Paste |
+| calamine (+ quick-xml, codepage, atoi_simd, fast-float2) | 0.35 | MIT (calamine, quick-xml); MIT OR Apache-2.0 (the others) | Reading Excel and OpenDocument workbooks for Smart Paste |
+| encoding_rs | 0.8 | (Apache-2.0 OR MIT) AND BSD-3-Clause | Decoding text files that are not UTF-8 |
 | futures-util | 0.3 | MIT OR Apache-2.0 | Reading the driver's result stream in the SQL console |
 | tokio | 1 | MIT | Async runtime, subprocesses |
 | thiserror | 2 | MIT OR Apache-2.0 | Error type |

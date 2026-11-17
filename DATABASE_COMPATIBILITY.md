@@ -239,6 +239,24 @@ Smart Paste limitations:
 | Composite keys | Matching is verified in the backend on both engines (live test: update, a different day unmatched, a NULL part of the key reported as a missing key, applied and read back). Not verified through the UI |
 | Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. Through the UI only UPSERT on MySQL has been run |
 
+### From a file
+
+"Open a file…" in the wizard puts the rows of a file where the clipboard's would be. What the wizard then does with them is unchanged, and independent of the engine; what differs from a copied block is how the cells become text.
+
+| Source | How a cell becomes text |
+|---|---|
+| CSV / TSV text (`.csv`, `.tsv`, `.tab`, `.txt`) | Exactly the characters in the file: nothing is trimmed or reinterpreted, `007` stays `007`. Quoted fields may hold the separator, quotes and line breaks. Empty lines are skipped |
+| Encoding | UTF-8, or UTF-16 with a byte-order mark. Anything else is refused until its encoding is chosen (Thai Windows-874, Windows-1252, Windows-1251, Shift_JIS, GBK, Big5, EUC-KR, UTF-16 without a mark); bytes the chosen encoding has no character for are an error, not `�` |
+| Separator | A `.tsv` or `.tab` file is tab-separated. Otherwise the one of comma, semicolon, tab and vertical bar that occurs most in the first ten lines, outside quotes; it can be chosen instead |
+| Workbook (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`) | One sheet, the first unless another is chosen; its used range, without the empty rows below the data |
+| Workbook: number | The stored value, not its format: `0.5` for a cell shown as `50%`, no thousands separators or currency signs. Whole numbers without a fraction; at most 15 significant digits, as Excel itself writes them, so `0.1 + 0.2` is `0.3`. **A workbook number is a double: a whole number beyond 2^53 (16 digits and more) is not exact in the file itself.** Long identifiers must be text cells, or come from CSV, where every character is kept |
+| Workbook: date, time | `2026-01-31`, `2026-01-31 13:45:07`, `13:45:00` (a value below one day is a time of day); a duration as `hh:mm:ss`. No time zone: a workbook has none |
+| Workbook: boolean, formula, error | `TRUE` / `FALSE` (what the cell shows; MySQL's `TINYINT(1)` wants `1` / `0`, so the pre-check flags it); a formula's stored result; an error cell as its text, such as `#N/A` |
+
+- **NULL and empty are the same in a file.** Neither CSV nor a workbook can say NULL. As with a pasted block, an empty cell becomes NULL in a nullable column that is not text and the empty string in a text column; "Read the text NULL as an empty (NULL) value" covers files that spell it out. A table exported with NULLs in text columns therefore comes back with empty strings there, and the preview shows those rows as updates.
+- At most 64 MB and 10,000 data rows (the limit of one run). A longer file is refused whole, with its row count; nothing is cut silently.
+- Verified with files written by PuriCat's own exporter and by `rust_xlsxwriter`. Workbooks saved by Excel, Numbers or LibreOffice, and the `.xls`, `.xlsb` and `.ods` formats, have not been tried.
+
 ## SQL console
 
 Design and alternatives: [ADR 0015](docs/adr/0015-sql-console.md). A query tab runs the selection or the whole script on a connection of its own, one statement at a time, and reports each statement's outcome.

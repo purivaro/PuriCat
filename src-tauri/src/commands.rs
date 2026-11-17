@@ -21,6 +21,7 @@ use puricat_core::db::{
 use puricat_core::model::ConnectionProfile;
 use puricat_core::secrets::password_key;
 use puricat_core::store::{AuditEntry, HistoryEntry};
+use puricat_core::table_file::{self, FileKind, FileTable, ReadOptions};
 use puricat_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -541,6 +542,86 @@ pub async fn export_result(
     let console = slot.console.lock().await;
     let set = console.result(result)?;
     tokio::task::block_in_place(|| export::write(std::path::Path::new(&path), format, set))
+}
+
+/// A file chosen in the native Open dialog. The web view gets its name and a token for
+/// `read_table_file`, never the path: it cannot ask for a file the user did not choose.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedFile {
+    token: String,
+    name: String,
+    kind: FileKind,
+}
+
+/// Let the user choose a CSV or spreadsheet file. `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn pick_table_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<PickedFile>> {
+    let path = match e2e_pick(&state) {
+        Some(path) => Some(path),
+        None => {
+            use tauri_plugin_dialog::DialogExt;
+            let (chosen, answer) = tokio::sync::oneshot::channel();
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .add_filter("CSV, Excel", &table_file::extensions())
+                .pick_file(move |file| {
+                    let _ = chosen.send(file);
+                });
+            match answer.await {
+                Ok(Some(file)) => Some(
+                    file.into_path()
+                        .map_err(|e| Error::Invalid(format!("This file cannot be opened: {e}")))?,
+                ),
+                _ => None,
+            }
+        }
+    };
+    let Some(path) = path else { return Ok(None) };
+    let kind = table_file::kind_of(&path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let token = table_file::new_token();
+    *state.picked_file.lock().unwrap() = Some((token.clone(), path));
+    Ok(Some(PickedFile { token, name, kind }))
+}
+
+/// The end-to-end test cannot click in a native dialog. A debug build started with
+/// `PURICAT_E2E_PICK` (paths separated by `:`) answers each request with the next path
+/// instead of showing one. Release builds contain none of this.
+fn e2e_pick(state: &AppState) -> Option<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(list) = std::env::var_os("PURICAT_E2E_PICK") {
+        let n = state.e2e_picks.fetch_add(1, Ordering::Relaxed);
+        return std::env::split_paths(&list).nth(n);
+    }
+    let _ = state;
+    None
+}
+
+/// Read the chosen file as rows of text, for Smart Paste. One more row than a run may hold
+/// is returned at most, so "too many" can be told from "exactly the limit".
+#[tauri::command]
+pub async fn read_table_file(
+    state: State<'_, AppState>,
+    token: String,
+    options: ReadOptions,
+) -> Result<FileTable> {
+    let path = match &*state.picked_file.lock().unwrap() {
+        Some((current, path)) if *current == token => path.clone(),
+        _ => return Err(Error::NotFound("The chosen file (open it again)".into())),
+    };
+    let max_rows = puricat_core::db::write::MAX_STATEMENTS + 1;
+    tokio::task::spawn_blocking(move || table_file::read(&path, &options, max_rows))
+        .await
+        .map_err(|e| Error::Invalid(e.to_string()))?
 }
 
 #[tauri::command]

@@ -178,6 +178,36 @@ export interface PasteCounts {
   problems: number;
 }
 
+export type FileKind = "text" | "workbook";
+
+/** A file chosen in the native Open dialog. The backend keeps its path; this is its handle. */
+export interface PickedFile {
+  token: string;
+  name: string;
+  kind: FileKind;
+}
+
+export interface FileReadOptions {
+  /** Workbooks: the sheet to read (the first one by default). */
+  sheet?: string;
+  /** Text: an encoding label such as `windows-874`. Without it the file must be UTF-8 or UTF-16. */
+  encoding?: string;
+  /** Text: the character between fields. Detected when absent. */
+  delimiter?: string;
+}
+
+/** Rows of text read from a CSV file or a workbook sheet (`table_file::FileTable`). */
+export interface FileTable {
+  kind: FileKind;
+  rows: string[][];
+  /** Rows in the file; more than `rows.length` when it holds more than one run can take. */
+  totalRows: number;
+  sheets: string[];
+  sheet: string | null;
+  encoding: string | null;
+  delimiter: string | null;
+}
+
 export interface PasteAnalysis {
   rows: { status: PasteRowStatus; message: string | null; changed: string[] }[];
   counts: PasteCounts;

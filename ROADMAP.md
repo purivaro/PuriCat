@@ -8,7 +8,7 @@ Status on 2026-11-17. Phases follow the delivery plan in the [product brief](doc
 | 1 | Runnable foundation | Done |
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
 | 3 | Flagship editing | Partial (grid editing, the row filter and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
-| 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; object editing, import and the rest are listed below) |
+| 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; CSV and Excel files open in Smart Paste, up to 10,000 rows; object editing, batched import and the rest are listed below) |
 | 5 | AI agent | Partial (CLI detection, an agent chat, and — off by default — database tools for the model: catalogue lookups, a read-only query, proposals the user approves, an activity log. Verified for Claude Code; no Codex turn with tools has been observed. Redaction, version checks and the gaps listed below remain) |
 | 6 | Backups | Not started |
 | 7 | Public beta | Not started |
@@ -64,6 +64,7 @@ Done (MySQL and PostgreSQL, tables with a primary key; evidence in [TESTING.md](
 - Review dialog with the exact statements and bound values; mandatory for Production-labelled connections, deletes and saves above the per-connection row threshold (default 10).
 - Guards for unsaved edits: tab dot, close confirmation, locked paging / sorting / refresh, refusal to disconnect or change a connection with dirty tabs.
 - Read-only presentation, with the reason, for views, materialized views, keyless tables and read-only connections.
+- Smart Paste from a file (2026-11-17): "Open a file…" reads a CSV / TSV file or an Excel / OpenDocument workbook into the wizard; the encoding is never guessed, a sheet and a separator can be chosen, workbook cells are read as stored values; at most 64 MB and 10,000 data rows; the backend shows the Open dialog, so the web view never names a path. Reading is unit-tested; through the UI on MySQL with files PuriCat exported itself.
 - Row filter (2026-11-17): a bar of conditions on columns, joined with AND, sent on Enter or "Apply"; twelve operators; "Filter by this value" on a cell; values as bind parameters, typed comparison for numbers, dates and text and the shown text for other types; a value the column cannot hold is an error instead of a silent result. Verified in the backend on both engines; through the UI on PostgreSQL only ([DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), "Row filter").
 - Smart Paste wizard ([ADR 0014](docs/adr/0014-smart-paste-match-then-write.md)): clipboard block, header-row detection, column mapping, INSERT / UPDATE / UPSERT matched on the primary key or a plain unique index read from the catalogue, generated keys used for matching only, duplicate detection, cheap pre-checks, a read-only preview with one outcome per pasted row, re-analysis at run time, one transaction of at most 10,000 rows through the same planner as grid saves, progress and "Stop and roll back". Verified in the backend on both engines; through the UI for UPSERT on MySQL only.
 
@@ -74,7 +75,8 @@ Remaining:
 | Smart Paste: "skip invalid rows" | Today any row with a problem blocks the whole run until the source is fixed |
 | Smart Paste: value-aware comparison | "Update" means the pasted text differs from the stored text, so `1.5` against a stored `1.500000` is counted and run as an update |
 | Smart Paste: verification gaps | PostgreSQL, INSERT and UPDATE modes, composite keys, the progress bar, Stop and the blocked dismissal during a run through the UI (composite-key matching itself is verified in the backend on both engines); pastes near the 10,000-row limit and their duration on a remote server |
-| Smart Paste: more than 10,000 rows, CSV / XLSX files | One run is one transaction of single-row statements. Multi-batch or streamed imports and file sources belong to the Phase 4 import tool |
+| Smart Paste: more than 10,000 rows | One run is one transaction of single-row statements. A longer file is refused today. Multi-batch or streamed imports belong to the Phase 4 import tool |
+| Smart Paste from a file: follow-ups and gaps | Drag a file onto the table; a header row that is not the first row; skipping leading lines; number formats (percent, currency) applied on request. Not verified: the native Open dialog, a run from a file, workbooks made by Excel / Numbers / LibreOffice, `.xls` / `.xlsb` / `.ods`, the sheet chooser through the UI, files near 64 MB |
 | Full-value cell inspector / editor | For long values (beyond the 1000-character preview) and binary values; until then such cells are not editable. The read-only inspector is also listed under Phase 2b |
 | Filter: follow-ups | OR and groups of conditions, a list of values (`IN`), a free `WHERE` box; the filter kept with the tab across a restart; an exact count of the matching rows; typed comparison (and index use) for `uuid` and other PostgreSQL types that have an equality operator. Verification gaps: MySQL, ⌘F and Escape, a view, the lock while edits are unsaved — all through the UI |
 | Column reorder / hide, pinned key columns | Not started |
@@ -101,7 +103,7 @@ The model now has tools, off by default ([ADR 0017](docs/adr/0017-ai-database-to
 
 After that, the next step for the AI is per-column redaction — rows can now leave the machine, cut for length only — and a policy per connection for what the AI may do.
 
-Import from CSV / XLSX remains the next Phase 4 feature users will miss: it is where Smart Paste's 10,000-row limit and file sources are meant to be lifted, and it reuses what exists (`db::smart` for matching, the console's dedicated connection and cancellation for a long job). A library for reading XLSX has still to be chosen (`rust_xlsxwriter` only writes). It is independent of the AI work and can be taken in parallel. Object editing with DDL preview is the larger remaining Phase 4 item and can follow. The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination, the cell inspector — can be taken alongside.
+Files now open in Smart Paste (CSV and workbooks, read by `table_file` with `csv` and `calamine`), within its limit of 10,000 rows in one transaction. Lifting that limit is the remaining part of the Phase 4 import: several batches, a report of the rows that failed, and a long job that can be stopped. It reuses what exists (`db::smart` for matching, the console's dedicated connection and cancellation). It is independent of the AI work and can be taken in parallel. Object editing with DDL preview is the larger remaining Phase 4 item and can follow. The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination, the cell inspector — can be taken alongside.
 
 ## Phase 4 — SQL and schema: partial
 
@@ -133,7 +135,7 @@ Remaining:
 | Query parameters | Not started |
 | EXPLAIN view | `EXPLAIN` can be typed; its output is shown as an ordinary result |
 | Object editing (table, index, view) with DDL preview | Not started. DDL can be typed in a query tab |
-| Import from CSV / XLSX | Not started. Also where Smart Paste's 10,000-row limit and file sources are to be lifted (Phase 3 table above) |
+| Import of more than 10,000 rows | Not started. Files up to 10,000 rows open in Smart Paste (Phase 3, done). Beyond that an import needs batches, an error report per row and a job that can be stopped; a file is read whole into memory today |
 | SQL dump export | Not started |
 | Translating backend messages | Danger reasons, the lost-connection note, "Cancelled" and the history summary are English only |
 

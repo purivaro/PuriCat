@@ -57,6 +57,12 @@ fi
 cd "$ROOT"
 export PATH="$ROOT/e2e/fixtures/bin:$PATH"
 export PURICAT_STAND_IN_DIR="$WORK"
+# Files for "Open a file…" in Smart Paste. A native Open dialog cannot be driven, so a debug
+# build answers each request with the next of these instead: the CSV and the workbook the test
+# exports itself, a Thai CSV that is not UTF-8, and a CSV with more rows than one run takes.
+printf 'id,name,city\n9001,ทดสอบภาษาไทย,ลำปาง\n' | iconv -f UTF-8 -t CP874 >"$WORK/thai874.csv"
+{ echo "id,name,city"; seq 1 10001 | sed 's/$/,x,y/'; } >"$WORK/big.csv"
+export PURICAT_E2E_PICK="$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
 if [ -n "${APP:-}" ]; then
   echo "› launching $APP"
   PURICAT_DATA_DIR="$WORK/data" PURICAT_SECRET_STORE=memory \

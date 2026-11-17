@@ -539,6 +539,68 @@
     }
     log.push({ stage: "sql-more", allowed, failed, txn, historyItems, exported });
 
+    // ---- Smart Paste from a file ------------------------------------------------------
+    // The native Open dialog is replaced by the runner's list of files (PURICAT_E2E_PICK):
+    // the CSV and the workbook exported just above, a Thai CSV that is not UTF-8, a CSV that
+    // is too long, and then nothing, which is what cancelling the dialog gives.
+    await click(treeRow("customers"), "mysql customers");
+    await waitFor(() => editState() === "editable" && cellText(0, 1) === "สมชาย ใจดี", "customers tab");
+    const customerRows = dataRows().length;
+    // A file cannot say NULL: an empty cell comes back as the empty text in a text column, so
+    // the rows whose city is NULL are the only ones the exported files would change.
+    const nullCities = dataRows().filter((_, r) => cellText(r, 2) === "NULL").length;
+    const openFile = async () => click(await waitFor(() => smart()?.querySelector("[data-smart-open-file]:not(:disabled)"), "open-file button"), "open a file");
+    const fileBar = () => smart().querySelector("[data-smart-file]")?.textContent.replace(/\s+/g, " ").trim();
+    const smartSource = () => document.querySelector("[data-smart-source]")?.textContent.trim() ?? "";
+    const roundTrip = async (what) => {
+      await click(smartButton("Preview"), `preview ${what}`);
+      await waitFor(() => document.querySelector("[data-smart-preview]") && smartCounts().unchanged !== undefined, `${what}: preview`, 15000);
+      const counts = smartCounts();
+      if (counts.unchanged !== customerRows - nullCities || counts.update !== nullCities || counts.insert || counts.problems) {
+        throw new Error(`${what}: an exported file should come back identical except for ${nullCities} NULL cities of ${customerRows} rows: ${JSON.stringify(counts)} ${JSON.stringify(smartRows().slice(0, 12))}`);
+      }
+      return counts;
+    };
+    await click(panelButton("Smart Paste…"), "open smart paste");
+    await waitFor(smart, "smart paste dialog");
+
+    await openFile();
+    await waitFor(() => smartSource().includes("export.csv"), "the CSV read");
+    const csv = {
+      source: smartSource(),
+      bar: fileBar(),
+      separator: smart().querySelector("[data-smart-separator]").selectedOptions[0].textContent.trim(),
+      headersDetected: all('[data-smart-paste] input[type="checkbox"]')[0].checked,
+      mapping: all('[data-smart-paste] select[aria-label^="Table column"]').map((el) => el.value),
+    };
+    csv.counts = await roundTrip("the CSV");
+    await stage("smart-file-csv", { customerRows, nullCities, csv });
+
+    await openFile();
+    await waitFor(() => smartSource().includes("export.xlsx"), "the workbook read");
+    const workbook = { source: smartSource(), bar: fileBar(), mapping: all('[data-smart-paste] select[aria-label^="Table column"]').map((el) => el.value) };
+    workbook.counts = await roundTrip("the workbook");
+    await stage("smart-file-xlsx", { workbook });
+
+    // Not UTF-8: refused with the reason, read once its encoding is named.
+    await openFile();
+    const notUtf8 = (await waitFor(() => smart().querySelector("[data-smart-file-error]"), "refusal of the encoding")).textContent.replace(/\s+/g, " ").trim();
+    await choose(smart().querySelector("[data-smart-encoding]"), "windows-874");
+    await waitFor(() => smartSource().includes("thai874.csv") && smart().textContent.includes("ทดสอบภาษาไทย"), "the Thai CSV read");
+    const thai = { notUtf8, source: smartSource(), bar: fileBar() };
+    await stage("smart-file-encoding", { thai });
+
+    // More rows than one run takes: nothing is offered for mapping.
+    await openFile();
+    const tooMany = (await waitFor(() => smart().querySelector("[data-smart-too-many]"), "too-many state", 15000)).textContent.replace(/\s+/g, " ").trim();
+    // A cancelled dialog changes nothing.
+    await openFile();
+    await sleep(400);
+    const afterCancel = !!smart().querySelector("[data-smart-too-many]");
+    await stage("smart-file-limit", { tooMany, afterCancel });
+    await click(smart().querySelector('button[aria-label="Close"]'), "close smart paste");
+    await waitFor(() => !smart(), "smart paste closed");
+
     // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
     await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
     await waitFor(() => cellText(0, 1) === "SO-10001" && editState() === "editable", "postgres orders tab");
