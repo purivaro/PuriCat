@@ -1,4 +1,8 @@
 <p align="center">
+  <a href="README.th.md"><b>🇹🇭 อ่านหน้านี้เป็นภาษาไทย</b></a> &nbsp;·&nbsp; English
+</p>
+
+<p align="center">
   <img src="branding/app-icon.png" width="112" alt="PuriCat icon">
 </p>
 
@@ -12,7 +16,6 @@
 
 <p align="center">
   <a href="https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg"><b>Download for macOS</b></a>
-  &nbsp;·&nbsp; <a href="README.th.md">ภาษาไทย</a>
   &nbsp;·&nbsp; <a href="STATUS.md">What works today</a>
   &nbsp;·&nbsp; <a href="LICENSE">MIT licence</a>
 </p>
