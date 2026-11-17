@@ -596,9 +596,9 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
           connection={connection}
           table={tab.table}
           columns={page.columns}
-          onDone={(result) => {
+          onDone={(result, skipped) => {
             setSmartPaste(false);
-            toast.success(t("smart.done", { ...result }));
+            toast.success(t("smart.done", { ...result }), { description: skipped > 0 ? t("smart.doneSkipped", { count: skipped }) : undefined });
             refresh();
           }}
         />

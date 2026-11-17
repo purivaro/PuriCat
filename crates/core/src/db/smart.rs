@@ -46,6 +46,10 @@ pub struct PasteRequest {
     pub update: Vec<String>,
     /// Row-major values aligned with `columns`; `null` is SQL NULL.
     pub rows: Vec<Vec<Option<String>>>,
+    /// Leave out the rows that have a problem and run the rest. Without it, one such row
+    /// blocks the whole run. The analysis is the same either way.
+    #[serde(default)]
+    pub skip_problems: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -88,6 +92,9 @@ pub struct RowReport {
     pub message: Option<String>,
     /// Columns whose stored value differs from the pasted one (updates only).
     pub changed: Vec<String>,
+    /// The other pasted row a duplicate collides with, as an index into the request's rows.
+    /// The UI knows which line of the source that is; this side does not.
+    pub other: Option<usize>,
 }
 
 impl RowReport {
@@ -96,9 +103,20 @@ impl RowReport {
             status,
             message: message.into(),
             changed: Vec::new(),
+            other: None,
+        }
+    }
+
+    fn duplicate_of(other: usize, message: &str) -> Self {
+        RowReport {
+            other: Some(other),
+            ..RowReport::new(RowStatus::Duplicate, message.to_string())
         }
     }
 }
+
+const SAME_KEY: &str = "Same key as another pasted row";
+const SAME_ROW: &str = "Same existing row as another pasted row";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +125,8 @@ pub struct Counts {
     pub update: u32,
     pub unchanged: u32,
     pub unmatched: u32,
-    /// Rows that block the run until the source is fixed.
+    /// Rows that cannot be run as they are. They block the run, unless the request says
+    /// to skip them.
     pub problems: u32,
 }
 
@@ -402,12 +421,8 @@ impl<'a> Draft<'a> {
             }
             match first_seen.get(&key) {
                 Some(&first) => {
-                    let message = |other: usize| format!("Same key as pasted row {}", other + 1);
-                    slots[first] = Slot::Done(RowReport::new(RowStatus::Duplicate, message(i)));
-                    slots.push(Slot::Done(RowReport::new(
-                        RowStatus::Duplicate,
-                        message(first),
-                    )));
+                    slots[first] = Slot::Done(RowReport::duplicate_of(i, SAME_KEY));
+                    slots.push(Slot::Done(RowReport::duplicate_of(first, SAME_KEY)));
                 }
                 None => {
                     first_seen.insert(key, i);
@@ -501,10 +516,7 @@ impl<'a> Draft<'a> {
                     let identity = values[..self.request.key.len().min(values.len())].to_vec();
                     if let Some(&other) = self.claimed.get(&identity).filter(|&&o| o != *row) {
                         for (a, b) in [(*row, other), (other, *row)] {
-                            self.slots[a] = Slot::Done(RowReport::new(
-                                RowStatus::Duplicate,
-                                format!("Same existing row as pasted row {}", b + 1),
-                            ));
+                            self.slots[a] = Slot::Done(RowReport::duplicate_of(b, SAME_ROW));
                         }
                         continue;
                     }
@@ -522,10 +534,7 @@ impl<'a> Draft<'a> {
                 several => {
                     for &row in several {
                         let other = several.iter().find(|&&r| r != row).copied().unwrap_or(row);
-                        self.slots[row] = Slot::Done(RowReport::new(
-                            RowStatus::Duplicate,
-                            format!("Same existing row as pasted row {}", other + 1),
-                        ));
+                        self.slots[row] = Slot::Done(RowReport::duplicate_of(other, SAME_ROW));
                     }
                 }
             }
@@ -668,6 +677,7 @@ impl<'a> Draft<'a> {
                             status: RowStatus::Update,
                             message: None,
                             changed,
+                            other: None,
                         }
                     }
                     Ok(None) => RowReport::new(RowStatus::Unchanged, None),
@@ -765,6 +775,7 @@ mod tests {
                 .iter()
                 .map(|r| r.iter().map(|v| v.map(String::from)).collect())
                 .collect(),
+            skip_problems: false,
         }
     }
 
@@ -1045,6 +1056,81 @@ mod tests {
             statuses(&draft.finish().0),
             vec![Duplicate, Duplicate, Unmatched]
         );
+    }
+
+    #[test]
+    fn rows_with_problems_never_reach_the_change_set() {
+        let m = meta();
+        let rows: &[&[Option<&str>]] = &[
+            &[Some("new1"), Some("ok"), Some("1")],
+            &[Some("new2"), Some("bad"), Some("many")],
+            &[Some("twice"), Some("a"), Some("1")],
+            &[Some("twice"), Some("b"), Some("2")],
+            &[None, Some("no key"), Some("3")],
+            &[Some("old1"), Some("renamed"), Some("4")],
+            &[Some("old2"), Some("bad"), Some("x")],
+        ];
+        let mut req = request(
+            Mode::Upsert,
+            &["sku", "name", "qty"],
+            &["sku"],
+            &["name", "qty"],
+            rows,
+        );
+        let outcome = |req: &PasteRequest| {
+            let mut draft = Draft::new(Engine::Mysql, &m, &keys(), req).unwrap();
+            let lookup = draft.lookups(&table()).unwrap().remove(0);
+            // Pasted rows 0, 1, 5 and 6 are looked up; the last two exist.
+            assert_eq!(lookup.2, vec![0, 1, 5, 6]);
+            let found = |flags: [&str; 4], sku: &str| {
+                let mut row: Vec<Option<String>> =
+                    flags.iter().map(|f| Some(f.to_string())).collect();
+                row.extend([Some(sku.into()), Some("old".into()), Some("0".into())]);
+                row
+            };
+            draft.matched(
+                &lookup.2,
+                vec![
+                    found(["0", "0", "1", "0"], "old1"),
+                    found(["0", "0", "0", "1"], "old2"),
+                ],
+            );
+            draft.finish()
+        };
+        let (analysis, changes) = outcome(&req);
+        use RowStatus::*;
+        assert_eq!(
+            statuses(&analysis),
+            vec![Insert, Invalid, Duplicate, Duplicate, MissingKey, Update, Invalid]
+        );
+        assert_eq!(
+            (
+                analysis.counts.insert,
+                analysis.counts.update,
+                analysis.counts.problems
+            ),
+            (1, 1, 5)
+        );
+        // Each of the two rows with one key names the other.
+        assert_eq!(
+            (
+                analysis.rows[2].other,
+                analysis.rows[3].other,
+                analysis.rows[1].other
+            ),
+            (Some(3), Some(2), None)
+        );
+        // Only the two rows without a problem are in what would run.
+        assert_eq!((changes.inserts.len(), changes.updates.len()), (1, 1));
+        assert_eq!(changes.inserts[0].values[0].value.as_deref(), Some("new1"));
+        assert_eq!(changes.updates[0].key[0].value.as_deref(), Some("old1"));
+
+        // Choosing to skip them changes neither the analysis nor what would run.
+        req.skip_problems = true;
+        let (skipping, same) = outcome(&req);
+        assert_eq!(skipping.fingerprint, analysis.fingerprint);
+        assert_eq!(skipping.counts, analysis.counts);
+        assert_eq!((same.inserts.len(), same.updates.len()), (1, 1));
     }
 
     #[test]

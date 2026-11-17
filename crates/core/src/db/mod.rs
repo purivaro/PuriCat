@@ -439,7 +439,10 @@ impl Session {
             draft.matched(&rows, found);
         }
         let (mut analysis, changes) = draft.finish();
-        let blocked = !analysis.problems.is_empty() || analysis.counts.problems > 0;
+        // Rows with a problem never reach the change set. They stop the run, unless the
+        // request says to leave them out and run the rest.
+        let blocked = !analysis.problems.is_empty()
+            || (analysis.counts.problems > 0 && !request.skip_problems);
         let nothing = changes.updates.is_empty() && changes.inserts.is_empty();
         let statements = if blocked || nothing {
             Vec::new()
@@ -478,7 +481,7 @@ impl Session {
                 "The table changed since the preview, so the result would be different. Preview again before running.".into(),
             ));
         }
-        if analysis.counts.problems > 0 {
+        if analysis.counts.problems > 0 && !request.skip_problems {
             return Err(Error::Invalid(
                 "Some pasted rows have problems. Fix them and preview again.".into(),
             ));

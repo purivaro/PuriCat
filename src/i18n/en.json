@@ -608,7 +608,8 @@
       "update": "to update",
       "unchanged": "already identical",
       "unmatched": "no match, skipped",
-      "problems": "with problems"
+      "problems": "with problems",
+      "problemsSkipped": "with problems, left out"
     },
     "status": {
       "insert": "Insert",
@@ -632,7 +633,22 @@
     "fixFirst": "Fix the rows marked in red in the spreadsheet, copy again and re-read the clipboard.",
     "nothing": "Nothing to do: no pasted row would be inserted or changed.",
     "done": "Smart Paste: {{inserted}} inserted · {{updated}} updated",
-    "previewFirst": "Preview first"
+    "previewFirst": "Preview first",
+    "problemRows_one": "{{count}} row has a problem and cannot be written as it is.",
+    "problemRows_other": "{{count}} rows have a problem and cannot be written as they are.",
+    "fixOrSkip": "Fix them in the source and preview again, or leave them out and run the rest.",
+    "skipProblems_one": "Leave this row out and run the other {{rest}}",
+    "skipProblems_other": "Leave these {{count}} rows out and run the other {{rest}}",
+    "onlyProblems": "List only the rows with problems",
+    "copyProblems": "Copy the rows with problems",
+    "problemColumn": "Problem",
+    "problemsCopied_one": "{{count}} row copied, as it was pasted",
+    "problemsCopied_other": "{{count}} rows copied, as they were pasted",
+    "doneSkipped_one": "{{count}} row with a problem was left out",
+    "doneSkipped_other": "{{count}} rows with problems were left out",
+    "rowRef": "row {{row}}",
+    "leavingOut_one": "{{count}} row has a problem and will be left out: nothing is written for it. The other {{rest}} run in one transaction.",
+    "leavingOut_other": "{{count}} rows have a problem and will be left out: nothing is written for them. The other {{rest}} run in one transaction."
   },
   "sql": {
     "newQuery": "New query",

@@ -1,11 +1,12 @@
-import { ArrowRight, CircleAlert, ClipboardPaste, FileSpreadsheet, FolderOpen, TriangleAlert, X } from "lucide-react";
+import { ArrowRight, CircleAlert, ClipboardPaste, Copy, FileSpreadsheet, FolderOpen, TriangleAlert, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import { EngineTag, EnvBadge } from "../../components/Brand";
 import { Button, IconButton, Segmented, Spinner, StateMessage } from "../../components/ui/primitives";
-import { clipboard, parseClipboardTable } from "../../lib/clipboard";
+import { clipboard, parseClipboardTable, toClipboardTable } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
 import type {
@@ -16,12 +17,24 @@ import type {
   FileTable,
   PasteAnalysis,
   PasteMode,
+  PasteRowReport,
   PasteRowStatus,
   PickedFile,
   TableRef,
   UniqueKey,
 } from "../../lib/types";
-import { autoMap, buildRequest, columnLetter, looksLikeHeaders, type Mapping, updatableColumns, usableKeys } from "./smartPaste";
+import {
+  autoMap,
+  buildRequest,
+  columnLetter,
+  isProblem,
+  looksLikeHeaders,
+  type Mapping,
+  otherLine,
+  problemTable,
+  updatableColumns,
+  usableKeys,
+} from "./smartPaste";
 
 /** Rows one run may hold (`db::write::MAX_STATEMENTS`). */
 const RUN_LIMIT = 10_000;
@@ -55,7 +68,8 @@ interface Props {
   connection: ConnectionView;
   table: TableRef;
   columns: ColumnMeta[];
-  onDone: (result: ApplyResult) => void;
+  /** `skipped`: rows with problems that were left out of the run, by the user's choice. */
+  onDone: (result: ApplyResult, skipped: number) => void;
 }
 
 export function SmartPasteDialog(props: Props) {
@@ -107,6 +121,9 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [run, setRun] = useState<{ job: string; done: number; total: number } | null>(null);
+  // Chosen per preview: leave the rows with problems out of the run; list only those rows.
+  const [skip, setSkip] = useState(false);
+  const [onlyProblems, setOnlyProblems] = useState(false);
   const analysing = useRef(0);
   useEffect(() => {
     onBusy(!!run);
@@ -208,7 +225,10 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const mappedCount = mapping.filter(Boolean).length;
   const canPreview = !!built && dataRows > 0 && mappedCount > 0 && !checking && !run;
   const toRun = current ? current.counts.insert + current.counts.update : 0;
-  const blocked = !!current && (current.problems.length > 0 || current.counts.problems > 0);
+  const problemRows = current?.counts.problems ?? 0;
+  // Rows with problems are never written. They stop the run unless the user leaves them out.
+  const skipping = skip && problemRows > 0 && toRun > 0;
+  const blocked = !!current && (current.problems.length > 0 || (problemRows > 0 && !skipping));
 
   const preview = async () => {
     if (!built) return;
@@ -217,7 +237,11 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
     setError(null);
     try {
       const result = await ipc.analyzePaste(connection.id, table, built.request);
-      if (id === analysing.current) setAnalysis({ of: signature, result });
+      if (id !== analysing.current) return;
+      setAnalysis({ of: signature, result });
+      // A new outcome is a new decision.
+      setSkip(false);
+      setOnlyProblems(false);
     } catch (e) {
       if (id === analysing.current) setError(errorMessage(e));
     } finally {
@@ -231,14 +255,39 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
     setRun({ job, done: 0, total: toRun });
     setError(null);
     try {
-      const result = await ipc.applyPaste(connection.id, table, built.request, current.fingerprint, job, (done) =>
-        setRun((r) => r && { ...r, done }),
-      );
-      onDone(result);
+      const request = skipping ? { ...built.request, skipProblems: true } : built.request;
+      const result = await ipc.applyPaste(connection.id, table, request, current.fingerprint, job, (done) => setRun((r) => r && { ...r, done }));
+      onDone(result, skipping ? problemRows : 0);
     } catch (e) {
       setError(errorMessage(e));
       setRun(null);
       setAnalysis(null); // whatever happened, the next run needs a fresh look at the table
+    }
+  };
+
+  /** What the preview says about a row; a duplicate names the other row by its line in the source. */
+  const detail = (r: PasteRowReport) => {
+    const line = built ? otherLine(r, built.sourceRows) : null;
+    const text = r.message ?? (r.changed.length ? t("smart.changes", { columns: r.changed.join(", ") }) : "");
+    return line === null ? text : `${text} (${t("smart.rowRef", { row: line })})`;
+  };
+
+  /** The rows with problems go back to the clipboard as they were pasted, to be fixed and pasted again. */
+  const copyProblems = async () => {
+    if (!built || !current || !matrix) return;
+    const rows = problemTable({
+      matrix,
+      hasHeaders,
+      sourceRows: built.sourceRows,
+      reports: current.rows,
+      reasonHeader: t("smart.problemColumn"),
+      reason: (r) => [t(`smart.status.${r.status}`), detail(r)].filter(Boolean).join(": "),
+    });
+    try {
+      await clipboard.write(toClipboardTable(rows));
+      toast.success(t("smart.problemsCopied", { count: problemRows }), { id: "smart-problems", duration: 2500 });
+    } catch (e) {
+      toast.error(errorMessage(e));
     }
   };
 
@@ -255,6 +304,8 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const sample = (i: number) => matrix?.[hasHeaders ? 1 : 0]?.[i] ?? "";
   const keyLabel = (k: UniqueKey) => t(k.primary ? "smart.keyPrimary" : "smart.keyUnique", { columns: k.columns.join(", ") });
   const keyAt = built ? key.map((k) => built.request.columns.indexOf(k)) : [];
+  // The rows the preview lists, each with its place among the analysed rows.
+  const listed = (current?.rows ?? []).map((r, i) => ({ r, i })).filter(({ r }) => !onlyProblems || isProblem(r.status));
   const number = new Intl.NumberFormat(i18n.language);
   const tooMany = !!file?.table && file.table.totalRows > file.table.rows.length;
   // The two places rows can come from, offered wherever there are none to work with.
@@ -525,12 +576,33 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                     {(["insert", "update", "unchanged", "unmatched", "problems"] as const).map((k) => (
                       <span key={k} data-smart-count={k} className={cn(current.counts[k] === 0 && "opacity-45")}>
                         <b className={cn("text-[15px] tabular-nums", COUNT_TONE[k])}>{current.counts[k]}</b>{" "}
-                        <span className="text-fg-muted">{t(`smart.count.${k}`)}</span>
+                        <span className="text-fg-muted">{t(k === "problems" && skipping ? "smart.count.problemsSkipped" : `smart.count.${k}`)}</span>
                       </span>
                     ))}
                   </div>
-                  {current.counts.problems > 0 && <p className="text-xs text-danger">{t("smart.fixFirst")}</p>}
-                  {toRun === 0 && current.counts.problems === 0 && <p className="text-xs text-fg-muted">{t("smart.nothing")}</p>}
+                  {problemRows > 0 && (
+                    <div data-smart-problems className="flex flex-col gap-2 rounded-lg bg-danger-soft px-3 py-2.5">
+                      <p className="flex items-start gap-2 text-[13px] leading-relaxed text-danger">
+                        <CircleAlert className="mt-0.5 size-4 shrink-0" />
+                        <span>
+                          {skipping
+                            ? t("smart.leavingOut", { count: problemRows, rest: number.format(toRun) })
+                            : `${t("smart.problemRows", { count: problemRows })} ${t(toRun > 0 ? "smart.fixOrSkip" : "smart.fixFirst")}`}
+                        </span>
+                      </p>
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 pl-6">
+                        {toRun > 0 && (
+                          <Check name="skip" label={t("smart.skipProblems", { count: problemRows, rest: number.format(toRun) })} checked={skip} onChange={setSkip} />
+                        )}
+                        <Check name="only-problems" label={t("smart.onlyProblems")} checked={onlyProblems} onChange={setOnlyProblems} />
+                        <span className="flex-1" />
+                        <Button size="sm" data-smart-copy-problems icon={<Copy className="size-3.5" />} onClick={() => void copyProblems()}>
+                          {t("smart.copyProblems")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {toRun === 0 && problemRows === 0 && <p className="text-xs text-fg-muted">{t("smart.nothing")}</p>}
                   <div className="max-h-64 overflow-auto rounded-xl border border-border">
                     <table className="w-full border-separate border-spacing-0 text-xs">
                       <thead>
@@ -542,11 +614,16 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                         </tr>
                       </thead>
                       <tbody data-selectable>
-                        {current.rows.slice(0, ROWS_SHOWN).map((r, i) => {
+                        {listed.slice(0, ROWS_SHOWN).map(({ r, i }) => {
                           const values = built!.request.rows[i] ?? [];
                           const label = (key.length ? keyAt.map((at) => values[at]) : [values[0]]).map((v) => v ?? "NULL").join(", ");
                           return (
-                            <tr key={i} className="[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top">
+                            <tr
+                              key={i}
+                              data-smart-row={r.status}
+                              // Left out of the run by choice: still listed, plainly not part of it.
+                              className={cn("[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top", skipping && isProblem(r.status) && "opacity-55")}
+                            >
                               <td className="font-mono text-fg-subtle tabular-nums">{(built!.sourceRows[i] ?? i) + 1}</td>
                               <td>
                                 <span className={cn("rounded px-1.5 py-px text-[10px] font-bold uppercase", TONE[r.status])}>
@@ -555,7 +632,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                               </td>
                               <td className="max-w-56 truncate font-mono">{label}</td>
                               <td className="break-words text-fg-muted">
-                                {r.message ?? (r.changed.length ? t("smart.changes", { columns: r.changed.join(", ") }) : "")}
+                                {detail(r)}
                               </td>
                             </tr>
                           );
@@ -563,9 +640,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                       </tbody>
                     </table>
                   </div>
-                  {current.rows.length > ROWS_SHOWN && (
-                    <p className="text-xs text-fg-subtle">{t("smart.rowsShown", { shown: ROWS_SHOWN, total: current.rows.length })}</p>
-                  )}
+                  {listed.length > ROWS_SHOWN && <p className="text-xs text-fg-subtle">{t("smart.rowsShown", { shown: ROWS_SHOWN, total: listed.length })}</p>}
                 </>
               )}
             </section>
@@ -624,11 +699,12 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   );
 }
 
-function Check({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
+function Check({ label, checked, disabled, name, onChange }: { label: string; checked: boolean; disabled?: boolean; name?: string; onChange: (v: boolean) => void }) {
   return (
     <label className={cn("flex items-center gap-1.5 text-[13px] text-fg-muted", disabled && "opacity-50")}>
       <input
         type="checkbox"
+        data-smart-check={name}
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}

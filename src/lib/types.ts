@@ -159,6 +159,8 @@ export interface PasteRequest {
   key: string[];
   update: string[];
   rows: (string | null)[][];
+  /** Leave out the rows that have a problem and run the rest. */
+  skipProblems?: boolean;
 }
 
 export interface UniqueKey {
@@ -215,8 +217,16 @@ export interface FileTable {
   delimiter: string | null;
 }
 
+export interface PasteRowReport {
+  status: PasteRowStatus;
+  message: string | null;
+  changed: string[];
+  /** The other pasted row a duplicate collides with: an index into the request's rows. */
+  other: number | null;
+}
+
 export interface PasteAnalysis {
-  rows: { status: PasteRowStatus; message: string | null; changed: string[] }[];
+  rows: PasteRowReport[];
   counts: PasteCounts;
   /** Identifies this exact outcome; a run is accepted only if a fresh analysis matches it. */
   fingerprint: string;

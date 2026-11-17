@@ -481,6 +481,70 @@
     await waitFor(() => cellText(0, 1) === "SO-99001", "inserted row visible");
     log.push({ stage: "smart-paste-done", updated: ["Completed", "999.99"], inserted: [cellText(0, 1), cellText(0, 4), cellText(0, 5)] });
 
+    // Rows with problems can be left out: the others run, the ones with problems change nothing.
+    await invoke("plugin:clipboard-manager|write_text", {
+      text:
+        "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\r\n" +
+        "SO-99003\tPending\t20\t1\t2026-11-17 09:00:00\r\n" + // new
+        "SO-99004\tPending\tlots\t1\t2026-11-17 09:05:00\r\n" + // not a number
+        "SO-99001\tCompleted\t10\t1\t2026-11-16 09:00:00\r\n" + // exists: its status changes
+        "SO-99005\tPending\t5\t1\t2026-11-17 09:10:00\r\n" + // the same key twice
+        "SO-99005\tPending\t6\t1\t2026-11-17 09:15:00\r\n",
+    });
+    await click(panelButton("Smart Paste…"), "open smart paste again");
+    await waitFor(() => document.querySelector("[data-smart-source]"), "clipboard parsed");
+    await click(smartButton("Preview"), "preview");
+    const problemBox = await waitFor(() => document.querySelector("[data-smart-problems]"), "rows with problems", 15000);
+    const smartCheck = (name) => document.querySelector(`[data-smart-check="${name}"]`);
+    const listedStatuses = () => all("[data-smart-preview] tbody tr").map((tr) => tr.dataset.smartRow).join(",");
+    const skipOffer = {
+      counts: smartCounts(),
+      box: problemBox.textContent.replace(/\s+/g, " ").trim(),
+      runDisabled: smartButton("Run").disabled,
+      listed: listedStatuses(),
+    };
+    await click(smartCheck("only-problems"), "list only the rows with problems");
+    await waitFor(() => listedStatuses() === "invalid,duplicate,duplicate", "only the rows with problems");
+    await click(document.querySelector("[data-smart-copy-problems]"), "copy the rows with problems");
+    await sleep(300);
+    skipOffer.copied = (await invoke("plugin:clipboard-manager|read_text")).split("\n");
+    await click(smartCheck("only-problems"), "list every row again");
+    await click(smartCheck("skip"), "leave the rows with problems out");
+    await waitFor(() => !smartButton("Run").disabled, "run enabled");
+    skipOffer.run = smartButton("Run").textContent.replace(/\s+/g, " ").trim();
+    skipOffer.countLabel = document.querySelector('[data-smart-count="problems"]').textContent.replace(/\s+/g, " ").trim();
+    if (
+      JSON.stringify(skipOffer.counts) !== JSON.stringify({ insert: 1, update: 1, unchanged: 0, unmatched: 0, problems: 3 }) ||
+      !skipOffer.runDisabled ||
+      skipOffer.listed !== "insert,invalid,update,duplicate,duplicate" ||
+      skipOffer.copied.length !== 4 ||
+      skipOffer.copied[0] !== "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\tProblem" ||
+      !skipOffer.copied[1].startsWith("SO-99004\tPending\tlots\t") ||
+      !skipOffer.copied[1].includes("not a number") ||
+      !skipOffer.copied[3].startsWith("SO-99005\tPending\t6\t") ||
+      // each of the two rows names the other by its line in the pasted block (the header is line 1)
+      !skipOffer.copied[2].endsWith("Same key as another pasted row (row 6)") ||
+      !skipOffer.copied[3].endsWith("Same key as another pasted row (row 5)") ||
+      !skipOffer.run.endsWith("2")
+    ) {
+      throw new Error(`the offer to leave rows out is wrong: ${JSON.stringify(skipOffer)}`);
+    }
+    await stage("smart-paste-skip", { skipOffer });
+    await click(smartButton("Run"), "run without the rows with problems");
+    await waitFor(() => !smart(), "smart paste finished", 20000);
+    const skipToast = (await waitFor(() => withText("[data-sonner-toast]", "left out"), "what was left out")).textContent.replace(/\s+/g, " ").trim();
+    const skipCheck = await invoke("run_sql", {
+      id: (await invoke("list_connections")).find((c) => c.engine === "mysql").id,
+      tab: "e2e-check-skip",
+      database: "puricat_e2e",
+      sql: "SELECT order_no, status, total_amount FROM orders WHERE order_no IN ('SO-99001', 'SO-99003', 'SO-99004', 'SO-99005') ORDER BY order_no",
+      options: { maxRows: 10, changeLimit: null },
+    });
+    await invoke("close_console", { tab: "e2e-check-skip" });
+    const afterSkip = skipCheck.statements[0].results[0].rows.map((r) => r.join(" "));
+    if (afterSkip.join(" | ") !== "SO-99001 Completed 10.00 | SO-99003 Pending 20.00") throw new Error(`leaving rows out wrote the wrong rows: ${afterSkip.join(" | ")}`);
+    log.push({ stage: "smart-paste-skipped", skipToast, afterSkip });
+
     // 8c. SQL console (MySQL): run a script, confirmation for a destructive statement,
     //     the impact guard, an error, the history, and exports
     await rightClick(treeRow("Demo MySQL"));

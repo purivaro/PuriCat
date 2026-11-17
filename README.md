@@ -46,7 +46,7 @@ Type in cells, add and delete rows, paste a block copied from Excel or Google Sh
 
 ### Smart Paste: update a table from a spreadsheet or a file
 
-Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs.
+Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs. Rows with a problem can be left out and copied back to the spreadsheet to be fixed.
 
 ![Smart Paste: columns mapped to the table, and a preview of which rows will be inserted or updated](docs/images/smart-paste.png)
 

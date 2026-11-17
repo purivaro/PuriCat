@@ -948,6 +948,78 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
         .rows
         .iter()
         .any(|r| r[1].as_deref() == Some("M128") && r[2].as_deref() == Some("bulk 128")));
+
+    // Rows with problems. One of them blocks the whole run; with `skipProblems` exactly the
+    // other rows are written, and the rows with problems change nothing.
+    let before = rows(session, stock).await.rows.len();
+    let mut mixed = json!({
+        "mode": "upsert", "columns": ["sku", "name", "qty"], "key": ["sku"], "update": ["name", "qty"],
+        "rows": [
+            ["SK1", "kept", "1"],
+            ["SK2", "not a number", "many"],
+            ["SK3", "twice", "3"],
+            ["SK3", "twice again", "4"],
+            [null, "no key", "5"],
+            ["A1", "renamed beside skipped rows", "7"]
+        ]
+    });
+    let strict = paste(mixed.clone());
+    let preview = session.analyze_paste(stock, &strict).await.unwrap();
+    assert_eq!(preview.counts, counts(1, 1, 0, 0, 4));
+    assert!(matches!(
+        session
+            .apply_paste(stock, &strict, &preview.fingerprint, GO)
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(rows(session, stock).await.rows.len(), before);
+
+    mixed["skipProblems"] = json!(true);
+    let skipping = paste(mixed);
+    // The analysis does not depend on the choice: the same rows, the same fingerprint.
+    let again = session.analyze_paste(stock, &skipping).await.unwrap();
+    assert_eq!(again.counts, preview.counts);
+    assert_eq!(again.fingerprint, preview.fingerprint);
+    // Still only the outcome that was previewed.
+    assert!(matches!(
+        session.apply_paste(stock, &skipping, "stale", GO).await,
+        Err(Error::Conflict(_))
+    ));
+    let done = session
+        .apply_paste(stock, &skipping, &preview.fingerprint, GO)
+        .await
+        .unwrap();
+    assert_eq!((done.inserted, done.updated, done.deleted), (1, 1, 0));
+    let page = rows(session, stock).await;
+    assert_eq!(page.rows.len(), before + 1);
+    let name_of = |sku: &str| {
+        page.rows
+            .iter()
+            .find(|r| r[1].as_deref() == Some(sku))
+            .map(|r| r[2].clone())
+    };
+    assert_eq!(name_of("SK1"), Some(Some("kept".into())));
+    assert_eq!(
+        name_of("A1"),
+        Some(Some("renamed beside skipped rows".into()))
+    );
+    assert_eq!(name_of("SK2"), None);
+    assert_eq!(name_of("SK3"), None, "neither of two rows with one key");
+    assert!(page.rows.iter().all(|r| r[2].as_deref() != Some("no key")));
+
+    // Nothing but problems: there is nothing to run, skipping or not.
+    let hopeless = paste(json!({
+        "mode": "update", "columns": ["sku", "qty"], "key": ["sku"], "update": ["qty"],
+        "rows": [["A1", "x"], [null, "2"]], "skipProblems": true
+    }));
+    let preview = session.analyze_paste(stock, &hopeless).await.unwrap();
+    assert_eq!(preview.counts, counts(0, 0, 0, 0, 2));
+    assert!(matches!(
+        session
+            .apply_paste(stock, &hopeless, &preview.fingerprint, GO)
+            .await,
+        Err(Error::Invalid(_))
+    ));
 }
 
 #[tokio::test]
