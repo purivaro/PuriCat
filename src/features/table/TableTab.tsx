@@ -26,7 +26,7 @@ import { toast } from "sonner";
 import { EngineTag, EnvBadge } from "../../components/Brand";
 import { Button, IconButton, Segmented, Spinner, StateMessage, Tooltip } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
-import { errorMessage, ipc } from "../../lib/ipc";
+import { errorMessage, ipc, toAppError } from "../../lib/ipc";
 import type { ApplyResult, RowFilter, RowPage, SortSpec } from "../../lib/types";
 import { sessionOf, useConnections } from "../../stores/connections";
 import { type TableTab, useWorkspace } from "../../stores/workspace";
@@ -58,6 +58,13 @@ import { ReviewDialog } from "./ReviewDialog";
 import { SmartPasteDialog } from "./SmartPasteDialog";
 
 const PAGE_SIZES = [100, 200, 500, 1000];
+
+/** The exact number of rows, which is only counted when asked for. */
+type Count =
+  | { status: "idle" }
+  | { status: "counting" }
+  | { status: "done"; total: number }
+  | { status: "error"; message: string };
 
 type Load =
   | { status: "idle" }
@@ -146,6 +153,37 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     useWorkspace.getState().setDirty(tab.id, dirty);
   }, [tab.id, dirty]);
   useEffect(() => () => useWorkspace.getState().setDirty(tab.id, false), [tab.id]);
+
+  // The exact count belongs to the table and the filter it was asked for. Paging and sorting
+  // show the same rows, so they keep it; a new filter, a reload or a save does not.
+  const [count, setCount] = useState<Count>({ status: "idle" });
+  const countJob = useRef<string | null>(null);
+  useEffect(() => {
+    setCount({ status: "idle" });
+    return () => {
+      // Whatever is still being counted is for rows that are no longer shown.
+      if (countJob.current) void ipc.cancelJob(countJob.current);
+      countJob.current = null;
+    };
+  }, [tab.connectionId, tab.table, filters, reloads, connected]);
+  const countRows = () => {
+    const job = crypto.randomUUID();
+    countJob.current = job;
+    setCount({ status: "counting" });
+    ipc
+      .countRows(tab.connectionId, tab.table, filters, job)
+      .then((result) => {
+        if (countJob.current !== job) return;
+        countJob.current = null;
+        setCount({ status: "done", total: result.count });
+      })
+      .catch((e: unknown) => {
+        if (countJob.current !== job) return;
+        countJob.current = null;
+        // Stopped by the user: back to where it was, without an error.
+        setCount(toAppError(e).kind === "conflict" ? { status: "idle" } : { status: "error", message: errorMessage(e) });
+      });
+  };
 
   const refresh = useCallback(() => setReloads((n) => n + 1), []);
   const changeSort = (next: SortSpec | null) => {
@@ -537,9 +575,51 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
                   · {t("filter.applied", { count: filters.length })}
                 </span>
               )}
-              {page.estimatedRows != null && (
+              {count.status === "done" && (
+                <span data-row-count className="shrink-0 font-medium text-fg tabular-nums">
+                  · {t(filters.length > 0 ? "filter.exact" : "table.exact", { total: number.format(count.total) })}
+                </span>
+              )}
+              {/* An exact total replaces the estimate; an exact number of matches goes beside it. */}
+              {page.estimatedRows != null && !(count.status === "done" && filters.length === 0) && (
                 <span className="shrink-0">
                   · {t(filters.length > 0 ? "filter.estimatedTable" : "table.estimated", { total: number.format(page.estimatedRows) })}
+                </span>
+              )}
+              {/* Everything on one page: the row range already is the count. */}
+              {(page.hasMore || page.offset > 0) && count.status !== "done" && (
+                <span className="flex shrink-0 items-center gap-1.5">
+                  ·
+                  {count.status === "counting" ? (
+                    <>
+                      <Spinner className="size-3" /> {t("table.counting")}
+                      <button
+                        type="button"
+                        data-count-stop
+                        className="rounded-md px-1.5 py-0.5 font-medium text-fg hover:bg-sunken"
+                        onClick={() => countJob.current && void ipc.cancelJob(countJob.current)}
+                      >
+                        {t("table.countStop")}
+                      </button>
+                    </>
+                  ) : (
+                    <Tooltip label={t("table.countHint")}>
+                      <button
+                        type="button"
+                        data-count-rows
+                        disabled={!connected}
+                        className="rounded-md px-1.5 py-0.5 font-medium text-accent-text hover:bg-accent-soft disabled:opacity-50"
+                        onClick={countRows}
+                      >
+                        {t(filters.length > 0 ? "filter.count" : "table.count")}
+                      </button>
+                    </Tooltip>
+                  )}
+                  {count.status === "error" && (
+                    <span role="alert" data-count-error title={count.message} className="max-w-56 truncate text-danger">
+                      {t("table.countFailed", { message: count.message })}
+                    </span>
+                  )}
                 </span>
               )}
               <span className="shrink-0 tabular-nums">· {t("table.elapsed", { ms: page.elapsedMs })}</span>

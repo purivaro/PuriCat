@@ -116,6 +116,12 @@ export interface RowFilter {
   value: string | null;
 }
 
+/** The rows of a table, or those a filter leaves: counted on the server, not estimated. */
+export interface RowCount {
+  count: number;
+  elapsedMs: number;
+}
+
 export interface RowPage {
   columns: ColumnMeta[];
   rows: (string | null)[][];

@@ -165,6 +165,57 @@ async fn filter_checks(session: &Session, items: &TableRef) {
         .is_err());
 }
 
+/// The exact count: of the table, and of the rows a filter leaves.
+async fn count_checks(session: &Session, items: &TableRef) {
+    use serde_json::json;
+    let idle = std::sync::atomic::AtomicBool::new(false);
+    let count = |filters: serde_json::Value| {
+        let idle = &idle;
+        async move {
+            let filters: Vec<puricat_core::db::filter::Filter> =
+                serde_json::from_value(filters).unwrap();
+            session.count_rows(items, &filters, idle).await
+        }
+    };
+    let all = names(session, items, json!([])).await.unwrap().len() as u64;
+    assert_eq!(count(json!([])).await.unwrap().count, all);
+    let big = json!([{"column": "big", "op": "equals", "value": "9007199254740993"}]);
+    assert_eq!(count(big).await.unwrap().count, 1);
+    let none = json!([{"column": "id", "op": "less", "value": "0"}]);
+    assert_eq!(count(none).await.unwrap().count, 0);
+    // The same refusals as a page: a value the column cannot hold, an unknown table.
+    let bad = json!([{"column": "id", "op": "equals", "value": "abc"}]);
+    assert!(count(bad).await.is_err());
+    let missing = TableRef {
+        name: "no_such_table".into(),
+        ..items.clone()
+    };
+    assert!(matches!(
+        session.count_rows(&missing, &[], &idle).await,
+        Err(Error::NotFound(_))
+    ));
+}
+
+/// A count that cannot finish (the caller made sure of that) is stopped on the server and
+/// reported as cancelled, promptly.
+async fn count_is_stopped(session: &Session, items: &TableRef) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let later = stop.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        later.store(true, Ordering::Relaxed);
+    });
+    let started = std::time::Instant::now();
+    let outcome = session.count_rows(items, &[], &stop).await;
+    assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 /// One cell read in full, by the row's primary key: what a page shows shortened.
 async fn full_cell_checks(session: &Session, items: &TableRef, keyless: &TableRef) {
     let key = |id: &str| -> Vec<puricat_core::db::write::CellValue> {
@@ -413,6 +464,10 @@ async fn mysql_body(t: Target, db: String) {
     ));
 
     filter_checks(&session, &items).await;
+    count_checks(&session, &items).await;
+    admin.execute("LOCK TABLES items WRITE").await.unwrap();
+    count_is_stopped(&session, &items).await;
+    admin.execute("UNLOCK TABLES").await.unwrap();
     // MySQL only: the grid shows 1 and 0 for TINYINT(1) and a number for BIT.
     assert_eq!(
         names(
@@ -694,6 +749,22 @@ async fn postgres_body(t: Target, db: String) {
     ));
 
     filter_checks(&session, &items).await;
+    count_checks(&session, &items).await;
+    // A count that would never end. (Not a lock on the table: reading the table's
+    // structure, which comes first and cannot be interrupted, would wait for that lock.)
+    admin
+        .execute(
+            "CREATE VIEW shop.endless AS
+             WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c",
+        )
+        .await
+        .unwrap();
+    let endless = TableRef {
+        name: "endless".into(),
+        ..items.clone()
+    };
+    count_is_stopped(&session, &endless).await;
+    admin.execute("DROP VIEW shop.endless").await.unwrap();
     // PostgreSQL only: equality on text is case-sensitive, and types of its own
     // (uuid, enum, array) are compared as the text the grid shows.
     for (column, op, value, expected) in [

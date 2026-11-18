@@ -1398,3 +1398,80 @@ async fn a_file_in_wal_mode_is_shared_with_the_program_that_owns_it() {
     session.close().await;
     other.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
+    let scratch = Scratch::new(&format!(
+        "{FIXTURE}\nCREATE VIEW endless AS {ENDLESS} SELECT x FROM c;"
+    ))
+    .await;
+    let session = open(&scratch).await;
+    let idle = AtomicBool::new(false);
+    let filters = |value: Value| -> Vec<puricat_core::db::filter::Filter> {
+        serde_json::from_value(value).unwrap()
+    };
+
+    let items = table("items");
+    assert_eq!(
+        session.count_rows(&items, &[], &idle).await.unwrap().count,
+        3
+    );
+    let some_rows = filters(json!([{ "column": "qty", "op": "greater", "value": "0" }]));
+    assert_eq!(
+        session
+            .count_rows(&items, &some_rows, &idle)
+            .await
+            .unwrap()
+            .count,
+        2
+    );
+    let none = filters(json!([{ "column": "name", "op": "equals", "value": "nobody" }]));
+    assert_eq!(
+        session
+            .count_rows(&items, &none, &idle)
+            .await
+            .unwrap()
+            .count,
+        0
+    );
+    // A view is counted like a table; a value the column cannot hold is refused as on a page.
+    assert_eq!(
+        session
+            .count_rows(&table("cheap"), &[], &idle)
+            .await
+            .unwrap()
+            .count,
+        1
+    );
+    let bad = filters(json!([{ "column": "qty", "op": "equals", "value": "abc" }]));
+    assert!(matches!(
+        session.count_rows(&items, &bad, &idle).await,
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        session.count_rows(&table("nothing"), &[], &idle).await,
+        Err(Error::NotFound(_))
+    ));
+
+    // A count that would never end is stopped, and says so.
+    let stop = Arc::new(AtomicBool::new(false));
+    let later = stop.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        later.store(true, Ordering::Relaxed);
+    });
+    let started = Instant::now();
+    let outcome = session.count_rows(&table("endless"), &[], &stop).await;
+    assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    // Nothing of that stop is left for the next count.
+    assert_eq!(
+        session.count_rows(&items, &[], &idle).await.unwrap().count,
+        3
+    );
+    session.close().await;
+}

@@ -12,12 +12,13 @@ use std::sync::Arc;
 
 use puricat_core::db::console::{RunOptions, RunOutcome, Status};
 use puricat_core::db::export::{self, Format};
+use puricat_core::db::filter::Filter;
 use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
 use puricat_core::db::write::{ApplyResult, CellValue, ChangeSet, Statement};
 use puricat_core::db::{
-    CellContent, DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta,
-    TableRef,
+    CellContent, DbObject, Namespace, PageRequest, RowCount, RowPage, ServerInfo, Session,
+    TableMeta, TableRef,
 };
 use puricat_core::model::{ConnectionProfile, Engine};
 use puricat_core::secrets::password_key;
@@ -260,6 +261,24 @@ pub async fn fetch_rows(
     page: PageRequest,
 ) -> Result<RowPage> {
     state.session(&id).await?.fetch_rows(&table, &page).await
+}
+
+/// Count the rows of a table that pass the filter: every row is read on the server, so this
+/// is only ever asked for by the user. `cancel_job` interrupts it.
+#[tauri::command]
+pub async fn count_rows(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    filters: Vec<Filter>,
+    job: String,
+) -> Result<RowCount> {
+    let session = state.session(&id).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = session.count_rows(&table, &filters, &stop).await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
 }
 
 /// The whole value of one cell that a page shows shortened; the row by its primary key.

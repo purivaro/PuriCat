@@ -226,6 +226,28 @@
     const STATUS = 4;
     const TOTAL = 5;
 
+    // 0. The exact number of rows is counted only when asked for. Until then the footer has
+    //    the server's estimate, or nothing.
+    const countButton = () => document.querySelector(`${panelSel} [data-count-rows]`);
+    const rowCount = () => document.querySelector(`${panelSel} [data-row-count]`)?.textContent.replace(/\s+/g, " ").trim();
+    const truth = async (sql) => {
+      const id = (await invoke("list_connections")).find((c) => c.engine === "postgres").id;
+      const outcome = await invoke("run_sql", { id, tab: "e2e-check-count", database: "puricat_e2e", sql, options: { maxRows: 10, changeLimit: null } });
+      await invoke("close_console", { tab: "e2e-check-count" });
+      return Number(outcome.statements[0].results[0].rows[0][0]);
+    };
+    const counted = { before: footer(), asked: !!rowCount() };
+    await click(await waitFor(countButton, "the count button"), "count rows");
+    await waitFor(() => rowCount()?.includes("1,250 in total"), "the exact count");
+    counted.all = footer();
+    // The same rows on another page: the count stays.
+    await click(document.querySelector(`${panelSel} button[aria-label="Next page"]`), "next page");
+    await waitFor(() => footer()?.includes("Rows 201–400"), "second page");
+    counted.onPageTwo = rowCount();
+    await click(document.querySelector(`${panelSel} button[aria-label="Previous page"]`), "previous page");
+    await waitFor(() => footer()?.includes("Rows 1–200"), "first page again");
+    if (counted.asked || !counted.onPageTwo?.includes("1,250")) throw new Error(`the exact count is not shown when it should be: ${JSON.stringify(counted)}`);
+
     await click(document.querySelector(`${panelSel} [data-filter-toggle]`), "filter button");
     await waitFor(filterBar, "filter bar");
     // A new condition starts on the first column; a number is offered comparisons.
@@ -235,6 +257,20 @@
     await condition(0, "status", "contains", "PEND");
     filterRows()[0].querySelector("input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await waitFor(() => footer()?.includes("1 condition applied") && columnCells(STATUS).every((v) => v === "Pending"), "one condition");
+    // Other rows now: the count of the whole table is gone, and the matches can be counted.
+    counted.afterFilter = rowCount() ?? null;
+    const pending = await truth("SELECT count(*) FROM shop.orders WHERE status::text ILIKE '%pend%'");
+    if (pending > 200) {
+      await click(await waitFor(countButton, "the count button, for the matches"), "count matches");
+      await waitFor(() => rowCount()?.includes("match"), "the number of matches");
+      counted.matches = rowCount();
+      if (!counted.matches.includes(pending.toLocaleString("en-US"))) throw new Error(`the footer says ${counted.matches}, the database ${pending}`);
+    } else if (countButton()) {
+      throw new Error("a count is offered although every matching row is on the page");
+    }
+    if (counted.afterFilter) throw new Error(`the table's count outlived the filter: ${counted.afterFilter}`);
+    counted.pending = pending;
+    await stage("table-count", { counted, footer: footer() });
     const oneCondition = {
       footer: footer(),
       statuses: [...new Set(columnCells(STATUS))],

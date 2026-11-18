@@ -215,7 +215,7 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-fn is_cancellation(e: &sqlx::Error) -> bool {
+pub(crate) fn is_cancellation(e: &sqlx::Error) -> bool {
     // PostgreSQL: query_canceled. MySQL: ER_QUERY_INTERRUPTED (SQLSTATE 70100).
     // SQLite: SQLITE_INTERRUPT (9).
     e.as_database_error()
@@ -459,6 +459,52 @@ impl Console {
 
     pub fn canceller(&self) -> Canceller {
         self.canceller.clone()
+    }
+
+    /// One value of one row, as text, from a statement PuriCat wrote itself, with its values
+    /// bound. For the callers that need what a query tab has — a connection of their own
+    /// that can be interrupted — without sending text over the simple protocol. The
+    /// statement must render its column to text.
+    pub(crate) async fn text_scalar(
+        &mut self,
+        sql: &str,
+        params: &[String],
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        // A stop asked for earlier was for the statement that ran then.
+        if let Canceller::Sqlite { interrupt } = &self.canceller {
+            interrupt.store(false, Ordering::Relaxed);
+        }
+        let lossy = |bytes: Vec<u8>| match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        };
+        match &mut self.conn {
+            Conn::MySql(conn) => {
+                let mut query = sqlx::query(sql);
+                for param in params {
+                    query = query.bind(param);
+                }
+                let row = query.fetch_one(&mut *conn).await?;
+                let bytes: Option<Vec<u8>> = row.try_get_unchecked(0)?;
+                Ok(bytes.map(lossy))
+            }
+            Conn::Postgres(conn) => {
+                let mut query = sqlx::query(sql);
+                for param in params {
+                    query = query.bind(param);
+                }
+                query.fetch_one(&mut *conn).await?.try_get(0)
+            }
+            Conn::Sqlite(conn) => {
+                let mut query = sqlx::query(sql);
+                for param in params {
+                    query = query.bind(param);
+                }
+                let row = query.fetch_one(&mut *conn).await?;
+                let bytes: Option<Vec<u8>> = row.try_get_unchecked(0)?;
+                Ok(bytes.map(lossy))
+            }
+        }
     }
 
     /// A full result of the last run, for export.

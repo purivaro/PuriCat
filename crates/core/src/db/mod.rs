@@ -172,6 +172,28 @@ pub struct RowPage {
     pub elapsed_ms: u64,
 }
 
+/// How many rows a table has, or how many of them pass a filter: counted, not estimated.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RowCount {
+    pub count: u64,
+    pub elapsed_ms: u64,
+}
+
+/// `SELECT COUNT(*)` with the number rendered to text by the server, like every other value.
+fn count_sql(engine: Engine, table: &TableRef, filter: &filter::Where) -> Result<String> {
+    let counted = match engine {
+        Engine::Postgres => "COUNT(*)::text",
+        Engine::Sqlite => "CAST(COUNT(*) AS TEXT)",
+        _ => "CAST(COUNT(*) AS CHAR)",
+    };
+    Ok(format!(
+        "SELECT {counted} FROM {}{}",
+        write::table_name(engine, table)?,
+        filter.sql
+    ))
+}
+
 /// The whole value of one cell, for the cells a page shows shortened.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -304,6 +326,55 @@ impl Session {
             Session::Sqlite(s) => s.select_page(table, &meta, &filter, &order, req).await?,
         };
         Ok(finish_page(meta, raw, order, req, started))
+    }
+
+    /// Count the rows of a table that pass `filters` (all of them, without filters). Asked
+    /// for, never automatic: on a large table the server reads every row or a whole index.
+    /// It runs on a connection of its own, so setting `stop` interrupts it on the server.
+    pub async fn count_rows(
+        &self,
+        table: &TableRef,
+        filters: &[filter::Filter],
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<RowCount> {
+        use std::sync::atomic::Ordering;
+        let started = Instant::now();
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let engine = self.engine();
+        let filter = filter::where_clause(engine, &meta, filters)?;
+        let sql = count_sql(engine, table, &filter)?;
+        let mut console = self.open_reader(Some(&table.database)).await?;
+        let canceller = console.canceller();
+        let query = console.text_scalar(&sql, &filter.params);
+        tokio::pin!(query);
+        let mut asked = false;
+        let answer = loop {
+            tokio::select! {
+                answer = &mut query => break answer,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if !asked => {
+                    if stop.load(Ordering::Relaxed) {
+                        asked = true;
+                        let _ = canceller.cancel().await;
+                    }
+                }
+            }
+        };
+        let count = match answer {
+            Ok(text) => text.and_then(|t| t.parse().ok()).ok_or_else(|| {
+                Error::Database("The server did not answer the count with a number".into())
+            })?,
+            Err(e) if asked && console::is_cancellation(&e) => {
+                return Err(Error::Conflict("Cancelled".into()))
+            }
+            Err(e) => return Err(Error::database(e)),
+        };
+        Ok(RowCount {
+            count,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
     }
 
     /// Read one cell in full: the row addressed by its complete primary key. Read-only.
@@ -659,6 +730,36 @@ mod tests {
             primary_key: vec!["id".into()],
             estimated_rows: None,
         }
+    }
+
+    #[test]
+    fn the_count_statement_per_engine() {
+        let filter = filter::Where {
+            sql: " WHERE x = ?".into(),
+            params: vec!["1".into()],
+        };
+        let table = TableRef {
+            database: "shop".into(),
+            schema: Some("pub\"lic".into()),
+            name: "or`ders".into(),
+        };
+        assert_eq!(
+            count_sql(Engine::Mysql, &table, &filter).unwrap(),
+            "SELECT CAST(COUNT(*) AS CHAR) FROM `shop`.`or``ders` WHERE x = ?"
+        );
+        assert_eq!(
+            count_sql(Engine::Postgres, &table, &filter::Where::default()).unwrap(),
+            "SELECT COUNT(*)::text FROM \"pub\"\"lic\".\"or`ders\""
+        );
+        let main = TableRef {
+            database: "main".into(),
+            schema: None,
+            name: "orders".into(),
+        };
+        assert_eq!(
+            count_sql(Engine::Sqlite, &main, &filter).unwrap(),
+            "SELECT CAST(COUNT(*) AS TEXT) FROM \"main\".\"orders\" WHERE x = ?"
+        );
     }
 
     #[test]
