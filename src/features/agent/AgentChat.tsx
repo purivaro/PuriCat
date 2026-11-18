@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button, IconButton, Spinner, Switch } from "../../components/ui/primitives";
 import { clipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
+import { homeDatabase } from "../../lib/connection";
 import { ipc } from "../../lib/ipc";
 import type { AgentAccess, AiProvider, ModelChoice } from "../../lib/types";
 import { type ChatProposal, type ChatTarget, type ChatTurn, type ToolStep, useAgent } from "../../stores/agent";
@@ -41,7 +42,7 @@ function useScope(): Scope {
     if (!tab || tab.kind === "welcome" || !connection) return { target: null, label: null, missing: "noTab", sqlTabId: null };
     if (session?.status !== "connected") return { target: null, label: connection.name, missing: "closed", sqlTabId: null };
     const schemas = session.info.capabilities.schemas;
-    const database = tab.kind === "table" ? tab.table.database : (tab.database ?? connection.database ?? (schemas ? "postgres" : null));
+    const database = tab.kind === "table" ? tab.table.database : (tab.database ?? homeDatabase(connection, schemas));
     if (!database) return { target: null, label: connection.name, missing: "noDatabase", sqlTabId: null };
     const schema = tab.kind === "table" ? (tab.table.schema ?? null) : schemas ? "public" : null;
     return {

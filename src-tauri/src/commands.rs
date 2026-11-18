@@ -12,15 +12,18 @@ use std::sync::Arc;
 
 use puricat_core::db::console::{RunOptions, RunOutcome, Status};
 use puricat_core::db::export::{self, Format};
+use puricat_core::db::filter::Filter;
 use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
-use puricat_core::db::write::{ApplyResult, ChangeSet, Statement};
+use puricat_core::db::write::{ApplyResult, CellValue, ChangeSet, Statement};
 use puricat_core::db::{
-    DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta, TableRef,
+    CellContent, DbObject, Namespace, PageRequest, RowCount, RowPage, ServerInfo, Session,
+    TableMeta, TableRef,
 };
-use puricat_core::model::ConnectionProfile;
+use puricat_core::model::{ConnectionProfile, Engine};
 use puricat_core::secrets::password_key;
-use puricat_core::store::{AuditEntry, HistoryEntry};
+use puricat_core::store::{AuditEntry, HistoryEntry, SavedScript};
+use puricat_core::table_file::{self, FileKind, FileTable, ReadOptions};
 use puricat_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -59,11 +62,12 @@ async fn view(state: &AppState, profile: ConnectionProfile) -> Result<Connection
     })
 }
 
-async fn stored_password(state: &AppState, connection_id: &str) -> Result<Option<String>> {
-    if connection_id.is_empty() {
+async fn stored_password(state: &AppState, profile: &ConnectionProfile) -> Result<Option<String>> {
+    // A SQLite file has no password: the keychain is not asked.
+    if profile.id.is_empty() || profile.engine == Engine::Sqlite {
         return Ok(None);
     }
-    let key = password_key(connection_id);
+    let key = password_key(&profile.id);
     state.with_secrets(move |s| s.get(&key)).await
 }
 
@@ -140,7 +144,7 @@ pub async fn duplicate_connection(
     name: String,
 ) -> Result<ConnectionView> {
     let mut copy = state.store.get_connection(&id).await?;
-    let password = stored_password(&state, &id).await?;
+    let password = stored_password(&state, &copy).await?;
     copy.id = String::new();
     copy.name = name;
     copy.favorite = false;
@@ -156,9 +160,10 @@ pub async fn duplicate_connection(
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<()> {
     state.remove_session(&id).await;
     let key = password_key(&id);
-    // What was run on a connection goes with it. First, so that a failure here leaves the
+    // What was run on a connection, and the scripts saved for it, go with it. First, so that a failure here leaves the
     // connection whole rather than without its password.
     state.store.clear_history(&id).await?;
+    state.store.clear_scripts(&id).await?;
     state.with_secrets(move |s| s.delete(&key)).await?;
     state.store.delete_connection(&id).await
 }
@@ -174,7 +179,7 @@ pub async fn test_connection(
     let password = match password {
         PasswordChange::Set { value } => Some(value),
         PasswordChange::Clear => None,
-        PasswordChange::Keep => stored_password(&state, &profile.id).await?,
+        PasswordChange::Keep => stored_password(&state, &profile).await?,
     };
     let started = std::time::Instant::now();
     let session = Session::connect(&profile, password.as_deref()).await?;
@@ -188,7 +193,7 @@ pub async fn test_connection(
 #[tauri::command]
 pub async fn open_connection(state: State<'_, AppState>, id: String) -> Result<ServerInfo> {
     let profile = state.store.get_connection(&id).await?;
-    let password = stored_password(&state, &id).await?;
+    let password = stored_password(&state, &profile).await?;
     let started = std::time::Instant::now();
     let session = Session::connect(&profile, password.as_deref()).await?;
     let mut info = match session.server_info().await {
@@ -256,6 +261,40 @@ pub async fn fetch_rows(
     page: PageRequest,
 ) -> Result<RowPage> {
     state.session(&id).await?.fetch_rows(&table, &page).await
+}
+
+/// Count the rows of a table that pass the filter: every row is read on the server, so this
+/// is only ever asked for by the user. `cancel_job` interrupts it.
+#[tauri::command]
+pub async fn count_rows(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    filters: Vec<Filter>,
+    job: String,
+) -> Result<RowCount> {
+    let session = state.session(&id).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = session.count_rows(&table, &filters, &stop).await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
+}
+
+/// The whole value of one cell that a page shows shortened; the row by its primary key.
+#[tauri::command]
+pub async fn fetch_cell(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    key: Vec<CellValue>,
+    column: String,
+) -> Result<CellContent> {
+    state
+        .session(&id)
+        .await?
+        .fetch_cell(&table, &key, &column)
+        .await
 }
 
 /// The exact statements a save would run, for the review step.
@@ -522,6 +561,53 @@ pub async fn clear_history(state: State<'_, AppState>, id: String) -> Result<()>
     state.store.clear_history(&id).await
 }
 
+// ---- saved scripts ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_scripts(state: State<'_, AppState>, id: String) -> Result<Vec<SavedScript>> {
+    state.store.list_scripts(&id).await
+}
+
+#[tauri::command]
+pub async fn get_script(state: State<'_, AppState>, script: i64) -> Result<SavedScript> {
+    state.store.get_script(script).await
+}
+
+/// Save a new script for a connection that exists.
+#[tauri::command]
+pub async fn create_script(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    sql: String,
+) -> Result<SavedScript> {
+    state.store.get_connection(&id).await?;
+    state.store.create_script(&id, &name, &sql).await
+}
+
+#[tauri::command]
+pub async fn update_script(
+    state: State<'_, AppState>,
+    script: i64,
+    sql: String,
+) -> Result<SavedScript> {
+    state.store.update_script(script, &sql).await
+}
+
+#[tauri::command]
+pub async fn rename_script(
+    state: State<'_, AppState>,
+    script: i64,
+    name: String,
+) -> Result<SavedScript> {
+    state.store.rename_script(script, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_script(state: State<'_, AppState>, script: i64) -> Result<()> {
+    state.store.delete_script(script).await
+}
+
 /// Write one result of the tab's last run to a file the user chose. Returns rows written.
 #[tauri::command]
 pub async fn export_result(
@@ -541,6 +627,121 @@ pub async fn export_result(
     let console = slot.console.lock().await;
     let set = console.result(result)?;
     tokio::task::block_in_place(|| export::write(std::path::Path::new(&path), format, set))
+}
+
+/// A file chosen in the native Open dialog. The web view gets its name and a token for
+/// `read_table_file`, never the path: it cannot ask for a file the user did not choose.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedFile {
+    token: String,
+    name: String,
+    kind: FileKind,
+}
+
+/// Let the user choose a CSV or spreadsheet file. `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn pick_table_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<PickedFile>> {
+    let path = match e2e_pick(&state) {
+        Some(answer) => answer,
+        None => {
+            use tauri_plugin_dialog::DialogExt;
+            let (chosen, answer) = tokio::sync::oneshot::channel();
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .add_filter("CSV, Excel", &table_file::extensions())
+                .pick_file(move |file| {
+                    let _ = chosen.send(file);
+                });
+            match answer.await {
+                Ok(Some(file)) => Some(
+                    file.into_path()
+                        .map_err(|e| Error::Invalid(format!("This file cannot be opened: {e}")))?,
+                ),
+                _ => None,
+            }
+        }
+    };
+    let Some(path) = path else { return Ok(None) };
+    let kind = table_file::kind_of(&path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let token = table_file::new_token();
+    *state.picked_file.lock().unwrap() = Some((token.clone(), path));
+    Ok(Some(PickedFile { token, name, kind }))
+}
+
+/// Let the user choose a SQLite file for a connection. Unlike a file to import, its path
+/// goes back to the form: it is part of the connection, shown there and editable.
+/// `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn pick_database_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<String>> {
+    let path = match e2e_pick(&state) {
+        Some(answer) => answer,
+        None => {
+            use tauri_plugin_dialog::DialogExt;
+            let (chosen, answer) = tokio::sync::oneshot::channel();
+            // No filter by extension: SQLite files are called anything (`.db`, `.sqlite`,
+            // `.storedata`, no extension at all). Connecting tells whether it is one.
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .pick_file(move |file| {
+                    let _ = chosen.send(file);
+                });
+            match answer.await {
+                Ok(Some(file)) => Some(
+                    file.into_path()
+                        .map_err(|e| Error::Invalid(format!("This file cannot be opened: {e}")))?,
+                ),
+                _ => None,
+            }
+        }
+    };
+    Ok(path.map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// The end-to-end test cannot click in a native dialog. A debug build started with
+/// `PURICAT_E2E_PICK` (paths separated by `:`) answers each request with the next path
+/// instead of showing one, and every request after the last path as a cancelled dialog
+/// (`Some(None)`). Release builds contain none of this.
+fn e2e_pick(state: &AppState) -> Option<Option<std::path::PathBuf>> {
+    #[cfg(debug_assertions)]
+    if let Some(list) = std::env::var_os("PURICAT_E2E_PICK") {
+        let n = state.e2e_picks.fetch_add(1, Ordering::Relaxed);
+        return Some(std::env::split_paths(&list).nth(n));
+    }
+    let _ = state;
+    None
+}
+
+/// Read the chosen file as rows of text, for Smart Paste. One more row than a run may hold
+/// is returned at most, so "too many" can be told from "exactly the limit".
+#[tauri::command]
+pub async fn read_table_file(
+    state: State<'_, AppState>,
+    token: String,
+    options: ReadOptions,
+) -> Result<FileTable> {
+    let path = match &*state.picked_file.lock().unwrap() {
+        Some((current, path)) if *current == token => path.clone(),
+        _ => return Err(Error::NotFound("The chosen file (open it again)".into())),
+    };
+    let max_rows = puricat_core::db::write::MAX_STATEMENTS + 1;
+    tokio::task::spawn_blocking(move || table_file::read(&path, &options, max_rows))
+        .await
+        .map_err(|e| Error::Invalid(e.to_string()))?
 }
 
 #[tauri::command]

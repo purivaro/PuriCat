@@ -25,6 +25,11 @@ pub fn postgres(name: &str) -> Result<String> {
     Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
 
+/// SQLite: `"name"`, as in standard SQL, with double quotes doubled.
+pub fn sqlite(name: &str) -> Result<String> {
+    postgres(name)
+}
+
 /// SQL Server: `[name]` with closing brackets doubled.
 pub fn sqlserver(name: &str) -> Result<String> {
     check(name)?;

@@ -1,6 +1,6 @@
 // Mirrors the serde types in crates/core. Keep the two in sync.
 
-export type Engine = "mysql" | "postgres" | "sqlserver";
+export type Engine = "mysql" | "postgres" | "sqlite" | "sqlserver";
 export type Environment = "development" | "staging" | "production";
 export type TlsMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 
@@ -13,6 +13,8 @@ export interface ConnectionProfile {
   port: number;
   username: string;
   database: string | null;
+  /** SQLite only: the database file, as an absolute path. */
+  file: string | null;
   tls: TlsMode;
   tlsCaPath: string | null;
   readOnly: boolean;
@@ -85,6 +87,41 @@ export interface SortSpec {
   descending: boolean;
 }
 
+/** One cell read in full (`db::CellContent`). */
+export interface CellContent {
+  value: string | null;
+  /** Even this was cut: the value is longer than the backend sends for one cell. */
+  cut: boolean;
+}
+
+export type FilterOp =
+  | "equals"
+  | "notEquals"
+  | "contains"
+  | "notContains"
+  | "startsWith"
+  | "endsWith"
+  | "greater"
+  | "greaterOrEqual"
+  | "less"
+  | "lessOrEqual"
+  | "isNull"
+  | "isNotNull";
+
+/** One condition on the rows of a table. All conditions of a request must hold. */
+export interface RowFilter {
+  column: string;
+  op: FilterOp;
+  /** `null` for the NULL tests, which take no value. */
+  value: string | null;
+}
+
+/** The rows of a table, or those a filter leaves: counted on the server, not estimated. */
+export interface RowCount {
+  count: number;
+  elapsedMs: number;
+}
+
 export interface RowPage {
   columns: ColumnMeta[];
   rows: (string | null)[][];
@@ -130,6 +167,8 @@ export interface PasteRequest {
   key: string[];
   update: string[];
   rows: (string | null)[][];
+  /** Leave out the rows that have a problem and run the rest. */
+  skipProblems?: boolean;
 }
 
 export interface UniqueKey {
@@ -156,8 +195,46 @@ export interface PasteCounts {
   problems: number;
 }
 
+export type FileKind = "text" | "workbook";
+
+/** A file chosen in the native Open dialog. The backend keeps its path; this is its handle. */
+export interface PickedFile {
+  token: string;
+  name: string;
+  kind: FileKind;
+}
+
+export interface FileReadOptions {
+  /** Workbooks: the sheet to read (the first one by default). */
+  sheet?: string;
+  /** Text: an encoding label such as `windows-874`. Without it the file must be UTF-8 or UTF-16. */
+  encoding?: string;
+  /** Text: the character between fields. Detected when absent. */
+  delimiter?: string;
+}
+
+/** Rows of text read from a CSV file or a workbook sheet (`table_file::FileTable`). */
+export interface FileTable {
+  kind: FileKind;
+  rows: string[][];
+  /** Rows in the file; more than `rows.length` when it holds more than one run can take. */
+  totalRows: number;
+  sheets: string[];
+  sheet: string | null;
+  encoding: string | null;
+  delimiter: string | null;
+}
+
+export interface PasteRowReport {
+  status: PasteRowStatus;
+  message: string | null;
+  changed: string[];
+  /** The other pasted row a duplicate collides with: an index into the request's rows. */
+  other: number | null;
+}
+
 export interface PasteAnalysis {
-  rows: { status: PasteRowStatus; message: string | null; changed: string[] }[];
+  rows: PasteRowReport[];
   counts: PasteCounts;
   /** Identifies this exact outcome; a run is accepted only if a fresh analysis matches it. */
   fingerprint: string;
@@ -169,7 +246,10 @@ export type SqlKind = "read" | "dml" | "ddl" | "transaction" | "other";
 
 export interface SqlStatement {
   text: string;
+  /** Byte offset (UTF-8) of the statement in the script. */
   start: number;
+  /** Byte offset of its first word, after the comments that lead it. */
+  body: number;
   kind: SqlKind;
   danger: string | null;
 }
@@ -219,6 +299,16 @@ export interface HistoryEntry {
   summary: string;
   elapsedMs: number;
   startedAt: number;
+}
+
+/** A script saved for one connection, stored exactly as written. */
+export interface SavedScript {
+  id: number;
+  connectionId: string;
+  name: string;
+  sql: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export type ExportFormat = "csv" | "json" | "xlsx";

@@ -46,6 +46,8 @@ SELECT CONCAT('SO-', 10000 + n),
        ROUND(120 + (n * 7919) % 900000 / 100, 2),
        IF(n % 9 = 0, NULL, IF(n % 5 = 0, 'ส่งด่วน — โทรแจ้งก่อนส่ง', ''))
 FROM seq;
+-- One note longer than a page shows (1000 characters), for the whole-value dialog.
+UPDATE orders SET note = CONCAT(REPEAT('บันทึกยาว ', 250), 'จบ') WHERE id = 3;
 
 CREATE VIEW order_totals AS
   SELECT c.name AS customer, COUNT(*) AS orders, SUM(o.total_amount) AS total

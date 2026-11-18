@@ -263,6 +263,7 @@ pub fn render_context(
     let engine = match engine {
         Engine::Mysql => "MySQL",
         Engine::Postgres => "PostgreSQL",
+        Engine::Sqlite => "SQLite",
         Engine::Sqlserver => "SQL Server",
     };
     let mut out = format!("Engine: {engine} {server_version}\nDatabase: {database}\n");

@@ -6,6 +6,7 @@ import type {
   AppError,
   ApplyResult,
   AuditEntry,
+  CellContent,
   ChangeSet,
   ChatRequest,
   CliStatus,
@@ -13,13 +14,19 @@ import type {
   ConnectionView,
   DbObject,
   ExportFormat,
+  FileReadOptions,
+  FileTable,
   HistoryEntry,
   ModelChoice,
   Namespace,
   PasswordChange,
   PasteAnalysis,
+  PickedFile,
+  RowCount,
+  RowFilter,
   PasteRequest,
   RowPage,
+  SavedScript,
   RunOutcome,
   ServerInfo,
   SortSpec,
@@ -55,8 +62,13 @@ export const ipc = {
   listSchemas: (id: string, database: string) => invoke<Namespace[]>("list_schemas", { id, database }),
   listObjects: (id: string, database: string, schema: string | null) =>
     invoke<DbObject[]>("list_objects", { id, database, schema }),
-  fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null }) =>
+  fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null; filters: RowFilter[] }) =>
     invoke<RowPage>("fetch_rows", { id, table, page }),
+  /** Counts on the server; `cancelJob(job)` interrupts it (the call then fails with `conflict`). */
+  countRows: (id: string, table: TableRef, filters: RowFilter[], job: string) =>
+    invoke<RowCount>("count_rows", { id, table, filters, job }),
+  fetchCell: (id: string, table: TableRef, key: { column: string; value: string }[], column: string) =>
+    invoke<CellContent>("fetch_cell", { id, table, key, column }),
   planChanges: (id: string, table: TableRef, changes: ChangeSet) =>
     invoke<Statement[]>("plan_changes", { id, table, changes }),
   applyChanges: (id: string, table: TableRef, changes: ChangeSet) =>
@@ -91,8 +103,19 @@ export const ipc = {
   closeConsole: (tab: string) => invoke<void>("close_console", { tab }),
   listHistory: (id: string, limit: number) => invoke<HistoryEntry[]>("list_history", { id, limit }),
   clearHistory: (id: string) => invoke<void>("clear_history", { id }),
+  listScripts: (id: string) => invoke<SavedScript[]>("list_scripts", { id }),
+  getScript: (script: number) => invoke<SavedScript>("get_script", { script }),
+  createScript: (id: string, name: string, sql: string) => invoke<SavedScript>("create_script", { id, name, sql }),
+  updateScript: (script: number, sql: string) => invoke<SavedScript>("update_script", { script, sql }),
+  renameScript: (script: number, name: string) => invoke<SavedScript>("rename_script", { script, name }),
+  deleteScript: (script: number) => invoke<void>("delete_script", { script }),
   exportResult: (tab: string, result: number, format: ExportFormat, path: string) =>
     invoke<number>("export_result", { tab, result, format, path }),
+  /** Shows the native Open dialog (CSV, Excel). `null` when it was cancelled. */
+  pickTableFile: () => invoke<PickedFile | null>("pick_table_file"),
+  /** Shows the native Open dialog for a SQLite file and gives its path. `null` when it was cancelled. */
+  pickDatabaseFile: () => invoke<string | null>("pick_database_file"),
+  readTableFile: (token: string, options: FileReadOptions) => invoke<FileTable>("read_table_file", { token, options }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),

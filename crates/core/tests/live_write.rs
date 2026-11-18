@@ -630,6 +630,131 @@ fn counts(insert: u32, update: u32, unchanged: u32, unmatched: u32, problems: u3
 
 const GO: &(dyn Fn(usize) -> bool + Send + Sync) = &|_| true;
 
+/// A value pasted in another spelling is not a change. `spell` has a key `code` and one
+/// column per kind of value; `ok` holds a boolean, spelled the engine's way: the stored
+/// spelling, two others the engine reads as the same value, and a different value.
+///
+/// The claim is checked against the server itself: rows written from each spelling must
+/// read back identical, and only then is the other spelling required to be "unchanged".
+async fn spelling_scenario(session: &Session, spell: &TableRef, ok: [&str; 4]) {
+    const COLUMNS: [&str; 8] = ["amount", "n", "ratio", "at", "at_ms", "day", "t", "ok"];
+    let spellings = [
+        [
+            "1.5",
+            "7",
+            "0.25",
+            "2026-01-10 09:05:00",
+            "2026-01-10 09:05:00.250",
+            "2026-01-10",
+            "09:05:00",
+            ok[0],
+        ],
+        [
+            "01.50",
+            "007",
+            ".25",
+            "2026-1-10 9:05",
+            "2026-01-10 09:05:00.25",
+            "2026-1-10",
+            "9:05",
+            ok[1],
+        ],
+        [
+            "+1.5000",
+            "+7",
+            "0.250",
+            "2026-01-10T09:05:00",
+            "2026-01-10T09:05:00.2500",
+            "2026-01-10 00:00:00",
+            "09:05:00.0",
+            ok[2],
+        ],
+    ];
+    let mut columns = vec!["code"];
+    columns.extend(COLUMNS);
+    let row = |code: &str, values: &[&str; 8]| {
+        let mut cells = vec![json!(code)];
+        cells.extend(values.iter().map(|v| json!(v)));
+        json!(cells)
+    };
+
+    // One row per spelling, written as pasted.
+    let insert = paste(json!({
+        "mode": "insert", "columns": columns,
+        "rows": [row("canon", &spellings[0]), row("alt1", &spellings[1]), row("alt2", &spellings[2])]
+    }));
+    let preview = session.analyze_paste(spell, &insert).await.unwrap();
+    assert_eq!(preview.counts, counts(3, 0, 0, 0, 0), "{:?}", preview.rows);
+    session
+        .apply_paste(spell, &insert, &preview.fingerprint, GO)
+        .await
+        .unwrap();
+    // The server stored the same value from every spelling.
+    let page = rows(session, spell).await;
+    for column in COLUMNS {
+        let stored = value(&page, "canon", column);
+        assert!(stored.is_some(), "{column}");
+        for other in ["alt1", "alt2"] {
+            assert_eq!(value(&page, other, column), stored, "{column} of {other}");
+        }
+    }
+
+    // So pasting any of the spellings over the stored row changes nothing.
+    let over_canon = |values: &[&str; 8]| {
+        paste(json!({
+            "mode": "update", "columns": columns, "key": ["code"], "update": COLUMNS,
+            "rows": [row("canon", values)]
+        }))
+    };
+    for values in &spellings {
+        let preview = session
+            .analyze_paste(spell, &over_canon(values))
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.counts,
+            counts(0, 0, 1, 0, 0),
+            "{values:?}: {:?}",
+            preview.rows
+        );
+    }
+
+    // A different value in every column is still a change of every column.
+    let different = [
+        "1.5001",
+        "8",
+        "0.26",
+        "2026-01-10 09:05:01",
+        "2026-01-10 09:05:00.251",
+        "2026-01-11",
+        "9:06",
+        ok[3],
+    ];
+    let preview = session
+        .analyze_paste(spell, &over_canon(&different))
+        .await
+        .unwrap();
+    assert_eq!(preview.counts, counts(0, 1, 0, 0, 0));
+    assert_eq!(preview.rows[0].changed, COLUMNS);
+
+    // A spelling that is not plainly a number is left to the server, as every difference
+    // in spelling was before: an update, which stores the same value.
+    let mut odd = spellings[0];
+    odd[0] = "1.5e0";
+    let request = over_canon(&odd);
+    let preview = session.analyze_paste(spell, &request).await.unwrap();
+    assert_eq!(preview.counts, counts(0, 1, 0, 0, 0));
+    assert_eq!(preview.rows[0].changed, ["amount"]);
+    session
+        .apply_paste(spell, &request, &preview.fingerprint, GO)
+        .await
+        .unwrap();
+    assert_eq!(
+        value(&rows(session, spell).await, "canon", "amount"),
+        value(&page, "canon", "amount")
+    );
+}
+
 /// The same scenario on either engine. `stock` has a generated `id` (primary key), a unique
 /// `sku`, `name`, `price`, `qty` (NOT NULL DEFAULT 0) and `day`; rows A1, B2 and C3 exist.
 async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensitive_keys: bool) {
@@ -948,6 +1073,78 @@ async fn smart_paste_scenario(session: &Session, stock: &TableRef, case_insensit
         .rows
         .iter()
         .any(|r| r[1].as_deref() == Some("M128") && r[2].as_deref() == Some("bulk 128")));
+
+    // Rows with problems. One of them blocks the whole run; with `skipProblems` exactly the
+    // other rows are written, and the rows with problems change nothing.
+    let before = rows(session, stock).await.rows.len();
+    let mut mixed = json!({
+        "mode": "upsert", "columns": ["sku", "name", "qty"], "key": ["sku"], "update": ["name", "qty"],
+        "rows": [
+            ["SK1", "kept", "1"],
+            ["SK2", "not a number", "many"],
+            ["SK3", "twice", "3"],
+            ["SK3", "twice again", "4"],
+            [null, "no key", "5"],
+            ["A1", "renamed beside skipped rows", "7"]
+        ]
+    });
+    let strict = paste(mixed.clone());
+    let preview = session.analyze_paste(stock, &strict).await.unwrap();
+    assert_eq!(preview.counts, counts(1, 1, 0, 0, 4));
+    assert!(matches!(
+        session
+            .apply_paste(stock, &strict, &preview.fingerprint, GO)
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(rows(session, stock).await.rows.len(), before);
+
+    mixed["skipProblems"] = json!(true);
+    let skipping = paste(mixed);
+    // The analysis does not depend on the choice: the same rows, the same fingerprint.
+    let again = session.analyze_paste(stock, &skipping).await.unwrap();
+    assert_eq!(again.counts, preview.counts);
+    assert_eq!(again.fingerprint, preview.fingerprint);
+    // Still only the outcome that was previewed.
+    assert!(matches!(
+        session.apply_paste(stock, &skipping, "stale", GO).await,
+        Err(Error::Conflict(_))
+    ));
+    let done = session
+        .apply_paste(stock, &skipping, &preview.fingerprint, GO)
+        .await
+        .unwrap();
+    assert_eq!((done.inserted, done.updated, done.deleted), (1, 1, 0));
+    let page = rows(session, stock).await;
+    assert_eq!(page.rows.len(), before + 1);
+    let name_of = |sku: &str| {
+        page.rows
+            .iter()
+            .find(|r| r[1].as_deref() == Some(sku))
+            .map(|r| r[2].clone())
+    };
+    assert_eq!(name_of("SK1"), Some(Some("kept".into())));
+    assert_eq!(
+        name_of("A1"),
+        Some(Some("renamed beside skipped rows".into()))
+    );
+    assert_eq!(name_of("SK2"), None);
+    assert_eq!(name_of("SK3"), None, "neither of two rows with one key");
+    assert!(page.rows.iter().all(|r| r[2].as_deref() != Some("no key")));
+
+    // Nothing but problems: there is nothing to run, skipping or not.
+    let hopeless = paste(json!({
+        "mode": "update", "columns": ["sku", "qty"], "key": ["sku"], "update": ["qty"],
+        "rows": [["A1", "x"], [null, "2"]], "skipProblems": true
+    }));
+    let preview = session.analyze_paste(stock, &hopeless).await.unwrap();
+    assert_eq!(preview.counts, counts(0, 0, 0, 0, 2));
+    assert!(matches!(
+        session
+            .apply_paste(stock, &hopeless, &preview.fingerprint, GO)
+            .await,
+        Err(Error::Invalid(_))
+    ));
 }
 
 #[tokio::test]
@@ -993,6 +1190,23 @@ async fn mysql_smart_paste() {
         let keys = session.unique_keys(&stock).await.unwrap();
         assert!(keys.iter().all(|k| k.name != "uq_prefix"), "{keys:?}");
         smart_paste_scenario(&session, &stock, true).await;
+        let mut admin = mysql_admin(&t).await;
+        admin
+            .execute(
+                format!(
+                    "CREATE TABLE `{}`.spell (
+                        code VARCHAR(8) NOT NULL PRIMARY KEY,
+                        amount DECIMAL(12,4), n INT, ratio DOUBLE,
+                        at DATETIME, at_ms DATETIME(3), day DATE, t TIME, ok TINYINT(1)
+                     )",
+                    stock.database
+                )
+                .as_str(),
+            )
+            .await
+            .unwrap();
+        let spell = TableRef { name: "spell".into(), ..stock.clone() };
+        spelling_scenario(&session, &spell, ["1", "1", "1", "0"]).await;
         session.close().await;
     })
     .await;
@@ -1044,6 +1258,18 @@ async fn postgres_smart_paste() {
         let keys = session.unique_keys(&stock).await.unwrap();
         assert!(keys.iter().all(|k| k.name != "uq_lower" && k.name != "uq_partial"), "{keys:?}");
         smart_paste_scenario(&session, &stock, false).await;
+        admin
+            .execute(
+                "CREATE TABLE spell (
+                    code varchar(8) PRIMARY KEY,
+                    amount numeric(12,4), n integer, ratio double precision,
+                    at timestamp, at_ms timestamp(3), day date, t time, ok boolean
+                 )",
+            )
+            .await
+            .unwrap();
+        let spell = TableRef { name: "spell".into(), ..stock.clone() };
+        spelling_scenario(&session, &spell, ["true", "TRUE", "yes", "false"]).await;
         session.close().await;
     })
     .await;

@@ -4,6 +4,7 @@ import {
   CircleAlert,
   ClipboardPaste,
   Eye,
+  Funnel,
   KeyRound,
   Lock,
   Pencil,
@@ -18,21 +19,26 @@ import {
   Undo2,
   Unplug,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { EngineTag, EnvBadge } from "../../components/Brand";
 import { Button, IconButton, Segmented, Spinner, StateMessage, Tooltip } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
-import { errorMessage, ipc } from "../../lib/ipc";
-import type { ApplyResult, RowPage, SortSpec } from "../../lib/types";
+import { errorMessage, ipc, toAppError } from "../../lib/ipc";
+import type { ApplyResult, RowFilter, RowPage, SortSpec } from "../../lib/types";
 import { sessionOf, useConnections } from "../../stores/connections";
 import { type TableTab, useWorkspace } from "../../stores/workspace";
+import { CellDialog } from "./CellDialog";
 import { DataGrid, rangeOf, type Selection } from "./DataGrid";
+import { sameFilters } from "./filter";
+import { FilterBar } from "./FilterBar";
 import {
   addRows,
+  type Cell,
   canRedo,
+  cellIndex,
   canUndo,
   current,
   EMPTY,
@@ -41,15 +47,24 @@ import {
   type Pending,
   record,
   redo,
+  setCells,
   setDeleted,
   summarize,
   toChangeSet,
   undo,
+  withFull,
 } from "./pending";
 import { ReviewDialog } from "./ReviewDialog";
 import { SmartPasteDialog } from "./SmartPasteDialog";
 
 const PAGE_SIZES = [100, 200, 500, 1000];
+
+/** The exact number of rows, which is only counted when asked for. */
+type Count =
+  | { status: "idle" }
+  | { status: "counting" }
+  | { status: "done"; total: number }
+  | { status: "error"; message: string };
 
 type Load =
   | { status: "idle" }
@@ -67,7 +82,16 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [limit, setLimit] = useState(200);
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<SortSpec | null>(null);
-  const [page, setPage] = useState<RowPage | null>(null);
+  const [filters, setFilters] = useState<RowFilter[]>([]);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterFocus, setFilterFocus] = useState(0);
+  const [loaded, setPage] = useState<RowPage | null>(null);
+  // Whole values learned for cells the page shows shortened, by `cellIndex`. With them such
+  // a cell can be edited: its original is complete.
+  const [full, setFull] = useState<Record<number, string | null>>({});
+  const page = useMemo(() => loaded && withFull(loaded, full), [loaded, full]);
+  const [loadId, setLoadId] = useState(0);
+  const [inspect, setInspect] = useState<Cell | null>(null);
   const [load, setLoad] = useState<Load>({ status: "idle" });
   const [reloads, setReloads] = useState(0);
   const request = useRef(0);
@@ -83,7 +107,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const summary = summarize(pending);
   const dirty = summary.rows > 0;
 
-  // Load when the tab is first shown and whenever paging, sorting or the session changes.
+  // Load when the tab is first shown and whenever paging, sorting, the filter or the session changes.
   // Hidden tabs do not query: a restored workspace must not hit every server at once.
   const wanted = connected && (active || page !== null);
   useEffect(() => {
@@ -91,10 +115,13 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     const id = ++request.current;
     setLoad({ status: "loading" });
     ipc
-      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort })
+      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort, filters })
       .then((rows) => {
         if (id !== request.current) return; // a newer request superseded this one
         setPage(rows);
+        setFull({});
+        setLoadId((n) => n + 1);
+        setInspect(null);
         // Row indexes belong to the old page: staged edits and the selection end with it.
         setHistory(NO_HISTORY);
         setSelection(null);
@@ -106,13 +133,15 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       });
     // `page` is intentionally not a dependency: it only gates the first load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, reloads]);
+  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, filters, reloads]);
 
   // A closed session invalidates what is on screen.
   useEffect(() => {
     if (!connected) {
       request.current++;
       setPage(null);
+      setFull({});
+      setInspect(null);
       setHistory(NO_HISTORY);
       setSelection(null);
       setLoad({ status: "idle" });
@@ -125,11 +154,55 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   }, [tab.id, dirty]);
   useEffect(() => () => useWorkspace.getState().setDirty(tab.id, false), [tab.id]);
 
+  // The exact count belongs to the table and the filter it was asked for. Paging and sorting
+  // show the same rows, so they keep it; a new filter, a reload or a save does not.
+  const [count, setCount] = useState<Count>({ status: "idle" });
+  const countJob = useRef<string | null>(null);
+  useEffect(() => {
+    setCount({ status: "idle" });
+    return () => {
+      // Whatever is still being counted is for rows that are no longer shown.
+      if (countJob.current) void ipc.cancelJob(countJob.current);
+      countJob.current = null;
+    };
+  }, [tab.connectionId, tab.table, filters, reloads, connected]);
+  const countRows = () => {
+    const job = crypto.randomUUID();
+    countJob.current = job;
+    setCount({ status: "counting" });
+    ipc
+      .countRows(tab.connectionId, tab.table, filters, job)
+      .then((result) => {
+        if (countJob.current !== job) return;
+        countJob.current = null;
+        setCount({ status: "done", total: result.count });
+      })
+      .catch((e: unknown) => {
+        if (countJob.current !== job) return;
+        countJob.current = null;
+        // Stopped by the user: back to where it was, without an error.
+        setCount(toAppError(e).kind === "conflict" ? { status: "idle" } : { status: "error", message: errorMessage(e) });
+      });
+  };
+
   const refresh = useCallback(() => setReloads((n) => n + 1), []);
   const changeSort = (next: SortSpec | null) => {
     setSort(next);
     setOffset(0);
   };
+  const changeFilters = useCallback(
+    (next: RowFilter[]) => {
+      if (sameFilters(next, filters)) return;
+      setFilters(next);
+      setOffset(0);
+    },
+    [filters],
+  );
+  const openFilter = useCallback(() => {
+    setView("data");
+    setFilterOpen(true);
+    setFilterFocus((n) => n + 1);
+  }, []);
 
   const commit = useCallback((next: Pending) => {
     setSaveError(null);
@@ -185,7 +258,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     [page, connection, dirty, saving, reviewing, summary.deleted, summary.rows, tab.table, pending, saved],
   );
 
-  // Tab-level shortcuts: ⌘S saves, ⌘R reloads (unless that would drop edits).
+  // Tab-level shortcuts: ⌘S saves, ⌘R reloads (unless that would drop edits), ⌘F filters.
   useEffect(() => {
     if (!active || !connected) return;
     const onKey = (e: KeyboardEvent) => {
@@ -197,11 +270,14 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       } else if (key === "s") {
         e.preventDefault();
         save();
+      } else if (key === "f" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        openFilter();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, connected, dirty, refresh, save]);
+  }, [active, connected, dirty, refresh, save, openFilter]);
 
   if (!connection) {
     return (
@@ -246,7 +322,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   return (
     <div className="flex h-full flex-col">
       {/* Identity: what this is, and exactly which server it comes from. */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
+      {/* A container: when the tab is narrow (the AI panel open), the buttons keep their icons and give the name its room. */}
+      <div className="@container flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
         <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-text">
           <Icon className="size-[18px]" />
         </div>
@@ -267,12 +344,37 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
           </div>
         </div>
 
+        {page && (
+          <Tooltip label={`${t("filter.open")} (⌘F)`}>
+            <Button
+              size="sm"
+              data-filter-toggle
+              aria-label={t("filter.open")}
+              aria-pressed={filterOpen}
+              icon={<Funnel className="size-3.5" />}
+              onClick={() => (filterOpen && view === "data" ? setFilterOpen(false) : openFilter())}
+            >
+              <span className="hidden @3xl:inline">{t("filter.title")}</span>
+              {filters.length > 0 && (
+                <span data-filter-count className="flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-accent-fg tabular-nums">
+                  {filters.length}
+                </span>
+              )}
+            </Button>
+          </Tooltip>
+        )}
         {editable && (
           <div className="flex shrink-0 items-center gap-1">
             <Tooltip label={dirty ? t("table.dirtyLocked") : t("smart.openHint")}>
               <span>
-                <Button size="sm" disabled={dirty || saving} icon={<ClipboardPaste className="size-3.5" />} onClick={() => setSmartPaste(true)}>
-                  {t("smart.open")}
+                <Button
+                  size="sm"
+                  aria-label={t("smart.open")}
+                  disabled={dirty || saving}
+                  icon={<ClipboardPaste className="size-3.5" />}
+                  onClick={() => setSmartPaste(true)}
+                >
+                  <span className="hidden @3xl:inline">{t("smart.open")}</span>
                 </Button>
               </span>
             </Tooltip>
@@ -308,6 +410,18 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
         </div>
       </div>
 
+      {filterOpen && connected && page && view === "data" && (
+        <FilterBar
+          columns={page.columns}
+          applied={filters}
+          onApply={changeFilters}
+          onClose={() => setFilterOpen(false)}
+          locked={locked}
+          suggested={selection ? (page.columns[selection.focus.c]?.name ?? null) : null}
+          focusSignal={filterFocus}
+        />
+      )}
+
       <div className="relative min-h-0 flex-1">
         {!connected ? (
           <StateMessage
@@ -333,9 +447,12 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
             title={t("table.loadFailed")}
             body={load.message}
             action={
-              <Button icon={<RefreshCw className="size-3.5" />} onClick={refresh}>
-                {t("common.retry")}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button icon={<RefreshCw className="size-3.5" />} onClick={refresh}>
+                  {t("common.retry")}
+                </Button>
+                {filters.length > 0 && <Button onClick={() => changeFilters([])}>{t("filter.clear")}</Button>}
+              </div>
             }
           />
         ) : !page ? (
@@ -351,6 +468,13 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
               sort={sort}
               onSort={changeSort}
               sortDisabled={locked}
+              loadId={loadId}
+              onInspect={setInspect}
+              filtered={filters.map((f) => f.column)}
+              onFilter={(f) => {
+                changeFilters([...filters.filter((x) => !sameFilters([x], [f])), f]);
+                setFilterOpen(true);
+              }}
               editable={editable && !saving}
               pending={pending}
               onChange={commit}
@@ -360,11 +484,21 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
               onRedo={() => setHistory(redo)}
               onSave={() => save()}
             />
-            {page.rows.length === 0 && pending.inserts.length === 0 && (
-              <div className="pointer-events-none absolute inset-x-0 top-24 text-center text-[13px] text-fg-muted">
-                {t("table.empty")}
-              </div>
-            )}
+            {page.rows.length === 0 &&
+              pending.inserts.length === 0 &&
+              (filters.length > 0 ? (
+                <div data-filter-empty className="absolute inset-x-0 top-24 flex flex-col items-center gap-3 text-center">
+                  <div>
+                    <div className="text-[13px] font-medium">{t("filter.noMatch")}</div>
+                    <div className="mt-0.5 text-xs text-fg-muted">{t("filter.noMatchBody")}</div>
+                  </div>
+                  <Button size="sm" disabled={busy} onClick={() => changeFilters([])}>
+                    {t("filter.clear")}
+                  </Button>
+                </div>
+              ) : (
+                <div className="pointer-events-none absolute inset-x-0 top-24 text-center text-[13px] text-fg-muted">{t("table.empty")}</div>
+              ))}
           </>
         )}
         {busy && page && <div aria-hidden className="animate-fade absolute inset-x-0 top-0 h-0.5 animate-pulse bg-accent" />}
@@ -436,8 +570,57 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
                       to: number.format(page.offset + page.rows.length),
                     })}
               </span>
-              {page.estimatedRows != null && (
-                <span className="shrink-0">· {t("table.estimated", { total: number.format(page.estimatedRows) })}</span>
+              {filters.length > 0 && (
+                <span data-filter-status className="shrink-0 font-medium text-accent-text">
+                  · {t("filter.applied", { count: filters.length })}
+                </span>
+              )}
+              {count.status === "done" && (
+                <span data-row-count className="shrink-0 font-medium text-fg tabular-nums">
+                  · {t(filters.length > 0 ? "filter.exact" : "table.exact", { total: number.format(count.total) })}
+                </span>
+              )}
+              {/* An exact total replaces the estimate; an exact number of matches goes beside it. */}
+              {page.estimatedRows != null && !(count.status === "done" && filters.length === 0) && (
+                <span className="shrink-0">
+                  · {t(filters.length > 0 ? "filter.estimatedTable" : "table.estimated", { total: number.format(page.estimatedRows) })}
+                </span>
+              )}
+              {/* Everything on one page: the row range already is the count. */}
+              {(page.hasMore || page.offset > 0) && count.status !== "done" && (
+                <span className="flex shrink-0 items-center gap-1.5">
+                  ·
+                  {count.status === "counting" ? (
+                    <>
+                      <Spinner className="size-3" /> {t("table.counting")}
+                      <button
+                        type="button"
+                        data-count-stop
+                        className="rounded-md px-1.5 py-0.5 font-medium text-fg hover:bg-sunken"
+                        onClick={() => countJob.current && void ipc.cancelJob(countJob.current)}
+                      >
+                        {t("table.countStop")}
+                      </button>
+                    </>
+                  ) : (
+                    <Tooltip label={t("table.countHint")}>
+                      <button
+                        type="button"
+                        data-count-rows
+                        disabled={!connected}
+                        className="rounded-md px-1.5 py-0.5 font-medium text-accent-text hover:bg-accent-soft disabled:opacity-50"
+                        onClick={countRows}
+                      >
+                        {t(filters.length > 0 ? "filter.count" : "table.count")}
+                      </button>
+                    </Tooltip>
+                  )}
+                  {count.status === "error" && (
+                    <span role="alert" data-count-error title={count.message} className="max-w-56 truncate text-danger">
+                      {t("table.countFailed", { message: count.message })}
+                    </span>
+                  )}
+                </span>
               )}
               <span className="shrink-0 tabular-nums">· {t("table.elapsed", { ms: page.elapsedMs })}</span>
               {page.orderedBy.length > 0 ? (
@@ -493,10 +676,29 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
           connection={connection}
           table={tab.table}
           columns={page.columns}
-          onDone={(result) => {
+          onDone={(result, skipped) => {
             setSmartPaste(false);
-            toast.success(t("smart.done", { ...result }));
+            toast.success(t("smart.done", { ...result }), { description: skipped > 0 ? t("smart.doneSkipped", { count: skipped }) : undefined });
             refresh();
+          }}
+        />
+      )}
+      {page && loaded && view === "data" && (
+        <CellDialog
+          cell={inspect}
+          onClose={() => setInspect(null)}
+          connectionId={connection.id}
+          table={tab.table}
+          page={page}
+          pending={pending}
+          editable={editable && !saving}
+          onApply={(cell, original, value) => {
+            // The whole original makes a shortened cell editable; the edit is staged as usual.
+            const known = { ...full, [cellIndex(loaded, cell.r, cell.c)]: original };
+            const next = cell.r < loaded.rows.length ? known : full;
+            setFull(next);
+            commit(setCells(withFull(loaded, next), pending, [{ ...cell, value }]).pending);
+            setInspect(null);
           }}
         />
       )}

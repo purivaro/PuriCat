@@ -46,6 +46,10 @@ pub struct PasteRequest {
     pub update: Vec<String>,
     /// Row-major values aligned with `columns`; `null` is SQL NULL.
     pub rows: Vec<Vec<Option<String>>>,
+    /// Leave out the rows that have a problem and run the rest. Without it, one such row
+    /// blocks the whole run. The analysis is the same either way.
+    #[serde(default)]
+    pub skip_problems: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -88,6 +92,9 @@ pub struct RowReport {
     pub message: Option<String>,
     /// Columns whose stored value differs from the pasted one (updates only).
     pub changed: Vec<String>,
+    /// The other pasted row a duplicate collides with, as an index into the request's rows.
+    /// The UI knows which line of the source that is; this side does not.
+    pub other: Option<usize>,
 }
 
 impl RowReport {
@@ -96,9 +103,20 @@ impl RowReport {
             status,
             message: message.into(),
             changed: Vec::new(),
+            other: None,
+        }
+    }
+
+    fn duplicate_of(other: usize, message: &str) -> Self {
+        RowReport {
+            other: Some(other),
+            ..RowReport::new(RowStatus::Duplicate, message.to_string())
         }
     }
 }
+
+const SAME_KEY: &str = "Same key as another pasted row";
+const SAME_ROW: &str = "Same existing row as another pasted row";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +125,8 @@ pub struct Counts {
     pub update: u32,
     pub unchanged: u32,
     pub unmatched: u32,
-    /// Rows that block the run until the source is fixed.
+    /// Rows that cannot be run as they are. They block the run, unless the request says
+    /// to skip them.
     pub problems: u32,
 }
 
@@ -195,12 +214,141 @@ fn is_integer(text: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// A key value is compared, not stored, so nothing downstream would reject a malformed one.
-fn check_key(col: &ColumnMeta, value: &str) -> Option<String> {
-    let integer = matches!(
+fn is_integer_type(col: &ColumnMeta) -> bool {
+    matches!(
         col.base_type.as_str(),
         "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year"
-    );
+    )
+}
+
+/// A plain decimal number without its spelling: sign, whole digits without leading zeros,
+/// fraction digits without trailing zeros. `None` for anything else (an exponent, `NaN`,
+/// surrounding spaces), which is then compared as text.
+fn decimal(text: &str) -> Option<(bool, &str, &str)> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let all_digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && fraction.is_empty()) || !all_digits(whole) || !all_digits(fraction) {
+        return None;
+    }
+    let whole = whole.trim_start_matches('0');
+    let fraction = fraction.trim_end_matches('0');
+    // Zero has no sign.
+    let negative = negative && !(whole.is_empty() && fraction.is_empty());
+    Some((negative, whole, fraction))
+}
+
+/// The spellings PostgreSQL reads as a boolean.
+fn truth(text: &str) -> Option<bool> {
+    match text.to_ascii_lowercase().as_str() {
+        "t" | "true" | "y" | "yes" | "on" | "1" => Some(true),
+        "f" | "false" | "n" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Year, month, day.
+type Date = [u32; 3];
+/// Hour, minute, second, and the fraction of a second without trailing zeros.
+type TimeOfDay<'t> = ([u32; 3], &'t str);
+
+/// `YYYY-M-D`, as three numbers.
+fn date_parts(text: &str) -> Option<Date> {
+    let mut parts = text.split('-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    let number = |s: &str, max_len: usize| -> Option<u32> {
+        ((1..=max_len).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())?
+    };
+    let date = [
+        (y.len() == 4).then(|| number(y, 4))??,
+        number(m, 2)?,
+        number(d, 2)?,
+    ];
+    (parts.next().is_none() && (1..=12).contains(&date[1]) && (1..=31).contains(&date[2]))
+        .then_some(date)
+}
+
+/// `H:MM[:SS[.fraction]]`, as hour, minute, second and the fraction without trailing zeros.
+fn time_parts(text: &str) -> Option<TimeOfDay<'_>> {
+    let (clock, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if text.ends_with('.') || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut parts = clock.split(':');
+    let number = |s: Option<&str>| -> Option<u32> {
+        let s = s?;
+        ((1..=2).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())?
+    };
+    let (h, m) = (number(parts.next())?, number(parts.next())?);
+    let s = match parts.next() {
+        Some(seconds) => number(Some(seconds))?,
+        // A fraction belongs to seconds: `9:05.5` is not a time.
+        None if fraction.is_empty() => 0,
+        None => return None,
+    };
+    (parts.next().is_none() && h < 24 && m < 60 && s < 60)
+        .then_some(([h, m, s], fraction.trim_end_matches('0')))
+}
+
+/// A date, a time of day or both, without its spelling, for the column types that hold no
+/// time zone. `None` when the text is not plainly one of those for this type.
+fn moment<'t>(base_type: &str, text: &'t str) -> Option<(Option<Date>, TimeOfDay<'t>)> {
+    const MIDNIGHT: TimeOfDay<'static> = ([0, 0, 0], "");
+    let both = |text: &'t str| -> Option<(Date, Option<TimeOfDay<'t>>)> {
+        match text.split_once([' ', 'T']) {
+            Some((date, time)) => Some((date_parts(date)?, Some(time_parts(time)?))),
+            None => Some((date_parts(text)?, None)),
+        }
+    };
+    match base_type {
+        // A time of day pasted into a date column changes nothing only if it is midnight.
+        "date" => {
+            let (date, time) = both(text)?;
+            (time.unwrap_or(MIDNIGHT) == MIDNIGHT).then_some((Some(date), MIDNIGHT))
+        }
+        "datetime" | "timestamp" | "timestamp without time zone" => {
+            let (date, time) = both(text)?;
+            Some((Some(date), time.unwrap_or(MIDNIGHT)))
+        }
+        "time" | "time without time zone" => Some((None, time_parts(text)?)),
+        _ => None,
+    }
+}
+
+/// Whether the pasted text is the stored value in another spelling: writing it would leave
+/// the column exactly as it is. Only for types where that can be told without asking the
+/// server; whatever is uncertain counts as different, and the row is then an update that
+/// stores the same value, as every difference in spelling was before this existed.
+fn same_value(col: &ColumnMeta, pasted: &str, stored: &str) -> bool {
+    if pasted == stored {
+        return true;
+    }
+    let base = col.base_type.as_str();
+    match col.kind {
+        ValueKind::Number if !matches!(base, "money" | "bit") => {
+            // `7.0` is not an integer to PostgreSQL: it would be refused, not stored as 7.
+            let spelled_for_type = !is_integer_type(col) || is_integer(pasted);
+            spelled_for_type && decimal(pasted).is_some() && decimal(pasted) == decimal(stored)
+        }
+        ValueKind::Bool if base == "boolean" => {
+            truth(pasted).is_some() && truth(pasted) == truth(stored)
+        }
+        ValueKind::Temporal => {
+            let pasted = moment(base, pasted);
+            pasted.is_some() && pasted == moment(base, stored)
+        }
+        _ => false,
+    }
+}
+
+/// A key value is compared, not stored, so nothing downstream would reject a malformed one.
+fn check_key(col: &ColumnMeta, value: &str) -> Option<String> {
+    let integer = is_integer_type(col);
     if integer && !is_integer(value) {
         return Some(format!(
             "{}: “{}” is not a whole number",
@@ -402,12 +550,8 @@ impl<'a> Draft<'a> {
             }
             match first_seen.get(&key) {
                 Some(&first) => {
-                    let message = |other: usize| format!("Same key as pasted row {}", other + 1);
-                    slots[first] = Slot::Done(RowReport::new(RowStatus::Duplicate, message(i)));
-                    slots.push(Slot::Done(RowReport::new(
-                        RowStatus::Duplicate,
-                        message(first),
-                    )));
+                    slots[first] = Slot::Done(RowReport::duplicate_of(i, SAME_KEY));
+                    slots.push(Slot::Done(RowReport::duplicate_of(first, SAME_KEY)));
                 }
                 None => {
                     first_seen.insert(key, i);
@@ -459,7 +603,7 @@ impl<'a> Draft<'a> {
                                     Engine::Postgres => format!("${}", params.len()),
                                     _ => "?".to_string(),
                                 };
-                                format!("{quoted} = {}", write::key_expr(engine, col, &placeholder))
+                                write::key_equals(engine, col, quoted, &placeholder)
                             })
                             .collect();
                         format!("({})", parts.join(" AND "))
@@ -470,6 +614,7 @@ impl<'a> Draft<'a> {
                 .into_iter()
                 .map(|c| match engine {
                     Engine::Postgres => format!("{c}::text"),
+                    Engine::Sqlite => format!("CAST({c} AS TEXT)"),
                     _ => format!("CAST({c} AS CHAR)"),
                 })
                 .collect();
@@ -501,10 +646,7 @@ impl<'a> Draft<'a> {
                     let identity = values[..self.request.key.len().min(values.len())].to_vec();
                     if let Some(&other) = self.claimed.get(&identity).filter(|&&o| o != *row) {
                         for (a, b) in [(*row, other), (other, *row)] {
-                            self.slots[a] = Slot::Done(RowReport::new(
-                                RowStatus::Duplicate,
-                                format!("Same existing row as pasted row {}", b + 1),
-                            ));
+                            self.slots[a] = Slot::Done(RowReport::duplicate_of(b, SAME_ROW));
                         }
                         continue;
                     }
@@ -522,10 +664,7 @@ impl<'a> Draft<'a> {
                 several => {
                     for &row in several {
                         let other = several.iter().find(|&&r| r != row).copied().unwrap_or(row);
-                        self.slots[row] = Slot::Done(RowReport::new(
-                            RowStatus::Duplicate,
-                            format!("Same existing row as pasted row {}", other + 1),
-                        ));
+                        self.slots[row] = Slot::Done(RowReport::duplicate_of(other, SAME_ROW));
                     }
                 }
             }
@@ -581,10 +720,15 @@ impl<'a> Draft<'a> {
                 .position(|c| c == name)
                 .expect("validated");
             let (pasted, stored) = (&row[at], &existing[keys + offset]);
-            if pasted == stored {
+            let col = column(self.meta, name).expect("validated");
+            let same = match (pasted, stored) {
+                (Some(pasted), Some(stored)) => same_value(col, pasted, stored),
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
                 continue;
             }
-            let col = column(self.meta, name).expect("validated");
             match pasted {
                 None if !col.nullable => return Err(format!("{} cannot be empty", col.name)),
                 Some(text) => {
@@ -668,6 +812,7 @@ impl<'a> Draft<'a> {
                             status: RowStatus::Update,
                             message: None,
                             changed,
+                            other: None,
                         }
                     }
                     Ok(None) => RowReport::new(RowStatus::Unchanged, None),
@@ -765,6 +910,7 @@ mod tests {
                 .iter()
                 .map(|r| r.iter().map(|v| v.map(String::from)).collect())
                 .collect(),
+            skip_problems: false,
         }
     }
 
@@ -1045,6 +1191,179 @@ mod tests {
             statuses(&draft.finish().0),
             vec![Duplicate, Duplicate, Unmatched]
         );
+    }
+
+    #[test]
+    fn rows_with_problems_never_reach_the_change_set() {
+        let m = meta();
+        let rows: &[&[Option<&str>]] = &[
+            &[Some("new1"), Some("ok"), Some("1")],
+            &[Some("new2"), Some("bad"), Some("many")],
+            &[Some("twice"), Some("a"), Some("1")],
+            &[Some("twice"), Some("b"), Some("2")],
+            &[None, Some("no key"), Some("3")],
+            &[Some("old1"), Some("renamed"), Some("4")],
+            &[Some("old2"), Some("bad"), Some("x")],
+        ];
+        let mut req = request(
+            Mode::Upsert,
+            &["sku", "name", "qty"],
+            &["sku"],
+            &["name", "qty"],
+            rows,
+        );
+        let outcome = |req: &PasteRequest| {
+            let mut draft = Draft::new(Engine::Mysql, &m, &keys(), req).unwrap();
+            let lookup = draft.lookups(&table()).unwrap().remove(0);
+            // Pasted rows 0, 1, 5 and 6 are looked up; the last two exist.
+            assert_eq!(lookup.2, vec![0, 1, 5, 6]);
+            let found = |flags: [&str; 4], sku: &str| {
+                let mut row: Vec<Option<String>> =
+                    flags.iter().map(|f| Some(f.to_string())).collect();
+                row.extend([Some(sku.into()), Some("old".into()), Some("0".into())]);
+                row
+            };
+            draft.matched(
+                &lookup.2,
+                vec![
+                    found(["0", "0", "1", "0"], "old1"),
+                    found(["0", "0", "0", "1"], "old2"),
+                ],
+            );
+            draft.finish()
+        };
+        let (analysis, changes) = outcome(&req);
+        use RowStatus::*;
+        assert_eq!(
+            statuses(&analysis),
+            vec![Insert, Invalid, Duplicate, Duplicate, MissingKey, Update, Invalid]
+        );
+        assert_eq!(
+            (
+                analysis.counts.insert,
+                analysis.counts.update,
+                analysis.counts.problems
+            ),
+            (1, 1, 5)
+        );
+        // Each of the two rows with one key names the other.
+        assert_eq!(
+            (
+                analysis.rows[2].other,
+                analysis.rows[3].other,
+                analysis.rows[1].other
+            ),
+            (Some(3), Some(2), None)
+        );
+        // Only the two rows without a problem are in what would run.
+        assert_eq!((changes.inserts.len(), changes.updates.len()), (1, 1));
+        assert_eq!(changes.inserts[0].values[0].value.as_deref(), Some("new1"));
+        assert_eq!(changes.updates[0].key[0].value.as_deref(), Some("old1"));
+
+        // Choosing to skip them changes neither the analysis nor what would run.
+        req.skip_problems = true;
+        let (skipping, same) = outcome(&req);
+        assert_eq!(skipping.fingerprint, analysis.fingerprint);
+        assert_eq!(skipping.counts, analysis.counts);
+        assert_eq!((same.inserts.len(), same.updates.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_value_in_another_spelling_is_not_a_change() {
+        let typed = |data_type: &str, kind| col("c", data_type, kind);
+        let same = |c: &ColumnMeta, pasted: &str, stored: &str| same_value(c, pasted, stored);
+
+        let decimal = typed("decimal(24,6)", ValueKind::Number);
+        for (pasted, stored) in [
+            ("1.5", "1.500000"),
+            ("01.50", "1.500000"),
+            ("+1.5", "1.500000"),
+            (".5", "0.500000"),
+            ("5.", "5.000000"),
+            ("-0", "0.000000"),
+            ("-2.50", "-2.500000"),
+            ("12345678901234567890.1", "12345678901234567890.100000"),
+        ] {
+            assert!(same(&decimal, pasted, stored), "{pasted} = {stored}");
+        }
+        for (pasted, stored) in [
+            ("1.5", "1.500001"),
+            ("-1.5", "1.500000"),
+            ("15", "1.500000"),
+            // Not plainly a decimal: left to the server, as before.
+            ("1.5e0", "1.500000"),
+            (" 1.5", "1.500000"),
+            ("1,5", "1.500000"),
+            ("", "0.000000"),
+            (".", "0.000000"),
+        ] {
+            assert!(!same(&decimal, pasted, stored), "{pasted} != {stored}");
+        }
+
+        // An integer column takes whole-number spellings only.
+        let int = typed("int", ValueKind::Number);
+        assert!(same(&int, "007", "7") && same(&int, "+7", "7") && same(&int, "-0", "0"));
+        assert!(!same(&int, "7.0", "7") && !same(&int, "7.4", "7") && !same(&int, "8", "7"));
+        // Money and bit columns are rendered in ways this does not read.
+        assert!(!same(&typed("money", ValueKind::Number), "1.5", "1.50"));
+        assert!(!same(&typed("bit", ValueKind::Number), "01", "1"));
+
+        // PostgreSQL's boolean has many spellings; MySQL's tinyint(1) has numbers only.
+        let boolean = typed("boolean", ValueKind::Bool);
+        for pasted in ["TRUE", "t", "yes", "On", "1"] {
+            assert!(same(&boolean, pasted, "true"), "{pasted}");
+        }
+        assert!(same(&boolean, "FALSE", "false") && same(&boolean, "0", "false"));
+        assert!(!same(&boolean, "FALSE", "true") && !same(&boolean, "maybe", "true"));
+        assert!(!same(&typed("tinyint", ValueKind::Bool), "TRUE", "1"));
+
+        let datetime = typed("datetime", ValueKind::Temporal);
+        for (pasted, stored) in [
+            ("2026-1-5 9:05", "2026-01-05 09:05:00"),
+            ("2026-01-05T09:05:00", "2026-01-05 09:05:00"),
+            ("2026-01-05 09:05:00.000", "2026-01-05 09:05:00"),
+            ("2026-01-05 09:05:00.25", "2026-01-05 09:05:00.250"),
+            ("2026-01-05", "2026-01-05 00:00:00"),
+        ] {
+            assert!(same(&datetime, pasted, stored), "{pasted} = {stored}");
+            let pg = typed("timestamp without time zone", ValueKind::Temporal);
+            assert!(same(&pg, pasted, stored), "{pasted} = {stored}");
+        }
+        for (pasted, stored) in [
+            ("2026-01-05", "2026-01-05 09:05:00"),
+            ("2026-01-05 09:05:01", "2026-01-05 09:05:00"),
+            ("2026-01-05 09:05:00.5", "2026-01-05 09:05:00"),
+            ("26-01-05 09:05", "2026-01-05 09:05:00"),
+            ("5/1/2026", "2026-01-05 00:00:00"),
+            ("2026-13-05", "2026-13-05 00:00:00"),
+            ("2026-01-05 09:05.5", "2026-01-05 09:05:30"),
+            ("2026-01-05 24:00", "2026-01-06 00:00:00"),
+        ] {
+            assert!(!same(&datetime, pasted, stored), "{pasted} != {stored}");
+        }
+
+        let date = typed("date", ValueKind::Temporal);
+        assert!(same(&date, "2026-1-5", "2026-01-05"));
+        assert!(same(&date, "2026-01-05 00:00:00", "2026-01-05"));
+        // A time of day that the column would drop is not "the same".
+        assert!(!same(&date, "2026-01-05 09:05", "2026-01-05"));
+
+        let time = typed("time", ValueKind::Temporal);
+        assert!(same(&time, "9:05", "09:05:00") && same(&time, "09:05:00.0", "09:05:00"));
+        assert!(!same(&time, "9:06", "09:05:00") && !same(&time, "33:05:00", "33:05:00.0"));
+
+        // A time zone changes what a spelling means: compared as text only.
+        let zoned = typed("timestamp with time zone", ValueKind::Temporal);
+        assert!(!same(&zoned, "2026-01-05 09:05", "2026-01-05 09:05:00+00"));
+        assert!(same(
+            &zoned,
+            "2026-01-05 09:05:00+00",
+            "2026-01-05 09:05:00+00"
+        ));
+
+        // Text is never read: a trailing space or another case is a change.
+        let text = typed("varchar(20)", ValueKind::Text);
+        assert!(!same(&text, "1.50", "1.5") && !same(&text, "abc ", "abc"));
     }
 
     #[test]

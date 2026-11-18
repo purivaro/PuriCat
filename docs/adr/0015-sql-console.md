@@ -4,7 +4,7 @@
 
 Accepted. Implemented for MySQL and PostgreSQL as the first slice of Phase 4. Verified in the backend on both engines (`live_console`); through the UI on MySQL only ([TESTING.md](../../TESTING.md)). SQL Server has no implementation. Implements the editor chosen in [ADR 0007](0007-sql-editor.md) and answers the open question of [ADR 0004](0004-server-side-text-rendering.md) about results of arbitrary queries.
 
-Saved scripts, object editing with DDL preview, import, SQL dump export, an EXPLAIN view, query parameters and results beyond 100,000 rows are not part of this record and remain Planned (Phase 4).
+Object editing with DDL preview, import, SQL dump export, an EXPLAIN view, query parameters and results beyond 100,000 rows are not part of this record and remain Planned (Phase 4). Saved scripts and running the statement at the cursor were added on 2026-11-17 without changing anything decided here: a saved script is text in the settings store, and the statement at the cursor is picked from the answer of the splitter described below ([ARCHITECTURE.md](../../ARCHITECTURE.md), "SQL console").
 
 ## Context
 

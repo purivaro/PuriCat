@@ -309,6 +309,8 @@ async fn scenario(
                 .await
                 .unwrap();
         }
+        // This scenario is about servers; a file has no connection to lose.
+        Canceller::Sqlite { .. } => unreachable!("this scenario runs against a server"),
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     let outcome = run(&mut console, "SELECT 1; SELECT 2").await;

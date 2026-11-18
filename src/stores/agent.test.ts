@@ -81,7 +81,7 @@ describe("agent chat store", () => {
       onEvent({ type: "toolStarted", id: "t2", name: "run_select", input: "DELETE FROM orders" });
       onEvent({ type: "toolFinished", id: "t2", ok: false, output: "Only a statement that reads is accepted" });
       onEvent({ type: "toolStarted", id: "t3", name: "propose_sql", input: "DELETE FROM orders" });
-      onEvent({ type: "proposal", id: "p1", sql: "DELETE FROM orders", reason: "tidy", statements: [{ text: "DELETE FROM orders", start: 0, kind: "dml", danger: "No WHERE clause" }] });
+      onEvent({ type: "proposal", id: "p1", sql: "DELETE FROM orders", reason: "tidy", statements: [{ text: "DELETE FROM orders", start: 0, body: 0, kind: "dml", danger: "No WHERE clause" }] });
       onEvent({ type: "toolFinished", id: "t3", ok: true, output: "queued" });
       onEvent({ type: "toolStarted", id: "t4", name: "list_tables", input: "" });
       onEvent({ type: "delta", text: "\n\nProposed." });

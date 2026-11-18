@@ -5,11 +5,13 @@
 
 pub mod console;
 pub mod export;
+pub mod filter;
 pub mod ident;
 mod mysql;
 mod postgres;
 pub mod script;
 pub mod smart;
+mod sqlite;
 pub mod write;
 
 use std::time::Instant;
@@ -24,6 +26,10 @@ pub const MAX_CELL_CHARS: usize = 1000;
 /// Longest binary prefix (bytes) sent to the grid for one cell, shown as hex.
 pub const MAX_BINARY_BYTES: usize = 24;
 pub const MAX_PAGE_SIZE: u32 = 1000;
+/// Longest text sent for one cell when its whole value is asked for.
+pub const MAX_FULL_CHARS: usize = 1_000_000;
+/// Longest binary prefix (bytes) sent for one cell when its whole value is asked for.
+pub const MAX_FULL_BYTES: usize = 65_536;
 
 /// What an engine can do. The UI asks instead of guessing from the engine name.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +148,9 @@ pub struct PageRequest {
     pub limit: u32,
     #[serde(default)]
     pub sort: Option<SortSpec>,
+    /// Conditions a row must meet, all of them. Empty shows every row.
+    #[serde(default)]
+    pub filters: Vec<filter::Filter>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -163,10 +172,43 @@ pub struct RowPage {
     pub elapsed_ms: u64,
 }
 
-/// An open, pooled connection to one server.
+/// How many rows a table has, or how many of them pass a filter: counted, not estimated.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RowCount {
+    pub count: u64,
+    pub elapsed_ms: u64,
+}
+
+/// `SELECT COUNT(*)` with the number rendered to text by the server, like every other value.
+fn count_sql(engine: Engine, table: &TableRef, filter: &filter::Where) -> Result<String> {
+    let counted = match engine {
+        Engine::Postgres => "COUNT(*)::text",
+        Engine::Sqlite => "CAST(COUNT(*) AS TEXT)",
+        _ => "CAST(COUNT(*) AS CHAR)",
+    };
+    Ok(format!(
+        "SELECT {counted} FROM {}{}",
+        write::table_name(engine, table)?,
+        filter.sql
+    ))
+}
+
+/// The whole value of one cell, for the cells a page shows shortened.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CellContent {
+    /// As the server renders it; binary as `0x` and hex. `null` is SQL NULL.
+    pub value: Option<String>,
+    /// Even this was cut: the value is longer than `MAX_FULL_CHARS` / `MAX_FULL_BYTES`.
+    pub cut: bool,
+}
+
+/// An open, pooled connection to one server, or to one SQLite file.
 pub enum Session {
     MySql(mysql::MySqlSession),
     Postgres(Box<postgres::PgSession>),
+    Sqlite(Box<sqlite::SqliteSession>),
 }
 
 impl Session {
@@ -179,6 +221,10 @@ impl Session {
             Engine::Postgres => Ok(Session::Postgres(Box::new(
                 postgres::PgSession::connect(profile, password).await?,
             ))),
+            // A file has no password: nothing is read from the keychain for it.
+            Engine::Sqlite => Ok(Session::Sqlite(Box::new(
+                sqlite::SqliteSession::connect(profile).await?,
+            ))),
             Engine::Sqlserver => Err(Error::Unsupported(
                 "SQL Server connections are not implemented yet".into(),
             )),
@@ -189,6 +235,7 @@ impl Session {
         match self {
             Session::MySql(_) => mysql::CAPABILITIES,
             Session::Postgres(_) => postgres::CAPABILITIES,
+            Session::Sqlite(_) => sqlite::CAPABILITIES,
         }
     }
 
@@ -207,6 +254,7 @@ impl Session {
                 s.tls().await?,
                 s.read_only().await?,
             ),
+            Session::Sqlite(s) => (Engine::Sqlite, s.version().await?, None, s.read_only()),
         };
         Ok(ServerInfo {
             engine,
@@ -222,6 +270,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.list_databases().await,
             Session::Postgres(s) => s.list_databases().await,
+            Session::Sqlite(s) => Ok(s.list_databases()),
         }
     }
 
@@ -229,6 +278,9 @@ impl Session {
         match self {
             Session::MySql(_) => Err(Error::Unsupported(
                 "MySQL has no schemas inside a database".into(),
+            )),
+            Session::Sqlite(_) => Err(Error::Unsupported(
+                "SQLite has no schemas inside a database".into(),
             )),
             Session::Postgres(s) => s.list_schemas(database).await,
         }
@@ -242,6 +294,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.list_objects(database).await,
             Session::Postgres(s) => s.list_objects(database, require_schema(schema)?).await,
+            Session::Sqlite(s) => s.list_objects(database).await,
         }
     }
 
@@ -249,6 +302,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.describe_table(table).await,
             Session::Postgres(s) => s.describe_table(table).await,
+            Session::Sqlite(s) => s.describe_table(table).await,
         }
     }
 
@@ -265,11 +319,121 @@ impl Session {
             return Err(Error::NotFound(format!("Table {}", table.name)));
         }
         let order = resolve_order(&meta, req.sort.as_ref())?;
+        let filter = filter::where_clause(self.engine(), &meta, &req.filters)?;
         let raw = match self {
-            Session::MySql(s) => s.select_page(table, &meta, &order, req).await?,
-            Session::Postgres(s) => s.select_page(table, &meta, &order, req).await?,
+            Session::MySql(s) => s.select_page(table, &meta, &filter, &order, req).await?,
+            Session::Postgres(s) => s.select_page(table, &meta, &filter, &order, req).await?,
+            Session::Sqlite(s) => s.select_page(table, &meta, &filter, &order, req).await?,
         };
         Ok(finish_page(meta, raw, order, req, started))
+    }
+
+    /// Count the rows of a table that pass `filters` (all of them, without filters). Asked
+    /// for, never automatic: on a large table the server reads every row or a whole index.
+    /// It runs on a connection of its own, so setting `stop` interrupts it on the server.
+    pub async fn count_rows(
+        &self,
+        table: &TableRef,
+        filters: &[filter::Filter],
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<RowCount> {
+        use std::sync::atomic::Ordering;
+        let started = Instant::now();
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let engine = self.engine();
+        let filter = filter::where_clause(engine, &meta, filters)?;
+        let sql = count_sql(engine, table, &filter)?;
+        let mut console = self.open_reader(Some(&table.database)).await?;
+        let canceller = console.canceller();
+        let query = console.text_scalar(&sql, &filter.params);
+        tokio::pin!(query);
+        let mut asked = false;
+        let answer = loop {
+            tokio::select! {
+                answer = &mut query => break answer,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if !asked => {
+                    if stop.load(Ordering::Relaxed) {
+                        asked = true;
+                        let _ = canceller.cancel().await;
+                    }
+                }
+            }
+        };
+        let count = match answer {
+            Ok(text) => text.and_then(|t| t.parse().ok()).ok_or_else(|| {
+                Error::Database("The server did not answer the count with a number".into())
+            })?,
+            Err(e) if asked && console::is_cancellation(&e) => {
+                return Err(Error::Conflict("Cancelled".into()))
+            }
+            Err(e) => return Err(Error::database(e)),
+        };
+        Ok(RowCount {
+            count,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// Read one cell in full: the row addressed by its complete primary key. Read-only.
+    pub async fn fetch_cell(
+        &self,
+        table: &TableRef,
+        key: &[write::CellValue],
+        column: &str,
+    ) -> Result<CellContent> {
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let col = write::column(&meta, column)?;
+        let engine = self.engine();
+        let expr = match self {
+            Session::MySql(_) => mysql::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?,
+            Session::Postgres(_) => {
+                postgres::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?
+            }
+            Session::Sqlite(_) => sqlite::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?,
+        };
+        let (clause, params) = write::row_clause(engine, &meta, key)?;
+        let sql = format!(
+            "SELECT {expr} FROM {} WHERE {clause}",
+            write::table_name(engine, table)?
+        );
+        let mut rows = self.query_text(&table.database, &sql, &params).await?;
+        if rows.len() != 1 {
+            return Err(Error::Conflict(
+                "This row is no longer there. Refresh the table.".into(),
+            ));
+        }
+        let Some(mut text) = rows.remove(0).into_iter().next().flatten() else {
+            return Ok(CellContent {
+                value: None,
+                cut: false,
+            });
+        };
+        let binary = col.kind == ValueKind::Binary;
+        let limit = if binary {
+            MAX_FULL_BYTES * 2
+        } else {
+            MAX_FULL_CHARS
+        };
+        let cut = match text.char_indices().nth(limit) {
+            Some((at, _)) => {
+                text.truncate(at);
+                true
+            }
+            None => false,
+        };
+        if binary {
+            text.insert_str(0, "0x");
+        }
+        Ok(CellContent {
+            value: Some(text),
+            cut,
+        })
     }
 
     /// The statements a change set would run, without running them.
@@ -282,11 +446,7 @@ impl Session {
         if meta.columns.is_empty() {
             return Err(Error::NotFound(format!("Table {}", table.name)));
         }
-        let engine = match self {
-            Session::MySql(_) => Engine::Mysql,
-            Session::Postgres(_) => Engine::Postgres,
-        };
-        write::plan(engine, table, &meta, changes)
+        write::plan(self.engine(), table, &meta, changes)
     }
 
     /// Run a change set in one transaction. Either every row change is applied, or none.
@@ -300,6 +460,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.apply(&statements, &|_| true).await?,
             Session::Postgres(s) => s.apply(&table.database, &statements, &|_| true).await?,
+            Session::Sqlite(s) => s.apply(&statements, &|_| true).await?,
         }
         Ok(write::tally(
             &statements,
@@ -311,6 +472,7 @@ impl Session {
         match self {
             Session::MySql(_) => Engine::Mysql,
             Session::Postgres(_) => Engine::Postgres,
+            Session::Sqlite(_) => Engine::Sqlite,
         }
     }
 
@@ -319,6 +481,17 @@ impl Session {
         match self {
             Session::MySql(s) => s.open_console(database).await,
             Session::Postgres(s) => s.open_console(database).await,
+            Session::Sqlite(s) => s.open_console(false).await,
+        }
+    }
+
+    /// A connection of its own for a caller that must only read (the AI's query tool; see
+    /// [`console::Console::read_only`]). On SQLite the file is opened so that the handle
+    /// cannot write; the servers are held by a read-only transaction instead.
+    pub async fn open_reader(&self, database: Option<&str>) -> Result<console::Console> {
+        match self {
+            Session::Sqlite(s) => s.open_console(true).await,
+            _ => self.open_console(database).await,
         }
     }
 
@@ -327,6 +500,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.unique_keys(table).await,
             Session::Postgres(s) => s.unique_keys(table).await,
+            Session::Sqlite(s) => s.unique_keys(table).await,
         }
     }
 
@@ -339,6 +513,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.query_text(sql, params).await,
             Session::Postgres(s) => s.query_text(database, sql, params).await,
+            Session::Sqlite(s) => s.query_text(sql, params).await,
         }
     }
 
@@ -362,7 +537,10 @@ impl Session {
             draft.matched(&rows, found);
         }
         let (mut analysis, changes) = draft.finish();
-        let blocked = !analysis.problems.is_empty() || analysis.counts.problems > 0;
+        // Rows with a problem never reach the change set. They stop the run, unless the
+        // request says to leave them out and run the rest.
+        let blocked = !analysis.problems.is_empty()
+            || (analysis.counts.problems > 0 && !request.skip_problems);
         let nothing = changes.updates.is_empty() && changes.inserts.is_empty();
         let statements = if blocked || nothing {
             Vec::new()
@@ -401,7 +579,7 @@ impl Session {
                 "The table changed since the preview, so the result would be different. Preview again before running.".into(),
             ));
         }
-        if analysis.counts.problems > 0 {
+        if analysis.counts.problems > 0 && !request.skip_problems {
             return Err(Error::Invalid(
                 "Some pasted rows have problems. Fix them and preview again.".into(),
             ));
@@ -412,6 +590,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.apply(&statements, keep_going).await?,
             Session::Postgres(s) => s.apply(&table.database, &statements, keep_going).await?,
+            Session::Sqlite(s) => s.apply(&statements, keep_going).await?,
         }
         Ok(write::tally(
             &statements,
@@ -423,6 +602,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.close().await,
             Session::Postgres(s) => s.close().await,
+            Session::Sqlite(s) => s.close().await,
         }
     }
 }
@@ -553,6 +733,36 @@ mod tests {
     }
 
     #[test]
+    fn the_count_statement_per_engine() {
+        let filter = filter::Where {
+            sql: " WHERE x = ?".into(),
+            params: vec!["1".into()],
+        };
+        let table = TableRef {
+            database: "shop".into(),
+            schema: Some("pub\"lic".into()),
+            name: "or`ders".into(),
+        };
+        assert_eq!(
+            count_sql(Engine::Mysql, &table, &filter).unwrap(),
+            "SELECT CAST(COUNT(*) AS CHAR) FROM `shop`.`or``ders` WHERE x = ?"
+        );
+        assert_eq!(
+            count_sql(Engine::Postgres, &table, &filter::Where::default()).unwrap(),
+            "SELECT COUNT(*)::text FROM \"pub\"\"lic\".\"or`ders\""
+        );
+        let main = TableRef {
+            database: "main".into(),
+            schema: None,
+            name: "orders".into(),
+        };
+        assert_eq!(
+            count_sql(Engine::Sqlite, &main, &filter).unwrap(),
+            "SELECT CAST(COUNT(*) AS TEXT) FROM \"main\".\"orders\" WHERE x = ?"
+        );
+    }
+
+    #[test]
     fn order_defaults_to_primary_key_and_validates_sort() {
         assert_eq!(
             resolve_order(&meta(), None).unwrap(),
@@ -592,6 +802,7 @@ mod tests {
             offset: 40,
             limit: 2,
             sort: None,
+            filters: Vec::new(),
         };
         let page = finish_page(
             meta(),

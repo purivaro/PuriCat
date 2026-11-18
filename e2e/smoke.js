@@ -62,6 +62,12 @@
       return l.querySelector("input, select");
     };
     const dialog = () => document.querySelector('[role="dialog"], [role="alertdialog"]');
+    // A menu or popover that was closed can stay in the page, closed, when the window is
+    // covered and its exit animation never runs. Only what is open counts: an item of the
+    // same name in a menu that was closed earlier belongs to something else.
+    const OPEN = '[data-state="open"]';
+    const menuItem = (text) => all(`[role="menu"]${OPEN} [role="menuitem"]`).find((e) => e.textContent.replace(/\s+/g, " ").trim() === text);
+    const menuItemWith = (text) => all(`[role="menu"]${OPEN} [role="menuitem"]`).find((e) => e.textContent.replace(/\s+/g, " ").trim().includes(text));
     // Rows are matched on their label, not on badges or engine tags around it.
     const rowLabel = (r) => r.querySelector(".truncate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
     const treeRows = (text) => all("[data-tree-row]").filter((r) => rowLabel(r) === text);
@@ -201,6 +207,189 @@
     const dirtySummary = () => document.querySelector(`${panelSel} [data-dirty-summary]`)?.textContent.trim();
     const panelButton = (label) => all(`${panelSel} button`).find((b) => b.textContent.trim().startsWith(label) || b.getAttribute("aria-label") === label);
     const editState = () => document.querySelector(`${panelSel} [data-edit-state]`)?.dataset.editState;
+
+    // ---- filter rows: the PostgreSQL orders table is still in front ----------------------
+    const filterBar = () => document.querySelector(`${panelSel} [data-filter-bar]`);
+    const filterRows = () => all(`${panelSel} [data-filter-row]`);
+    const filterCount = () => document.querySelector(`${panelSel} [data-filter-count]`)?.textContent.trim() ?? "0";
+    const columnCells = (c) => dataRows().map((r) => r.querySelectorAll('[role="gridcell"]')[c]?.textContent.trim());
+    const choose = async (select, value) => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(60);
+    };
+    const condition = async (row, column, op, value) => {
+      await choose(filterRows()[row].querySelectorAll("select")[0], column);
+      await choose(filterRows()[row].querySelectorAll("select")[1], op);
+      await type(filterRows()[row].querySelector("input"), value);
+    };
+    const STATUS = 4;
+    const TOTAL = 5;
+
+    // 0. The exact number of rows is counted only when asked for. Until then the footer has
+    //    the server's estimate, or nothing.
+    const countButton = () => document.querySelector(`${panelSel} [data-count-rows]`);
+    const rowCount = () => document.querySelector(`${panelSel} [data-row-count]`)?.textContent.replace(/\s+/g, " ").trim();
+    const truth = async (sql) => {
+      const id = (await invoke("list_connections")).find((c) => c.engine === "postgres").id;
+      const outcome = await invoke("run_sql", { id, tab: "e2e-check-count", database: "puricat_e2e", sql, options: { maxRows: 10, changeLimit: null } });
+      await invoke("close_console", { tab: "e2e-check-count" });
+      return Number(outcome.statements[0].results[0].rows[0][0]);
+    };
+    const counted = { before: footer(), asked: !!rowCount() };
+    await click(await waitFor(countButton, "the count button"), "count rows");
+    await waitFor(() => rowCount()?.includes("1,250 in total"), "the exact count");
+    counted.all = footer();
+    // The same rows on another page: the count stays.
+    await click(document.querySelector(`${panelSel} button[aria-label="Next page"]`), "next page");
+    await waitFor(() => footer()?.includes("Rows 201–400"), "second page");
+    counted.onPageTwo = rowCount();
+    await click(document.querySelector(`${panelSel} button[aria-label="Previous page"]`), "previous page");
+    await waitFor(() => footer()?.includes("Rows 1–200"), "first page again");
+    if (counted.asked || !counted.onPageTwo?.includes("1,250")) throw new Error(`the exact count is not shown when it should be: ${JSON.stringify(counted)}`);
+
+    await click(document.querySelector(`${panelSel} [data-filter-toggle]`), "filter button");
+    await waitFor(filterBar, "filter bar");
+    // A new condition starts on the first column; a number is offered comparisons.
+    const offered = [...filterRows()[0].querySelectorAll("select")[1].options].map((o) => o.value);
+
+    // 1. An enum column, matched as the text the grid shows whatever the case; sent with Enter.
+    await condition(0, "status", "contains", "PEND");
+    filterRows()[0].querySelector("input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => footer()?.includes("1 condition applied") && columnCells(STATUS).every((v) => v === "Pending"), "one condition");
+    // Other rows now: the count of the whole table is gone, and the matches can be counted.
+    counted.afterFilter = rowCount() ?? null;
+    const pending = await truth("SELECT count(*) FROM shop.orders WHERE status::text ILIKE '%pend%'");
+    if (pending > 200) {
+      await click(await waitFor(countButton, "the count button, for the matches"), "count matches");
+      await waitFor(() => rowCount()?.includes("match"), "the number of matches");
+      counted.matches = rowCount();
+      if (!counted.matches.includes(pending.toLocaleString("en-US"))) throw new Error(`the footer says ${counted.matches}, the database ${pending}`);
+    } else if (countButton()) {
+      throw new Error("a count is offered although every matching row is on the page");
+    }
+    if (counted.afterFilter) throw new Error(`the table's count outlived the filter: ${counted.afterFilter}`);
+    counted.pending = pending;
+    await stage("table-count", { counted, footer: footer() });
+    const oneCondition = {
+      footer: footer(),
+      statuses: [...new Set(columnCells(STATUS))],
+      headerMarks: all(`${panelSel} [role="columnheader"]`).filter((h) => h.querySelector('[aria-label="Filtered"]')).map((h) => h.textContent.trim()),
+    };
+
+    // 2. A second condition, on a number, sent with the button. Both must hold.
+    await click(panelButton("Add condition"), "add condition");
+    await condition(1, "total_amount", "greaterOrEqual", "9000");
+    const note = document.querySelector(`${panelSel} [data-filter-note]`).textContent.trim();
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "2" && columnCells(TOTAL).every((v) => Number(v) >= 9000), "two conditions");
+    const twoConditions = { note, footer: footer(), rows: dataRows().length, statuses: [...new Set(columnCells(STATUS))], smallest: Math.min(...columnCells(TOTAL).map(Number)) };
+    if (twoConditions.rows !== 4) throw new Error(`the two conditions should leave 4 rows, not ${twoConditions.rows}`);
+    await stage("table-filter", { offered, oneCondition, twoConditions });
+
+    // 3. Nothing matches: the grid says so, and offers the way back.
+    await condition(0, "order_no", "equals", "SO-NOPE");
+    await click(panelButton("Apply"), "apply");
+    const emptyState = await waitFor(() => document.querySelector(`${panelSel} [data-filter-empty]`), "no-match state");
+    await stage("table-filter-empty", { text: emptyState.textContent.replace(/\s+/g, " ").trim(), footer: footer() });
+    await click(emptyState.querySelector("button"), "clear from the empty state");
+    await waitFor(() => filterCount() === "0" && dataRows().length > 20 && !footer().includes("condition"), "filter cleared");
+    const barReset = filterRows().length === 1 && filterRows()[0].querySelector("input").value === "";
+
+    // 4. A value the column's type cannot hold: the server's refusal is shown, not an empty grid.
+    await condition(0, "total_amount", "equals", "abc");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => activePanel().textContent.includes("Could not load the table"), "filter error");
+    const filterRefusal = all(`${panelSel} *`).find((e) => e.children.length === 0 && e.textContent.includes("invalid input syntax"))?.textContent.trim();
+    if (!filterRefusal) throw new Error("the server's refusal of the filter value is not shown");
+    await click(all(`${panelSel} button`).filter((b) => b.textContent.trim() === "Clear filter").pop(), "clear after the error");
+    await waitFor(() => filterCount() === "0" && dataRows().length > 20, "rows after the error");
+
+    // 5. From a cell: "Filter by this value" adds the condition and shows it in the bar.
+    await selectCell(0, STATUS);
+    await rightClick(cellAt(0, STATUS));
+    await click(await waitFor(() => menuItem("Filter by this value"), "cell menu"), "filter by this value");
+    await waitFor(() => filterCount() === "1" && new Set(columnCells(STATUS)).size === 1, "filter from a cell");
+    const fromCell = {
+      column: filterRows()[0].querySelectorAll("select")[0].value,
+      op: filterRows()[0].querySelectorAll("select")[1].value,
+      value: filterRows()[0].querySelector("input").value,
+      statuses: [...new Set(columnCells(STATUS))],
+      footer: footer(),
+    };
+    await stage("table-filter-cell", { barReset, filterRefusal, fromCell });
+    await click(panelButton("Clear filter"), "clear filter");
+    await waitFor(() => filterCount() === "0" && new Set(columnCells(STATUS)).size > 1, "every row again");
+    await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
+    await waitFor(() => !filterBar(), "filter bar hidden");
+
+    // ---- a JSON value opens laid out for reading (PostgreSQL orders, a jsonb column) -------
+    const META = 6;
+    const openCell = '[data-cell-dialog][data-state="open"]';
+    const metaRow = dataRows().findIndex((_, r) => cellText(r, META)?.trim().startsWith("{"));
+    const storedJson = cellText(metaRow, META).trim();
+    await selectCell(metaRow, META);
+    await rightClick(cellAt(metaRow, META));
+    await click(await waitFor(() => menuItem("View whole value"), "cell menu"), "view the json value");
+    const laidOut = (await waitFor(() => document.querySelector(`${openCell} [data-cell-formatted]`), "json laid out")).textContent;
+    const jsonViews = all(`${openCell} [role="radio"]`).map((r) => `${r.getAttribute("aria-checked") === "true" ? "●" : "○"} ${r.textContent.trim()}`);
+    await stage("cell-json", { storedJson, laidOut, jsonViews });
+    await click(all(`${openCell} [role="radio"]`).find((r) => r.textContent.trim() === "As stored"), "as stored");
+    const asStored = (await waitFor(() => document.querySelector(`${openCell} [data-cell-value]`), "the stored text")).value;
+    // Only the spacing differs, and the text to edit is the stored one.
+    if (!/^\{\n  "channel": "(web|line)"\n\}$/.test(laidOut) || laidOut.replace(/\s+/g, "") !== storedJson.replace(/\s+/g, "") || asStored !== storedJson || jsonViews.join() !== "● Formatted,○ As stored") {
+      throw new Error(`the json view is wrong: ${JSON.stringify({ storedJson, laidOut, asStored, jsonViews })}`);
+    }
+    await click(all(`${openCell} button`).find((b) => b.textContent.trim() === "Cancel"), "close the json value");
+    await waitFor(() => all("[data-cell-dialog]").every((d) => d.dataset.state === "closed"), "json value closed");
+
+    // ---- one cell, whole: a note longer than a page shows (MySQL orders) ----------------
+    // The row is found with the filter, which this also exercises on MySQL.
+    await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("orders") && x.textContent.includes("Demo MySQL")), "mysql orders tab");
+    await click(await waitFor(() => editState() === "editable" && document.querySelector(`${panelSel} [data-filter-toggle]`), "mysql orders tab"), "filter button");
+    await waitFor(filterBar, "filter bar on mysql");
+    await condition(0, "id", "equals", "3");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => dataRows().length === 1 && cellText(0, 1) === "SO-10003", "order 3 alone");
+    const NOTE = 6;
+    const cellDialog = () => document.querySelector("[data-cell-dialog]");
+    const wholeBox = () => waitFor(() => cellDialog()?.querySelector("[data-cell-value]"), "the whole value", 15000);
+    const shownInGrid = cellText(0, NOTE).length;
+    // A double-click on a shortened cell opens the dialog; the value is fetched by the row's key.
+    mouse(cellAt(0, NOTE), "dblclick");
+    let box = await wholeBox();
+    const whole = box.value;
+    if (whole.length !== 2502 || !whole.startsWith("บันทึกยาว ") || !whole.endsWith("จบ")) throw new Error(`the whole note should be 2502 characters, got ${whole.length}`);
+    const wholeCell = {
+      shownInGrid,
+      where: cellDialog().querySelector("[data-cell-where]").textContent.trim(),
+      size: cellDialog().querySelector("[data-cell-size]").textContent.trim(),
+      applyDisabledUntilChanged: cellDialog().querySelector("[data-cell-apply]").disabled,
+    };
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, `${whole} (ตรวจแล้ว)`);
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(100);
+    await stage("cell-whole", { wholeCell });
+    // The edit is staged like any other, with the complete original for the concurrency check.
+    await click(cellDialog().querySelector("[data-cell-apply]"), "apply the edit");
+    await waitFor(() => !cellDialog() && cellAt(0, NOTE)?.dataset.edited === "true", "edit staged");
+    const stagedSummary = dirtySummary();
+    await click(panelButton("Save"), "save the long value");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellAt(0, NOTE) && cellAt(0, NOTE).dataset.edited !== "true", "long value saved", 15000);
+    // Read it back through the cell's menu.
+    await selectCell(0, NOTE);
+    await rightClick(cellAt(0, NOTE));
+    await click(await waitFor(() => menuItem("View whole value"), "cell menu"), "view whole value");
+    box = await wholeBox();
+    const savedBack = { length: box.value.length, tail: box.value.slice(-14) };
+    if (box.value !== `${whole} (ตรวจแล้ว)`) throw new Error(`the saved note is not what was typed: ${savedBack.length} characters ending ${savedBack.tail}`);
+    await click(all("[data-cell-dialog] button").find((b) => b.textContent.trim() === "Cancel"), "close the cell dialog");
+    await waitFor(() => !cellDialog(), "cell dialog closed");
+    log.push({ stage: "cell-whole-saved", stagedSummary, savedBack });
+    await click(panelButton("Clear filter"), "clear the mysql filter");
+    await waitFor(() => filterCount() === "0" && dataRows().length > 20, "mysql rows again");
+    await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
+    await waitFor(() => !filterBar(), "filter bar hidden");
 
     await click(treeRow("customers"), "mysql customers");
     await waitFor(() => cellText(0, 1) === "สมชาย ใจดี", "customers rows");
@@ -372,10 +561,77 @@
     await waitFor(() => cellText(0, 1) === "SO-99001", "inserted row visible");
     log.push({ stage: "smart-paste-done", updated: ["Completed", "999.99"], inserted: [cellText(0, 1), cellText(0, 4), cellText(0, 5)] });
 
+    // Rows with problems can be left out: the others run, the ones with problems change nothing.
+    await invoke("plugin:clipboard-manager|write_text", {
+      text:
+        "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\r\n" +
+        "SO-99003\tPending\t20\t1\t2026-11-17 09:00:00\r\n" + // new
+        "SO-99004\tPending\tlots\t1\t2026-11-17 09:05:00\r\n" + // not a number
+        "SO-99001\tCompleted\t10\t1\t2026-11-16 09:00:00\r\n" + // exists: its status changes
+        "SO-99005\tPending\t5\t1\t2026-11-17 09:10:00\r\n" + // the same key twice
+        "SO-99005\tPending\t6\t1\t2026-11-17 09:15:00\r\n",
+    });
+    await click(panelButton("Smart Paste…"), "open smart paste again");
+    await waitFor(() => document.querySelector("[data-smart-source]"), "clipboard parsed");
+    await click(smartButton("Preview"), "preview");
+    const problemBox = await waitFor(() => document.querySelector("[data-smart-problems]"), "rows with problems", 15000);
+    const smartCheck = (name) => document.querySelector(`[data-smart-check="${name}"]`);
+    const listedStatuses = () => all("[data-smart-preview] tbody tr").map((tr) => tr.dataset.smartRow).join(",");
+    const skipOffer = {
+      counts: smartCounts(),
+      box: problemBox.textContent.replace(/\s+/g, " ").trim(),
+      runDisabled: smartButton("Run").disabled,
+      listed: listedStatuses(),
+      // The stored total is 10.00 and the pasted one is 10: the same number, so not a change.
+      update: smartRows().find((r) => r.includes("SO-99001")),
+    };
+    await click(smartCheck("only-problems"), "list only the rows with problems");
+    await waitFor(() => listedStatuses() === "invalid,duplicate,duplicate", "only the rows with problems");
+    await click(document.querySelector("[data-smart-copy-problems]"), "copy the rows with problems");
+    await sleep(300);
+    skipOffer.copied = (await invoke("plugin:clipboard-manager|read_text")).split("\n");
+    await click(smartCheck("only-problems"), "list every row again");
+    await click(smartCheck("skip"), "leave the rows with problems out");
+    await waitFor(() => !smartButton("Run").disabled, "run enabled");
+    skipOffer.run = smartButton("Run").textContent.replace(/\s+/g, " ").trim();
+    skipOffer.countLabel = document.querySelector('[data-smart-count="problems"]').textContent.replace(/\s+/g, " ").trim();
+    if (
+      JSON.stringify(skipOffer.counts) !== JSON.stringify({ insert: 1, update: 1, unchanged: 0, unmatched: 0, problems: 3 }) ||
+      !skipOffer.runDisabled ||
+      skipOffer.listed !== "insert,invalid,update,duplicate,duplicate" ||
+      !skipOffer.update?.endsWith("| changes status") ||
+      skipOffer.copied.length !== 4 ||
+      skipOffer.copied[0] !== "order_no\tStatus\ttotal_amount\tcustomer_id\torder_date\tProblem" ||
+      !skipOffer.copied[1].startsWith("SO-99004\tPending\tlots\t") ||
+      !skipOffer.copied[1].includes("not a number") ||
+      !skipOffer.copied[3].startsWith("SO-99005\tPending\t6\t") ||
+      // each of the two rows names the other by its line in the pasted block (the header is line 1)
+      !skipOffer.copied[2].endsWith("Same key as another pasted row (row 6)") ||
+      !skipOffer.copied[3].endsWith("Same key as another pasted row (row 5)") ||
+      !skipOffer.run.endsWith("2")
+    ) {
+      throw new Error(`the offer to leave rows out is wrong: ${JSON.stringify(skipOffer)}`);
+    }
+    await stage("smart-paste-skip", { skipOffer });
+    await click(smartButton("Run"), "run without the rows with problems");
+    await waitFor(() => !smart(), "smart paste finished", 20000);
+    const skipToast = (await waitFor(() => withText("[data-sonner-toast]", "left out"), "what was left out")).textContent.replace(/\s+/g, " ").trim();
+    const skipCheck = await invoke("run_sql", {
+      id: (await invoke("list_connections")).find((c) => c.engine === "mysql").id,
+      tab: "e2e-check-skip",
+      database: "puricat_e2e",
+      sql: "SELECT order_no, status, total_amount FROM orders WHERE order_no IN ('SO-99001', 'SO-99003', 'SO-99004', 'SO-99005') ORDER BY order_no",
+      options: { maxRows: 10, changeLimit: null },
+    });
+    await invoke("close_console", { tab: "e2e-check-skip" });
+    const afterSkip = skipCheck.statements[0].results[0].rows.map((r) => r.join(" "));
+    if (afterSkip.join(" | ") !== "SO-99001 Completed 10.00 | SO-99003 Pending 20.00") throw new Error(`leaving rows out wrote the wrong rows: ${afterSkip.join(" | ")}`);
+    log.push({ stage: "smart-paste-skipped", skipToast, afterSkip });
+
     // 8c. SQL console (MySQL): run a script, confirmation for a destructive statement,
     //     the impact guard, an error, the history, and exports
     await rightClick(treeRow("Demo MySQL"));
-    await click(await waitFor(() => withText('[role="menuitem"]', "New query"), "new query menu"), "new query");
+    await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
     const sqlTab = () => document.querySelector(`${panelSel} [data-sql-tab]`);
     await waitFor(() => sqlTab()?.__editor, "sql editor", 30000);
     const sqlButton = (label) => all(`${panelSel} button`).find((b) => b.textContent.trim().startsWith(label));
@@ -478,34 +734,266 @@
     }
     log.push({ stage: "sql-more", allowed, failed, txn, historyItems, exported });
 
-    // Two query tabs: ⌘↵ pressed in the first runs the first tab's text, not the text of the
-    // tab opened last. The key goes to the editor itself, so that its own binding answers.
+    // 8d. SQL console: the statement at the cursor, and saved scripts
+    const sqlEditor = () => sqlTab().__editor;
+    const sqlTitle = () => document.querySelector(`${panelSel} [data-sql-title]`)?.textContent.trim();
+    const sqlSummary = () => document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim() ?? "";
+    const sqlEdited = () => !!document.querySelector(`${panelSel} [data-sql-edited]`);
+    const tabStrip = () => all('[role="tablist"] [role="tab"]');
+    const frontTab = () => document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]');
+    const tabNamed = (name) => tabStrip().find((x) => x.querySelector(".truncate")?.textContent.trim() === name);
+    // The editor's lines are 21px: which of them the margin marks as the statement at the cursor.
+    const markedLines = () =>
+      all(`${panelSel} .sql-current-statement`)
+        .map((e) => Math.round(parseFloat(e.parentElement.style.top) / 21) + 1)
+        .sort((a, b) => a - b)
+        .join(",");
+    const cursorTo = (lineNumber, column) => sqlEditor().setPosition({ lineNumber, column });
+    // A key pressed in the editor itself, so that its own key bindings are what answers.
     const editorKey = (init) =>
       sqlTab().querySelector("textarea, .native-edit-context").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
-    const pressRun = () => editorKey({ key: "Enter", code: "Enter", keyCode: 13, metaKey: true });
-    const queryTabs = () => all('[role="tablist"] [role="tab"]');
-    const queryTab = (name) => queryTabs().find((x) => x.querySelector(".truncate")?.textContent.trim() === name);
-    const inFront = (name) => queryTab(name)?.getAttribute("aria-selected") === "true" && !!sqlTab()?.__editor;
-    const hasRun = () => !!document.querySelector(`${panelSel} [data-sql-summary]`);
-    const tabsWithOne = queryTabs().length;
-    await rightClick(treeRow("Demo MySQL"));
-    await click(await waitFor(() => withText('[role="menuitem"]', "New query"), "new query menu"), "second query tab");
-    await waitFor(() => inFront("Query 2"), "second query tab", 30000);
-    sqlTab().__editor.setValue("SELECT 22 AS second_tab");
-    await click(queryTab("Query 1"), "first query tab");
-    await waitFor(() => inFront("Query 1"), "first query tab in front");
-    sqlTab().__editor.setValue("SELECT 11 AS first_tab");
+    const closed = (sel) => all(sel).every((el) => el.dataset.state === "closed");
+    const newQueryTab = async (title) => {
+      await rightClick(treeRow("Demo MySQL"));
+      await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
+      await waitFor(() => sqlTitle() === title && sqlTab()?.__editor, `query tab ${title}`, 30000);
+    };
+    const scriptsOf = JSON.parse((await invoke("get_settings")).workspace).tabs.find((x) => x.kind === "sql").connectionId;
+    const storedScripts = async () => (await invoke("list_scripts", { id: scriptsOf })).map((x) => ({ name: x.name, sql: x.sql }));
+
+    // Three statements; the second has a comment above it and one after its semicolon.
+    sqlEditor().setValue("SELECT 1 AS one;\n\n-- สอง\nSELECT 2 AS two; -- จบ\nSELECT 3\n  AS three");
+    const marked = {};
+    for (const [name, line, column] of [["first", 1, 4], ["emptyLineAbove", 2, 1], ["inside", 4, 10], ["afterSemicolon", 4, 24], ["lastLine", 6, 3]]) {
+      cursorTo(line, column);
+      await sleep(350); // the script is analysed a moment after it changes
+      marked[name] = markedLines();
+    }
+    if (JSON.stringify(marked) !== JSON.stringify({ first: "1", emptyLineAbove: "4", inside: "4", afterSemicolon: "4", lastLine: "5,6" })) {
+      throw new Error(`the margin marks the wrong statement: ${JSON.stringify(marked)}`);
+    }
+    // From the menu beside Run: only the statement the cursor is in runs.
+    cursorTo(4, 24);
+    document.querySelector(`${panelSel} [data-sql-run-menu]`).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    const runMenu = (await waitFor(() => document.querySelector("[data-sql-run-current]"), "run menu")).parentElement.textContent.replace(/\s+/g, " ").trim();
+    await click(document.querySelector("[data-sql-run-current]"), "run the statement at the cursor");
+    await waitFor(() => gridCells().join() === "2", "the second statement only", 20000);
+    const ranFromMenu = { summary: sqlSummary().replace(/ · .*/, ""), cells: gridCells().join(), column: document.querySelector(`${panelSel} [role="columnheader"] button`)?.textContent.trim() };
+    // From the keyboard, with other text selected: ⇧⌘↵ still runs the statement at the cursor.
+    sqlEditor().setSelection({ startLineNumber: 1, startColumn: 1, endLineNumber: 6, endColumn: 3 });
+    editorKey({ key: "Enter", code: "Enter", keyCode: 13, metaKey: true, shiftKey: true });
+    await waitFor(() => gridCells().join() === "3", "the third statement only", 20000);
+    const ranFromKeyboard = { summary: sqlSummary().replace(/ · .*/, ""), cells: gridCells().join() };
+    await showMessages();
+    ranFromKeyboard.messages = messages().map((m) => m.text.slice(0, 40));
+    // The comment after the second statement's semicolon is not sent with the third.
+    if (ranFromKeyboard.messages.length !== 1 || !ranFromKeyboard.messages[0].startsWith("SELECT 3 AS three")) {
+      throw new Error(`⇧⌘↵ ran something else: ${JSON.stringify(ranFromKeyboard)}`);
+    }
+    cursorTo(4, 10);
+    await waitFor(() => markedLines() === "4", "the mark follows the cursor");
+    await stage("sql-run-current", { marked, runMenu, ranFromMenu, ranFromKeyboard });
+
+    // A second query tab is saved under a name (⌘S asks for one) and becomes that script.
+    const sqlTabsBefore = tabStrip().length;
+    await newQueryTab("Query 2");
+    const scriptName = "Orders by status ยอดตามสถานะ";
+    const scriptText = "-- ยอดรวมต่อสถานะ\nSELECT status, COUNT(*) AS n\nFROM puricat_e2e.orders\nGROUP BY status ORDER BY status";
+    const saveButton = () => document.querySelector(`${panelSel} [data-sql-save]`);
+    const nothingToSave = saveButton().disabled;
+    sqlEditor().setValue(scriptText);
+    await waitFor(() => !saveButton().disabled, "save button enabled");
+    editorKey({ key: "s", code: "KeyS", keyCode: 83, metaKey: true });
+    const nameBox = await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-name] input"), "name of the new script");
+    await type(nameBox, `  ${scriptName} `);
+    await stage("sql-script-name", { nothingToSave });
+    await click(document.querySelector("[data-script-create]"), "save the new script");
+    await waitFor(() => sqlTitle() === scriptName && closed("[data-sql-scripts]"), "tab named after its script");
+    const savedNew = {
+      tab: frontTab().querySelector(".truncate").textContent.trim(),
+      edited: sqlEdited(),
+      saveDisabled: saveButton().disabled,
+      stored: await storedScripts(),
+      scriptId: typeof JSON.parse((await invoke("get_settings")).workspace).tabs.find((x) => x.title === scriptName)?.scriptId,
+    };
+    if (savedNew.stored.length !== 1 || savedNew.stored[0].name !== scriptName || savedNew.stored[0].sql !== scriptText || savedNew.edited || !savedNew.saveDisabled) {
+      throw new Error(`the script was not saved as written: ${JSON.stringify(savedNew)}`);
+    }
+
+    // Changing the text marks the tab; closing it asks; ⌘S writes the change.
+    sqlEditor().setValue(`${scriptText}\n-- แก้ครั้งที่ 1`);
+    await waitFor(() => sqlEdited() && frontTab().querySelector('[role="img"]'), "edited marks");
+    const editedMarks = { header: document.querySelector(`${panelSel} [data-sql-edited]`).textContent.trim(), tab: frontTab().querySelector('[role="img"]').getAttribute("aria-label") };
+    await click(frontTab().querySelector("button"), "close the edited script");
+    const closeDialog = await waitFor(() => document.querySelector("[data-close-dialog]"), "close dialog");
+    const closeAsk = { text: closeDialog.textContent.replace(/\s+/g, " ").trim(), buttons: [...closeDialog.querySelectorAll("button")].map((b) => b.textContent.trim()) };
+    await stage("sql-script-close", { editedMarks, closeAsk });
+    await click(exact("[data-close-dialog] button", "Cancel"), "cancel closing");
+    await waitFor(() => !document.querySelector("[data-close-dialog]") && sqlTitle() === scriptName && sqlEdited(), "the tab stayed, still edited");
+    editorKey({ key: "s", code: "KeyS", keyCode: 83, metaKey: true });
+    await waitFor(() => !sqlEdited(), "saved from the keyboard");
+    const savedByKey = (await storedScripts())[0].sql.endsWith("-- แก้ครั้งที่ 1");
+
+    // From a third, blank tab: the script is already open, so its tab comes to the front.
+    await newQueryTab("Query 2");
+    const scriptsToggle = () => document.querySelector(`${panelSel} [data-sql-scripts-toggle]`);
+    const scriptRows = () => all("[data-sql-scripts][data-state=open] [data-script-row]");
+    const openScripts = async () => {
+      await click(scriptsToggle(), "saved scripts");
+      return waitFor(() => scriptRows()[0], "saved scripts list");
+    };
+    const closeScripts = () =>
+      waitFor(() => {
+        document.querySelector("[data-sql-scripts][data-state=open]")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        return closed("[data-sql-scripts]");
+      }, "saved scripts closed");
+    await openScripts();
+    const listedElsewhere = scriptRows().map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    await click(scriptRows()[0].querySelector("button"), "open the script");
+    await waitFor(() => sqlTitle() === scriptName && closed("[data-sql-scripts]"), "the tab that has the script");
+    const reopened = { tabs: tabStrip().length - sqlTabsBefore, value: sqlEditor().getValue().endsWith("-- แก้ครั้งที่ 1") };
+
+    // A name is used once per connection, whatever its case; then the script is renamed.
+    await openScripts();
+    const listedHere = scriptRows().map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    await click(exact("[data-sql-scripts][data-state=open] button", "Save as a new script…"), "save as");
+    const copyBox = await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-name] input"), "name box");
+    await waitFor(() => copyBox.value !== "", "a suggested name");
+    const suggestedName = copyBox.value;
+    await type(copyBox, scriptName.toUpperCase());
+    await click(document.querySelector("[data-script-create]"), "save under a taken name");
+    const taken = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-problem]"), "name taken")).textContent.trim();
+    await stage("sql-scripts", { listedElsewhere, listedHere, suggestedName, taken });
+    await click(exact("[data-sql-scripts][data-state=open] [data-script-name] button", "Cancel"), "cancel the name");
+    await click(scriptRows()[0].querySelector('button[aria-label="Rename"]'), "rename");
+    await type(await waitFor(() => document.querySelector('[data-sql-scripts][data-state=open] input[aria-label="Name of the script"]'), "rename box"), "Status totals");
+    await click(exact("[data-sql-scripts][data-state=open] button", "Rename"), "confirm rename");
+    await waitFor(() => sqlTitle() === "Status totals" && tabNamed("Status totals"), "the tab follows its script's name");
+    await closeScripts();
+
+    // Closing with changes: "Save" in the dialog writes them and closes the tab.
+    sqlEditor().setValue(`${scriptText}\n-- แก้ครั้งที่ 2`);
+    await waitFor(sqlEdited, "edited again");
+    await click(frontTab().querySelector("button"), "close the edited script");
+    await click(await waitFor(() => document.querySelector("[data-close-save]"), "save in the close dialog"), "save and close");
+    await waitFor(() => !document.querySelector("[data-close-dialog]") && !tabNamed("Status totals") && sqlTitle() === "Query 2", "saved and closed");
+    const savedOnClose = await storedScripts();
+
+    // Into the blank tab in front: it becomes the script. Then two editors are open, and
+    // each one's ⌘↵ must run its own text.
+    await openScripts();
+    await click(scriptRows()[0].querySelector("button"), "open the script here");
+    await waitFor(() => sqlTitle() === "Status totals" && sqlEditor().getValue() === `${scriptText}\n-- แก้ครั้งที่ 2` && !sqlEdited(), "loaded into the blank tab");
+    const loadedHere = { tabs: tabStrip().length - sqlTabsBefore, bound: typeof JSON.parse((await invoke("get_settings")).workspace).tabs.find((x) => x.title === "Status totals")?.scriptId };
+    await click(tabNamed("Query 1"), "first query tab");
+    await waitFor(() => sqlTitle() === "Query 1", "first query tab in front");
+    sqlEditor().setValue("SELECT 11 AS own_tab");
     await sleep(80);
-    pressRun();
-    await waitFor(() => gridCells().join() === "11", "⌘↵ to run the text of the tab it was pressed in", 20000);
-    await click(queryTab("Query 2"), "second query tab");
-    await waitFor(() => inFront("Query 2"), "second query tab in front");
-    if (hasRun()) throw new Error("⌘↵ in the first query tab also ran the second tab's text");
-    pressRun();
-    await waitFor(() => gridCells().join() === "22", "⌘↵ in the second tab", 20000);
-    await click(queryTab("Query 2").querySelector("button"), "close the second query tab");
-    await waitFor(() => queryTabs().length === tabsWithOne && inFront("Query 1"), "back to one query tab");
-    log.push({ stage: "sql-two-tabs", first: "11", second: "22" });
+    editorKey({ key: "Enter", code: "Enter", keyCode: 13, metaKey: true });
+    await waitFor(() => gridCells().join() === "11", "⌘↵ ran this tab's text", 20000);
+    await click(tabNamed("Status totals"), "script tab");
+    await waitFor(() => sqlTitle() === "Status totals", "script tab in front");
+    const ownKeys = { first: "11", other: sqlSummary() };
+
+    // Deleting asks in place; the tab keeps its text and is a plain query tab again.
+    await openScripts();
+    await click(scriptRows()[0].querySelector('button[aria-label="Delete"]'), "delete");
+    const deleteAsk = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-deleting]"), "delete question")).textContent.replace(/\s+/g, " ").trim();
+    await click(exact("[data-sql-scripts][data-state=open] [data-script-deleting] button", "Delete"), "confirm delete");
+    await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-empty]"), "no script left");
+    await closeScripts();
+    const afterDelete = {
+      stored: (await storedScripts()).length,
+      text: sqlEditor().getValue() === `${scriptText}\n-- แก้ครั้งที่ 2`,
+      bound: typeof JSON.parse((await invoke("get_settings")).workspace).tabs.find((x) => x.title === "Status totals")?.scriptId,
+      canSaveAgain: !saveButton().disabled,
+    };
+    await click(frontTab().querySelector("button"), "close the plain tab");
+    await waitFor(() => tabStrip().length === sqlTabsBefore && sqlTitle() === "Query 1", "back to the first query tab");
+    log.push({ stage: "sql-scripts-more", savedNew, savedByKey, reopened, savedOnClose, loadedHere, ownKeys, deleteAsk, afterDelete });
+    if (
+      !savedByKey ||
+      reopened.tabs !== 2 ||
+      !reopened.value ||
+      loadedHere.tabs !== 1 ||
+      loadedHere.bound !== "number" ||
+      savedOnClose.length !== 1 ||
+      savedOnClose[0].name !== "Status totals" ||
+      !savedOnClose[0].sql.endsWith("-- แก้ครั้งที่ 2") ||
+      ownKeys.other !== "" ||
+      afterDelete.stored !== 0 ||
+      !afterDelete.text ||
+      afterDelete.bound !== "undefined" ||
+      !afterDelete.canSaveAgain
+    ) {
+      throw new Error(`saved scripts went wrong: ${JSON.stringify({ savedByKey, reopened, savedOnClose, loadedHere, ownKeys, afterDelete })}`);
+    }
+
+    // ---- Smart Paste from a file ------------------------------------------------------
+    // The native Open dialog is replaced by the runner's list of files (PURICAT_E2E_PICK):
+    // the CSV and the workbook exported just above, a Thai CSV that is not UTF-8, a CSV that
+    // is too long, and then nothing, which is what cancelling the dialog gives.
+    await click(treeRow("customers"), "mysql customers");
+    await waitFor(() => editState() === "editable" && cellText(0, 1) === "สมชาย ใจดี", "customers tab");
+    const customerRows = dataRows().length;
+    // A file cannot say NULL: an empty cell comes back as the empty text in a text column, so
+    // the rows whose city is NULL are the only ones the exported files would change.
+    const nullCities = dataRows().filter((_, r) => cellText(r, 2) === "NULL").length;
+    const openFile = async () => click(await waitFor(() => smart()?.querySelector("[data-smart-open-file]:not(:disabled)"), "open-file button"), "open a file");
+    const fileBar = () => smart().querySelector("[data-smart-file]")?.textContent.replace(/\s+/g, " ").trim();
+    const smartSource = () => document.querySelector("[data-smart-source]")?.textContent.trim() ?? "";
+    const roundTrip = async (what) => {
+      await click(smartButton("Preview"), `preview ${what}`);
+      await waitFor(() => document.querySelector("[data-smart-preview]") && smartCounts().unchanged !== undefined, `${what}: preview`, 15000);
+      const counts = smartCounts();
+      if (counts.unchanged !== customerRows - nullCities || counts.update !== nullCities || counts.insert || counts.problems) {
+        throw new Error(`${what}: an exported file should come back identical except for ${nullCities} NULL cities of ${customerRows} rows: ${JSON.stringify(counts)} ${JSON.stringify(smartRows().slice(0, 12))}`);
+      }
+      return counts;
+    };
+    await click(panelButton("Smart Paste…"), "open smart paste");
+    await waitFor(smart, "smart paste dialog");
+
+    await openFile();
+    await waitFor(() => smartSource().includes("export.csv"), "the CSV read");
+    const csv = {
+      source: smartSource(),
+      bar: fileBar(),
+      separator: smart().querySelector("[data-smart-separator]").selectedOptions[0].textContent.trim(),
+      headersDetected: all('[data-smart-paste] input[type="checkbox"]')[0].checked,
+      mapping: all('[data-smart-paste] select[aria-label^="Table column"]').map((el) => el.value),
+    };
+    csv.counts = await roundTrip("the CSV");
+    await stage("smart-file-csv", { customerRows, nullCities, csv });
+
+    await openFile();
+    await waitFor(() => smartSource().includes("export.xlsx"), "the workbook read");
+    const workbook = { source: smartSource(), bar: fileBar(), mapping: all('[data-smart-paste] select[aria-label^="Table column"]').map((el) => el.value) };
+    workbook.counts = await roundTrip("the workbook");
+    await stage("smart-file-xlsx", { workbook });
+
+    // Not UTF-8: refused with the reason, read once its encoding is named.
+    await openFile();
+    const notUtf8 = (await waitFor(() => smart().querySelector("[data-smart-file-error]"), "refusal of the encoding")).textContent.replace(/\s+/g, " ").trim();
+    await choose(smart().querySelector("[data-smart-encoding]"), "windows-874");
+    await waitFor(() => smartSource().includes("thai874.csv") && smart().textContent.includes("ทดสอบภาษาไทย"), "the Thai CSV read");
+    const thai = { notUtf8, source: smartSource(), bar: fileBar() };
+    await stage("smart-file-encoding", { thai });
+
+    // More rows than one run takes: nothing is offered for mapping.
+    await openFile();
+    const tooMany = (await waitFor(() => smart().querySelector("[data-smart-too-many]"), "too-many state", 15000)).textContent.replace(/\s+/g, " ").trim();
+    // A cancelled dialog changes nothing.
+    await openFile();
+    await sleep(400);
+    const afterCancel = !!smart().querySelector("[data-smart-too-many]");
+    // The runner's list is used up: a request must come back as cancelled, at once. A native
+    // dialog would leave it unanswered (and open on the screen for the rest of the run).
+    const pastTheList = await Promise.race([invoke("pick_table_file"), sleep(3000).then(() => "no answer")]);
+    if (pastTheList !== null) throw new Error(`a file request past the runner's list was not a cancelled dialog: ${JSON.stringify(pastTheList)}`);
+    await stage("smart-file-limit", { tooMany, afterCancel });
+    await click(smart().querySelector('button[aria-label="Close"]'), "close smart paste");
+    await waitFor(() => !smart(), "smart paste closed");
 
     // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
     await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
@@ -553,11 +1041,15 @@
       return !preview || preview.closest("[data-state]")?.dataset.state === "closed";
     }, "context closed");
 
+    const lastAnswer = () => all('aside [data-agent-turn="assistant"]').at(-1);
     const ask = async (text) => {
+      const answers = all('aside [data-agent-turn="assistant"]').length;
       await setValue(aiCard().querySelector("[data-agent-input]"), text);
       await click(aiCard().querySelector('button[aria-label="Send"]'), "send");
+      // The answer's turn appears a moment after Send. Until it does, the "last answer" is
+      // still the one before, already done: what is read next must be this question's.
+      await waitFor(() => all('aside [data-agent-turn="assistant"]').length > answers, "the answer to appear", 20000);
     };
-    const lastAnswer = () => all('aside [data-agent-turn="assistant"]').at(-1);
     const answered = (status, what) => waitFor(() => lastAnswer()?.dataset.status === status, what, 20000);
     const flat = (el) => el.textContent.replace(/\s+/g, " ").trim();
 
@@ -781,16 +1273,108 @@
     const codexAnswer = flat(lastAnswer());
     await stage("agent-codex", { codex, codexModels, codexRefused, codexAnswer, opened, modelRefused, retried, stopped });
 
+    // ---- SQLite: a database file, from the connection form to a saved edit --------------
+    await click(document.querySelector('button[aria-label="New connection"]'), "new connection");
+    await waitFor(dialog, "connection dialog");
+    await click(document.querySelector('[role="dialog"] [data-engine="sqlite"]'), "sqlite engine");
+    const fileInput = await waitFor(() => document.querySelector('[role="dialog"] [data-sqlite-file]'), "the file field");
+    const readOnlySwitch = () => document.querySelector('[role="dialog"] [role="switch"]');
+    const sqliteForm = {
+      // Nothing of a server is asked for a file, and a new file connection starts read-only.
+      serverFields: ["Host", "Port", "Username", "Password", "TLS"].filter((label) =>
+        all('[role="dialog"] label').some((l) => l.querySelector("span")?.textContent.trim().startsWith(label)),
+      ),
+      readOnlyByDefault: readOnlySwitch().getAttribute("aria-checked"),
+    };
+    if (sqliteForm.serverFields.length > 0 || sqliteForm.readOnlyByDefault !== "true") throw new Error(`the SQLite form is not what it should be: ${JSON.stringify(sqliteForm)}`);
+    await type(field("Name"), "Demo SQLite");
+    const testFile = async (path) => {
+      await type(fileInput, path);
+      await waitFor(() => !document.querySelector('[role="dialog"] [data-test-result]'), "the earlier test result to go");
+      await click(exact('[role="dialog"] button', "Test connection"), "test");
+      return (await waitFor(() => document.querySelector('[role="dialog"] [data-test-result]'), `test result for ${path}`, 20000)).textContent.replace(/\s+/g, " ").trim();
+    };
+    // A file that is something else, and a path that does not exist: clear refusals.
+    const notADatabase = await testFile("__WORK__/export.csv");
+    if (!notADatabase.includes("not a SQLite database")) throw new Error(`a CSV file was not refused as it should be: ${notADatabase}`);
+    const missingFile = await testFile("__WORK__/nothing-here.sqlite");
+    if (missingFile.startsWith("Connected")) throw new Error("a file that does not exist reported success");
+    const sqliteTest = await testFile("__WORK__/demo.sqlite");
+    if (!sqliteTest.startsWith("Connected to SQLite 3.")) throw new Error(`SQLite test failed: ${sqliteTest}`);
+    await stage("dialog-sqlite", { sqliteForm, notADatabase, missingFile, sqliteTest });
+    await save();
+
+    // Its tables are listed at once (the file's one database is opened for you), and as the
+    // connection is read-only the table cannot be edited.
+    await click(treeRow("Demo SQLite"), "sqlite node");
+    await click(await waitFor(() => treeRow("books"), "sqlite tables"), "books");
+    await waitFor(() => cellText(0, 1) === "ธรรมบท ภาค ๑", "sqlite rows");
+    const sqliteReadOnly = { state: editState(), firstRow: gridCells(), footer: footer(), tree: all("[data-tree-row]").map(rowLabel).filter((x) => ["main", "books", "tags", "long_books"].includes(x)) };
+    if (sqliteReadOnly.state !== "read-only") throw new Error("a read-only SQLite connection shows an editable table");
+    // 2^53 + 1 and a blob, exactly as stored.
+    if (cellText(2, 2) !== "9007199254740993" || cellText(0, 6) !== "0x89504E47") throw new Error(`SQLite values are not shown exactly: ${cellText(2, 2)}, ${cellText(0, 6)}`);
+
+    // Turn read-only off in the connection form; the session is opened again with it.
+    await rightClick(treeRow("Demo SQLite"));
+    await click(await waitFor(() => menuItem("Edit…"), "context menu"), "edit connection");
+    await waitFor(() => document.querySelector('[role="dialog"] [data-sqlite-file]')?.value === "__WORK__/demo.sqlite", "the form of the saved connection");
+    await click(readOnlySwitch(), "read-only off");
+    await waitFor(() => readOnlySwitch().getAttribute("aria-checked") === "false", "switch off");
+    await click(exact('[role="dialog"] button', "Save"), "save connection");
+    await waitFor(() => !dialog(), "dialog to close");
+    await click(treeRow("Demo SQLite"), "sqlite node again");
+    await waitFor(() => editState() === "editable" && cellText(0, 1) === "ธรรมบท ภาค ๑", "an editable table", 20000);
+
+    // An edit, and text that is not a number for a column of numbers: SQLite would store
+    // it, PuriCat refuses the save and keeps what was typed.
+    mouse(cellAt(0, 1), "dblclick");
+    await typeInEditor("ธรรมบท ภาค ๑ (ตรวจแล้ว)");
+    await waitFor(() => cellAt(0, 1)?.dataset.edited === "true", "staged title");
+    mouse(cellAt(0, 3), "dblclick");
+    await typeInEditor("many");
+    await waitFor(() => cellAt(0, 3)?.dataset.edited === "true", "staged pages");
+    await click(panelButton("Save"), "save with a bad number");
+    const sqliteRefused = (await waitFor(() => document.querySelector(`${panelSel} [data-save-error]`), "the refusal")).textContent.replace(/\s+/g, " ").trim();
+    if (!sqliteRefused.includes("not a number")) throw new Error(`the bad number was not refused as it should be: ${sqliteRefused}`);
+    if (cellText(0, 1) !== "ธรรมบท ภาค ๑ (ตรวจแล้ว)") throw new Error("the staged title was lost after the refused save");
+    await gridKey("z", { metaKey: true });
+    await waitFor(() => cellText(0, 3) === "248", "the bad number undone");
+    await click(panelButton("Save"), "save");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellText(0, 1) === "ธรรมบท ภาค ๑ (ตรวจแล้ว)" && cellAt(0, 1).dataset.edited !== "true", "saved and reloaded", 15000);
+    await stage("sqlite-books", { sqliteReadOnly, sqliteRefused, firstRow: gridCells(), footer: footer() });
+
+    // A query tab on the file: what SQLite really stores, and a statement of its own dialect.
+    await rightClick(treeRow("Demo SQLite"));
+    await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
+    await waitFor(() => sqlTab()?.__editor && activePanel().textContent.includes("Demo SQLite"), "sqlite query tab", 30000);
+    await runSql("SELECT title, typeof(price) AS stored_as, price FROM books ORDER BY id;\nPRAGMA table_info(tags);");
+    await waitFor(() => gridCells().includes("ธรรมบท ภาค ๑ (ตรวจแล้ว)"), "sqlite result rows", 20000);
+    await stage("sqlite-sql", {
+      row: gridCells(),
+      tabs: all(`${panelSel} [role="tab"]`).map((b) => b.textContent.replace(/\s+/g, " ").trim()),
+      summary: document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim(),
+    });
+
     // ---- duplicate + delete through context menus -----------------------------------
     await rightClick(treeRow("Demo MySQL"));
-    await click(await waitFor(() => exact('[role="menuitem"]', "Duplicate"), "context menu"), "duplicate");
+    await click(await waitFor(() => menuItem("Duplicate"), "context menu"), "duplicate");
     const copy = await waitFor(() => treeRow("Demo MySQL copy"), "duplicated connection");
+    // The first menu's "Delete…" belongs to the original: wait until no menu is open.
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "first context menu to close");
+    // A script saved for the copy goes with it, and the dialog says so.
+    const copyId = (await invoke("list_connections")).find((c) => c.name === "Demo MySQL copy").id;
+    await invoke("create_script", { id: copyId, name: "left behind", sql: "SELECT 1" });
     await rightClick(copy);
-    await click(await waitFor(() => exact('[role="menuitem"]', "Delete…"), "context menu"), "delete");
+    await click(await waitFor(() => menuItem("Delete…"), "context menu of the copy"), "delete");
     await waitFor(() => document.querySelector('[role="alertdialog"]'), "confirm dialog");
-    await stage("delete-confirm", { text: document.querySelector('[role="alertdialog"]').textContent.replace(/\s+/g, " ").trim() });
+    const deleteText = document.querySelector('[role="alertdialog"]').textContent.replace(/\s+/g, " ").trim();
+    if (!deleteText.includes("Demo MySQL copy")) throw new Error(`the delete dialog is not about the copy: ${deleteText}`);
+    const scriptsNamed = (await waitFor(() => document.querySelector("[data-delete-scripts]"), "the scripts that go with it")).textContent.trim();
+    await stage("delete-confirm", { text: deleteText, scriptsNamed });
     await click(exact('[role="alertdialog"] button', "Delete connection"), "confirm delete");
     await waitFor(() => !treeRow("Demo MySQL copy"), "connection removed");
+    const scriptsLeft = (await invoke("list_scripts", { id: copyId })).length;
+    if (scriptsLeft !== 0) throw new Error(`${scriptsLeft} script(s) outlived their connection`);
 
     // ---- command palette: dark theme, then Thai -------------------------------------
     const palette = async (query) => {
@@ -804,12 +1388,51 @@
       await waitFor(() => !document.querySelector("[cmdk-input]"), "palette to close");
       return label;
     };
+    // The filter bar is looked at in both themes and both languages: put it in front, in use.
+    await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("orders") && x.textContent.includes("Demo Postgr")), "postgres orders tab");
+    await click(await waitFor(() => document.querySelector(`${panelSel} [data-filter-toggle]`), "filter button"), "filter button");
+    await waitFor(filterBar, "filter bar");
+    await condition(0, "status", "contains", "pend");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "1" && columnCells(STATUS).every((v) => v === "Pending"), "filter in front");
+    await click(panelButton("Add condition"), "a second, unwritten condition");
     const darkItem = await palette("dark theme");
     await waitFor(() => document.documentElement.dataset.theme === "dark", "dark theme");
     await stage("dark", { ran: darkItem, bg: getComputedStyle(document.body).backgroundColor });
     const thaiItem = await palette("language");
     await waitFor(() => document.documentElement.lang === "th", "thai");
-    await stage("thai-dark", { ran: thaiItem, footer: footer() });
+    const thaiFilter = {
+      button: document.querySelector(`${panelSel} [data-filter-toggle]`).textContent.trim(),
+      labels: all(`${panelSel} [data-filter-row] > span`).map((x) => x.textContent.trim()),
+      conditions: [...filterRows()[0].querySelectorAll("select")[1].options].map((o) => o.textContent.trim()),
+      note: document.querySelector(`${panelSel} [data-filter-note]`).textContent.trim(),
+      buttons: all(`${panelSel} [data-filter-bar] button`).map((b) => b.textContent.trim()).filter(Boolean),
+    };
+    if (!footer().includes("ใช้อยู่ 1 เงื่อนไข")) throw new Error(`the footer does not show the filter in Thai: ${footer()}`);
+    await stage("thai-dark", { ran: thaiItem, footer: footer(), thaiFilter });
+    // The query tab in Thai and dark: the mark in the margin and the saved scripts.
+    await click(tabNamed("Query 1"), "first query tab");
+    await waitFor(() => sqlTitle() === "Query 1", "query tab in front");
+    sqlEditor().setValue("SELECT 1 AS one;\n\n-- สอง\nSELECT 2 AS two;\nSELECT 3");
+    cursorTo(4, 5);
+    await waitFor(() => markedLines() === "4", "mark in the margin");
+    await click(scriptsToggle(), "saved scripts");
+    const thaiScripts = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-empty]"), "empty list in Thai")).parentElement.parentElement.textContent.replace(/\s+/g, " ").trim();
+    await stage("thai-dark-sql", { thaiScripts, save: saveButton().getAttribute("aria-label") });
+    await closeScripts();
+    // The SQLite connection form in Thai and dark.
+    await rightClick(treeRow("Demo SQLite"));
+    await click(await waitFor(() => menuItem("แก้ไข…"), "context menu in Thai"), "edit the sqlite connection");
+    await waitFor(() => document.querySelector('[role="dialog"] [data-sqlite-file]')?.value === "__WORK__/demo.sqlite", "the sqlite form in Thai");
+    const thaiSqlite = {
+      labels: all('[role="dialog"] label > span:first-child').map((x) => x.textContent.replace(/\s+/g, " ").trim()),
+      buttons: all('[role="dialog"] button').map((b) => b.textContent.replace(/\s+/g, " ").trim()).filter(Boolean),
+      readOnly: document.querySelector('[role="dialog"] [role="switch"]').getAttribute("aria-checked"),
+    };
+    if (!thaiSqlite.labels.includes("ไฟล์ฐานข้อมูล") || !thaiSqlite.buttons.includes("เลือกไฟล์…")) throw new Error(`the SQLite form is not in Thai: ${JSON.stringify(thaiSqlite)}`);
+    await stage("thai-dark-sqlite", { thaiSqlite });
+    await click(exact('[role="dialog"] button', "ยกเลิก"), "cancel the form");
+    await waitFor(() => !dialog(), "dialog to close");
     await palette("ธีมสว่าง");
     await waitFor(() => document.documentElement.dataset.theme === "light", "light theme");
     await click(all('[role="tab"]')[0], "welcome tab");

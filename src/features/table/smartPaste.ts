@@ -1,7 +1,7 @@
 // Pure helpers for the Smart Paste wizard: reading the pasted block, mapping its columns
 // to table columns, and building the request the backend analyses and runs.
 
-import type { ColumnMeta, PasteMode, PasteRequest, UniqueKey } from "../../lib/types";
+import type { ColumnMeta, PasteMode, PasteRequest, PasteRowReport, PasteRowStatus, UniqueKey } from "../../lib/types";
 
 /** Target column name for each pasted column; `null` skips that column. */
 export type Mapping = (string | null)[];
@@ -116,4 +116,42 @@ export function buildRequest(o: BuildOptions): Built {
     blankRows,
     sourceRows,
   };
+}
+
+/**
+ * The line of the pasted block a report points at as "the other row" of a duplicate, counted
+ * the way the preview's Row column counts (from 1, a header row and empty rows included).
+ */
+export function otherLine(report: PasteRowReport, sourceRows: number[]): number | null {
+  const source = report.other === null ? undefined : sourceRows[report.other];
+  return source === undefined ? null : source + 1;
+}
+
+/** A pasted row that cannot be run as it is. One such row blocks the run unless it is skipped. */
+export function isProblem(status: PasteRowStatus): boolean {
+  return status === "missing_key" || status === "duplicate" || status === "exists" || status === "invalid";
+}
+
+/**
+ * The pasted rows that have a problem, as they were pasted (unmapped columns included), ready
+ * to go back to a spreadsheet. When the paste has a header row it is kept and a last column
+ * says what is wrong with each row; without one the rows are returned as they were, so that
+ * pasting them here again maps the same columns.
+ */
+export function problemTable(o: {
+  matrix: string[][];
+  hasHeaders: boolean;
+  /** `Built.sourceRows`: the pasted row behind each analysed row. */
+  sourceRows: number[];
+  reports: PasteRowReport[];
+  reasonHeader: string;
+  reason: (report: PasteRowReport) => string;
+}): string[][] {
+  const out: string[][] = o.hasHeaders ? [[...(o.matrix[0] ?? []), o.reasonHeader]] : [];
+  o.reports.forEach((report, i) => {
+    if (!isProblem(report.status)) return;
+    const source = o.matrix[o.sourceRows[i] ?? -1] ?? [];
+    out.push(o.hasHeaders ? [...source, o.reason(report)] : [...source]);
+  });
+  return out;
 }

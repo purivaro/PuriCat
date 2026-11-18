@@ -60,6 +60,205 @@ fn cell(page: &puricat_core::db::RowPage, row: usize, column: &str) -> Option<St
     page.rows[row][c].clone()
 }
 
+/// The `name` cells of the rows a filter leaves, in primary-key order.
+async fn names(
+    session: &Session,
+    table: &TableRef,
+    filters: serde_json::Value,
+) -> Result<Vec<String>, Error> {
+    let req: PageRequest = serde_json::from_value(serde_json::json!({
+        "offset": 0, "limit": 100, "filters": filters,
+    }))
+    .unwrap();
+    let p = session.fetch_rows(table, &req).await?;
+    Ok((0..p.rows.len())
+        .map(|r| cell(&p, r, "name").unwrap())
+        .collect())
+}
+
+/// Filters on the three `items` rows, which hold the same values on both engines.
+async fn filter_checks(session: &Session, items: &TableRef) {
+    use serde_json::json;
+    let one =
+        |column: &str, op: &str, value: &str| json!([{"column": column, "op": op, "value": value}]);
+    let is = |column: &str, op: &str| json!([{"column": column, "op": op}]);
+    macro_rules! leaves {
+        ($filters:expr, $expected:expr) => {
+            let filters = $filters;
+            let expected: &[&str] = &$expected;
+            assert_eq!(
+                names(session, items, filters.clone()).await.unwrap(),
+                expected,
+                "{filters}"
+            );
+        };
+    }
+
+    // Typed comparisons: exact on 64-bit integers and decimals, whatever the spelling.
+    leaves!(one("id", "equals", "2"), ["second"]);
+    leaves!(one("big", "equals", "9007199254740993"), [THAI]);
+    leaves!(one("big", "equals", "9007199254740992"), []);
+    leaves!(one("price", "equals", "0.5"), ["third"]);
+    leaves!(one("price", "equals", ".50"), ["third"]);
+    leaves!(one("price", "greater", "1"), [THAI]);
+    leaves!(one("price", "lessOrEqual", "0.5"), ["third"]);
+    leaves!(one("created", "greaterOrEqual", "2026-01-01"), [THAI]);
+    leaves!(one("name", "equals", "second"), ["second"]);
+    // "Is not" keeps the rows that hold NULL.
+    leaves!(one("price", "notEquals", "0.5"), [THAI, "second"]);
+    leaves!(one("note", "notContains", "sho"), [THAI, "second"]);
+
+    // Text search: case-insensitive, on the text the grid shows, wildcards taken literally.
+    leaves!(one("name", "contains", "ECON"), ["second"]);
+    leaves!(one("name", "contains", "'quote'"), [THAI]);
+    leaves!(one("name", "contains", "โลก"), [THAI]);
+    leaves!(one("name", "contains", "%"), []);
+    leaves!(one("name", "contains", "_"), []);
+    leaves!(one("name", "startsWith", "th"), ["third"]);
+    leaves!(one("name", "endsWith", "d"), ["second", "third"]);
+    leaves!(one("created", "contains", "2026-01"), [THAI]);
+    leaves!(one("big", "startsWith", "-"), ["third"]);
+    leaves!(one("doc", "contains", "\"a\""), [THAI]);
+    leaves!(one("doc", "equals", "{\"a\": 1}"), [THAI]);
+
+    // NULL tests, also on a binary column.
+    leaves!(is("doc", "isNull"), ["second", "third"]);
+    leaves!(is("payload", "isNotNull"), [THAI, "third"]);
+
+    // Several conditions must all hold; paging and sorting apply to what is left.
+    leaves!(
+        json!([{"column": "price", "op": "isNotNull"}, {"column": "note", "op": "equals", "value": "short"}]),
+        ["third"]
+    );
+    let req: PageRequest = serde_json::from_value(json!({
+        "offset": 0, "limit": 1,
+        "sort": {"column": "name", "descending": true},
+        "filters": is("created", "isNull"),
+    }))
+    .unwrap();
+    let p = session.fetch_rows(items, &req).await.unwrap();
+    assert!(p.has_more && p.rows.len() == 1);
+    assert_eq!(cell(&p, 0, "name").as_deref(), Some("third"));
+
+    // Refused before anything is sent.
+    for filters in [
+        one("nope", "equals", "1"),
+        one("payload", "equals", "00"),
+        one("payload", "contains", "00"),
+        one("doc", "greater", "1"),
+        is("id", "equals"),
+    ] {
+        assert!(
+            matches!(
+                names(session, items, filters.clone()).await,
+                Err(Error::Invalid(_))
+            ),
+            "{filters}"
+        );
+    }
+    // A value the column's type cannot hold is an error, never a silent match on 0.
+    assert!(names(session, items, one("id", "equals", "abc"))
+        .await
+        .is_err());
+    assert!(names(session, items, one("created", "equals", "garbage"))
+        .await
+        .is_err());
+}
+
+/// The exact count: of the table, and of the rows a filter leaves.
+async fn count_checks(session: &Session, items: &TableRef) {
+    use serde_json::json;
+    let idle = std::sync::atomic::AtomicBool::new(false);
+    let count = |filters: serde_json::Value| {
+        let idle = &idle;
+        async move {
+            let filters: Vec<puricat_core::db::filter::Filter> =
+                serde_json::from_value(filters).unwrap();
+            session.count_rows(items, &filters, idle).await
+        }
+    };
+    let all = names(session, items, json!([])).await.unwrap().len() as u64;
+    assert_eq!(count(json!([])).await.unwrap().count, all);
+    let big = json!([{"column": "big", "op": "equals", "value": "9007199254740993"}]);
+    assert_eq!(count(big).await.unwrap().count, 1);
+    let none = json!([{"column": "id", "op": "less", "value": "0"}]);
+    assert_eq!(count(none).await.unwrap().count, 0);
+    // The same refusals as a page: a value the column cannot hold, an unknown table.
+    let bad = json!([{"column": "id", "op": "equals", "value": "abc"}]);
+    assert!(count(bad).await.is_err());
+    let missing = TableRef {
+        name: "no_such_table".into(),
+        ..items.clone()
+    };
+    assert!(matches!(
+        session.count_rows(&missing, &[], &idle).await,
+        Err(Error::NotFound(_))
+    ));
+}
+
+/// A count that cannot finish (the caller made sure of that) is stopped on the server and
+/// reported as cancelled, promptly.
+async fn count_is_stopped(session: &Session, items: &TableRef) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let later = stop.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        later.store(true, Ordering::Relaxed);
+    });
+    let started = std::time::Instant::now();
+    let outcome = session.count_rows(items, &[], &stop).await;
+    assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// One cell read in full, by the row's primary key: what a page shows shortened.
+async fn full_cell_checks(session: &Session, items: &TableRef, keyless: &TableRef) {
+    let key = |id: &str| -> Vec<puricat_core::db::write::CellValue> {
+        serde_json::from_value(serde_json::json!([{"column": "id", "value": id}])).unwrap()
+    };
+    // The page cut this text at 1000 characters; here it is whole, multi-byte and all.
+    let note = session.fetch_cell(items, &key("1"), "note").await.unwrap();
+    assert_eq!(note.value.as_deref(), Some("ก".repeat(1500).as_str()));
+    assert!(!note.cut);
+    // Binary: every byte, as hex.
+    let payload = session
+        .fetch_cell(items, &key("1"), "payload")
+        .await
+        .unwrap();
+    assert!(payload
+        .value
+        .unwrap()
+        .eq_ignore_ascii_case(&format!("0x{}", "ab".repeat(30))));
+    // NULL stays NULL; a short value is itself.
+    let null = session.fetch_cell(items, &key("2"), "note").await.unwrap();
+    assert_eq!((null.value, null.cut), (None, false));
+    let short = session.fetch_cell(items, &key("3"), "note").await.unwrap();
+    assert_eq!(short.value.as_deref(), Some("short"));
+
+    // A row that is gone, an unknown column, an incomplete key, a table without a key.
+    assert!(matches!(
+        session.fetch_cell(items, &key("999"), "note").await,
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        session.fetch_cell(items, &key("1"), "nope").await,
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        session.fetch_cell(items, &[], "note").await,
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        session.fetch_cell(keyless, &[], "v").await,
+        Err(Error::Unsupported(_))
+    ));
+}
+
 const THAI: &str = "สวัสดี \"โลก\"\tแท็บ 'quote'";
 
 // ---- MySQL ---------------------------------------------------------------------------
@@ -264,6 +463,33 @@ async fn mysql_body(t: Target, db: String) {
         Err(Error::NotFound(_))
     ));
 
+    filter_checks(&session, &items).await;
+    count_checks(&session, &items).await;
+    admin.execute("LOCK TABLES items WRITE").await.unwrap();
+    count_is_stopped(&session, &items).await;
+    admin.execute("UNLOCK TABLES").await.unwrap();
+    // MySQL only: the grid shows 1 and 0 for TINYINT(1) and a number for BIT.
+    assert_eq!(
+        names(
+            &session,
+            &items,
+            serde_json::json!([{"column": "flag", "op": "equals", "value": "1"}])
+        )
+        .await
+        .unwrap(),
+        [THAI]
+    );
+    assert_eq!(
+        names(
+            &session,
+            &items,
+            serde_json::json!([{"column": "bits", "op": "equals", "value": "5"}])
+        )
+        .await
+        .unwrap(),
+        [THAI]
+    );
+
     // The session keeps the server's time zone and SQL dialect; only strict mode is added.
     // (Read through PuriCat's own session, from MySQL's variable tables.)
     let mut variables = std::collections::HashMap::new();
@@ -319,6 +545,7 @@ async fn mysql_body(t: Target, db: String) {
         name: "odd `name".into(),
         ..items.clone()
     };
+    full_cell_checks(&session, &items, &odd).await;
     let p = session.fetch_rows(&odd, &page(0, 10, None)).await.unwrap();
     assert_eq!(cell(&p, 0, "v").as_deref(), Some("7"));
     assert!(p.ordered_by.is_empty(), "keyless table has no stable order");
@@ -521,6 +748,60 @@ async fn postgres_body(t: Target, db: String) {
         Err(Error::Invalid(_))
     ));
 
+    filter_checks(&session, &items).await;
+    count_checks(&session, &items).await;
+    // A count that would never end. (Not a lock on the table: reading the table's
+    // structure, which comes first and cannot be interrupted, would wait for that lock.)
+    admin
+        .execute(
+            "CREATE VIEW shop.endless AS
+             WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c",
+        )
+        .await
+        .unwrap();
+    let endless = TableRef {
+        name: "endless".into(),
+        ..items.clone()
+    };
+    count_is_stopped(&session, &endless).await;
+    admin.execute("DROP VIEW shop.endless").await.unwrap();
+    // PostgreSQL only: equality on text is case-sensitive, and types of its own
+    // (uuid, enum, array) are compared as the text the grid shows.
+    for (column, op, value, expected) in [
+        ("name", "equals", "Second", vec![]),
+        ("flag", "equals", "true", vec![THAI]),
+        (
+            "uid",
+            "equals",
+            "6f1c1c9e-0b0f-4c4e-9a52-0d6b7c0a1f11",
+            vec![THAI],
+        ),
+        ("state", "equals", "busy", vec!["third"]),
+        ("state", "notEquals", "busy", vec![THAI, "second"]),
+        ("tags", "contains", "y z", vec![THAI]),
+    ] {
+        assert_eq!(
+            names(
+                &session,
+                &items,
+                serde_json::json!([{"column": column, "op": op, "value": value}])
+            )
+            .await
+            .unwrap(),
+            expected,
+            "{column} {op} {value}"
+        );
+    }
+    assert!(matches!(
+        names(
+            &session,
+            &items,
+            serde_json::json!([{"column": "state", "op": "greater", "value": "a"}])
+        )
+        .await,
+        Err(Error::Invalid(_))
+    ));
+
     let pairs = TableRef {
         name: "pairs".into(),
         ..items.clone()
@@ -533,6 +814,7 @@ async fn postgres_body(t: Target, db: String) {
         name: "Odd \"Name".into(),
         ..items.clone()
     };
+    full_cell_checks(&session, &items, &odd).await;
     let p = session.fetch_rows(&odd, &page(0, 10, None)).await.unwrap();
     assert_eq!(cell(&p, 0, "v").as_deref(), Some("7"));
     assert!(p.ordered_by.is_empty());

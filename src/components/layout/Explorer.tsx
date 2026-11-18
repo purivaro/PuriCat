@@ -26,6 +26,7 @@ import { toast } from "sonner";
 
 import { clipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
+import { fullPlace } from "../../lib/connection";
 import { errorMessage } from "../../lib/ipc";
 import type { ConnectionView, DbObject, Namespace } from "../../lib/types";
 import { type Loadable, nodeKey, sessionOf, useConnections } from "../../stores/connections";
@@ -413,7 +414,7 @@ function ConnectionNode({ connection, query }: { connection: ConnectionView; que
       <Row
         depth={0}
         expanded={open}
-        title={`${connection.username}@${connection.host}:${connection.port}`}
+        title={fullPlace(connection)}
         icon={<EngineTag engine={connection.engine} className="size-4 rounded text-[9px]" />}
         label={<span className="font-medium">{connection.name}</span>}
         trailing={
@@ -522,7 +523,7 @@ export function Explorer() {
     if (!query) return connections.map((c) => ({ connection: c, childQuery: "" }));
     const out: { connection: ConnectionView; childQuery: string }[] = [];
     for (const c of connections) {
-      const own = [c.name, c.host, ...c.tags].some((v) => lower(v).includes(query));
+      const own = [c.name, c.host, c.file ?? "", ...c.tags].some((v) => lower(v).includes(query));
       const prefix = JSON.stringify([c.id]).slice(0, -1);
       const below = [objects, databases, schemas].some((record) =>
         Object.entries(record).some(

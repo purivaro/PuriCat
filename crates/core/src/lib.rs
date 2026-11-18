@@ -12,5 +12,6 @@ pub mod mcp;
 pub mod model;
 pub mod secrets;
 pub mod store;
+pub mod table_file;
 
 pub use error::{Error, Result};

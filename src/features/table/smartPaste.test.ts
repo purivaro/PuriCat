@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { ColumnMeta, UniqueKey } from "../../lib/types";
-import { autoMap, buildRequest, columnLetter, looksLikeHeaders, updatableColumns, usableKeys } from "./smartPaste";
+import type { ColumnMeta, PasteRowReport, UniqueKey } from "../../lib/types";
+import { autoMap, buildRequest, columnLetter, isProblem, looksLikeHeaders, otherLine, problemTable, updatableColumns, usableKeys } from "./smartPaste";
 
 const col = (name: string, over: Partial<ColumnMeta> = {}): ColumnMeta => ({
   name,
@@ -101,5 +101,43 @@ describe("buildRequest", () => {
     const built = buildRequest({ ...base, hasHeaders: false, mode: "insert", key: [], update: [] });
     expect(built.request.rows).toHaveLength(4);
     expect(built.request.rows[0]).toEqual(["order_no", "total", "status"]);
+  });
+});
+
+describe("problemTable", () => {
+  const matrix = [
+    ["order_no", "note", "total"],
+    ["SO-1", "fine", "10"],
+    ["", "", ""],
+    ["SO-2", "kept as pasted", "many"],
+    ["SO-2", "again", "3"],
+  ];
+  // The empty row was left out of the request: analysed row 1 is pasted row 3.
+  const sourceRows = [1, 3, 4];
+  const reports: PasteRowReport[] = [
+    { status: "insert", message: null, changed: [], other: null },
+    { status: "invalid", message: "total: “many” is not a number", changed: [], other: null },
+    { status: "duplicate", message: "Same key as another pasted row", changed: [], other: 1 },
+  ];
+  const reason = (r: PasteRowReport) => [r.status, r.message, otherLine(r, sourceRows)].filter((x) => x !== null).join(": ");
+
+  it("tells problems from the rows that are merely left alone", () => {
+    expect((["missing_key", "duplicate", "exists", "invalid"] as const).every(isProblem)).toBe(true);
+    expect((["insert", "update", "unchanged", "unmatched"] as const).some(isProblem)).toBe(false);
+  });
+
+  it("returns the rows as pasted, unmapped columns included, with the header and a reason", () => {
+    expect(problemTable({ matrix, hasHeaders: true, sourceRows, reports, reasonHeader: "Problem", reason })).toEqual([
+      ["order_no", "note", "total", "Problem"],
+      ["SO-2", "kept as pasted", "many", "invalid: total: “many” is not a number"],
+      // The other row is named by its line in the pasted block (header and empty row counted).
+      ["SO-2", "again", "3", "duplicate: Same key as another pasted row: 4"],
+    ]);
+  });
+
+  it("adds no column to a paste without headers, where columns are mapped by position", () => {
+    const rows = matrix.slice(1);
+    const table = problemTable({ matrix: rows, hasHeaders: false, sourceRows: [0, 2, 3], reports, reasonHeader: "Problem", reason });
+    expect(table).toEqual([rows[2], rows[3]]);
   });
 });

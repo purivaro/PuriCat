@@ -1,6 +1,6 @@
 # Database compatibility
 
-Status on 2026-11-16. Labels: **Implemented & verified** (a test against a real server passed), **Implemented, not yet verified**, **Planned (Phase N)**.
+Status on 2026-11-18. Labels: **Implemented & verified** (a test against a real server passed), **Implemented, not yet verified**, **Planned (Phase N)**.
 
 ## Tested versions
 
@@ -8,11 +8,14 @@ Status on 2026-11-16. Labels: **Implemented & verified** (a test against a real 
 |---|---|---|
 | MySQL | 9.3.0 (local) | Untested, including 8.x, 5.7 and MariaDB |
 | PostgreSQL | 16.13 (local) | Untested |
+| SQLite | 3.46.0 (the library compiled into the app); files made by that same library | Files written by other versions or other programs: untested |
 | SQL Server | — | No adapter |
 
-Only these two versions have been exercised. Nothing is claimed for older, newer or compatible-protocol servers (MariaDB, Aurora, CockroachDB and similar).
+Only these versions have been exercised. Nothing is claimed for older, newer or compatible-protocol servers (MariaDB, Aurora, CockroachDB and similar).
 
 ## Feature matrix
+
+SQLite has its own section, "SQLite — a database file", further down: what applies to a file differs enough from a server that one more column here would mislead.
 
 | Feature | MySQL | PostgreSQL | SQL Server |
 |---|---|---|---|
@@ -31,8 +34,11 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 | Describe table (columns, types, defaults, primary key, generated flag) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Browse rows: page, sort | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Browse rows of a view | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
+| Filter rows by conditions on columns (see "Row filter") | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Composite primary keys, names needing quotes | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
-| Keyset pagination, exact row count, cell inspector | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
+| One cell read whole, by the row's primary key (a value the page shows shortened) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
+| Exact row count, asked for by the user and stoppable (of the table, or of the rows a filter leaves) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
+| Keyset pagination | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Cancellation of browse and catalogue queries; reconnect of the pooled session | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Edit rows of a table with a primary key (UPDATE by complete key) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
 | Insert rows (omitted columns take server defaults) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
@@ -73,11 +79,11 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 
 Reported by each adapter so the UI asks instead of guessing from the engine name.
 
-| Flag | MySQL | PostgreSQL | Meaning |
-|---|---|---|---|
-| `schemas` | false | true | Objects live in schemas inside a database |
-| `transactionalDdl` | false | true | DDL can be rolled back |
-| `returning` | false | true | `INSERT/UPDATE/DELETE ... RETURNING` is available |
+| Flag | MySQL | PostgreSQL | SQLite | Meaning |
+|---|---|---|---|---|
+| `schemas` | false | true | false | Objects live in schemas inside a database |
+| `transactionalDdl` | false | true | true | DDL can be rolled back |
+| `returning` | false | true | true | `INSERT/UPDATE/DELETE ... RETURNING` is available |
 
 Only `schemas` affects behaviour today. The write path does not use `returning` or `transactionalDdl` yet: after a save the grid reloads the page instead of reading returned rows. The SQL console does not consult them either; it branches on the engine.
 
@@ -117,7 +123,7 @@ Notes for both engines:
 
 - NULL is transported separately from text, so NULL and the empty string are distinct in the grid.
 - Temporal values are shown in the session's time zone and format. MySQL sessions keep the server's time zone (verified). PostgreSQL sessions always run in UTC, whatever the server or role default is (see known limitations).
-- Truncated cells are flagged. The full value cannot be viewed or edited yet.
+- Truncated cells are flagged. "View whole value" (or a double-click) fetches the whole value by the row's primary key with the same rendering as the page: up to 1,000,000 characters of text, or the first 65,536 bytes of a binary value in hex. A longer value is shown up to that point and cannot be edited there. Without a primary key, or when a key value is NULL or itself shortened, only the preview is available.
 
 ### Query results (SQL console)
 
@@ -139,6 +145,27 @@ The tables above describe the browse path, where PuriCat writes the `SELECT`. In
 - Nothing is cut on the server. The backend keeps full values; the grid shows the first 1,000 characters of a long cell and flags it; an export has the whole value (verified with a 1,500-character Thai value).
 - A column's kind (number, text, temporal, binary, JSON, bool) is derived from the driver's type name. It decides alignment in the grid, which values are shown as hex, and which XLSX cells may become numbers. The name is matched by substring; `INTERVAL` is temporal and `POINT` is text although both contain "int" (unit-tested). Other type names that happen to contain a matched word are not checked one by one.
 - A query that returns no rows still shows its column names (verified on both engines).
+
+## Row filter
+
+A table tab can be narrowed with conditions on its columns; all of them must hold. The conditions become one `WHERE` clause in the page query. Every value is a bind parameter, and a column name must exist in the table's metadata before it is quoted (`db::filter`).
+
+| Condition | MySQL | PostgreSQL |
+|---|---|---|
+| `=`, `≠`, `>`, `≥`, `<`, `≤` on a number, boolean, date / time or text column | The column against the typed value: `CAST(? AS SIGNED / UNSIGNED)` for integers, `CAST(? AS DECIMAL(65,30))` for decimals, the bare parameter otherwise. Text follows the column's collation, so it usually ignores case | The column against `$n::<bare type>`. Text is case-sensitive |
+| The same on a `FLOAT` column | `=` and `≠` compare the text the grid shows (a `FLOAT` widened to double never equals the double parsed from the same digits); the ordering comparisons are typed | Typed, as above |
+| `=`, `≠` on JSON and other types (uuid, enum, array, …) | JSON: the text the grid shows, `CAST(col AS CHAR)`. Spatial columns: refused (NULL tests only) — the grid shows their WKT text, the column itself is binary | The text the grid shows: `col::text` |
+| `>`, `≥`, `<`, `≤` on those types | Refused | Refused |
+| contains, does not contain, starts with, ends with | `LIKE … ESCAPE '!'` on a text column itself (its own collation), on `CAST(col AS CHAR)` otherwise; refused on spatial columns | `ILIKE … ESCAPE '!'` on a text column itself, on `col::text` otherwise: always case-insensitive |
+| is NULL, is not NULL | Any column, including binary | Any column, including binary |
+| Anything else on a binary column | Refused | Refused |
+
+- `%`, `_` and `!` in a search text are taken literally.
+- "≠" and "does not contain" keep the rows whose value is NULL (`NOT (a <=> b)` on MySQL, `IS DISTINCT FROM` on PostgreSQL, `… OR col IS NULL` for the text search). A person reading the grid sees an empty cell as "not X".
+- **A value the column cannot hold is an error, never a silent result.** PostgreSQL refuses the cast itself and its message is shown. MySQL would read text that is not a number as `0` (and show the rows holding 0) and text that is not a date as NULL (and show no rows), each with only a warning, so PuriCat checks these itself before sending anything: a number must look like one, and a date or time must be complete (`2026-01-31`, `2026-01-31 13:45:00`, `13:45:00`). To find part of a date, use "starts with" or "contains".
+- Filters do not use an index when they compare the shown text (JSON, uuid, enum, the text searches on non-text columns). On a large table an equality filter on a `uuid` column scans the table.
+- At most 20 conditions. They are joined with AND only; there is no OR, no list of values and no free `WHERE` text. Use a query tab for those.
+- Sorting and paging apply to the rows that are left. The row estimate in the footer is still the whole table's. The number of matching rows is counted when asked for ("Count matches"): `SELECT COUNT(*)` with the same `WHERE` clause and parameters as the page, on a connection of its own so that it can be interrupted (`KILL QUERY` on MySQL, `pg_cancel_backend` on PostgreSQL, the connection's own stop flag on SQLite). Reading the table's structure comes first and cannot be interrupted: if the table is locked exclusively by another session, the count waits there, as a page does.
 
 ## Writing values
 
@@ -195,7 +222,7 @@ Design and alternatives: [ADR 0014](docs/adr/0014-smart-paste-match-then-write.m
 
 Behaviour common to both engines:
 
-- **Modes.** INSERT adds every row; with a key chosen, rows whose key already exists are reported ("exists") and block the run. UPDATE changes rows that exist; rows without a match are reported and skipped, never inserted. UPSERT changes rows that exist and inserts the rest.
+- **Modes.** INSERT adds every row; with a key chosen, rows whose key already exists are reported ("exists") and block the run, unless the rows with problems are left out (below). UPDATE changes rows that exist; rows without a match are reported and skipped, never inserted. UPSERT changes rows that exist and inserts the rest.
 - **Generated key in UPSERT mode.** A blank key means "new row" (the server assigns the key). A key that is not found is reported as "no match" and skipped; it is not inserted under a different id.
 - **Generated key in INSERT mode.** A blank key inserts. A key that is not found is an invalid row ("assigned by the server and cannot be set; leave it empty"), for the same reason (live-tested on both engines).
 - **Update columns.** Chosen per column; key columns are never updated. Only columns whose pasted text differs from the stored text are written.
@@ -207,15 +234,33 @@ Smart Paste limitations:
 
 | Limitation | Detail |
 |---|---|
-| "Update" is a text comparison | A row is counted as an update when the pasted text differs from the server's text rendering of the stored value. `1.5` against a stored `1.500000` is counted and run as an update that stores the same number. Value-aware comparison is Planned (Phase 3) |
+| "Unchanged" is decided on this side | A column is unchanged when the pasted text equals the server's text rendering of the stored value, or is plainly the same value in another spelling: a number in another spelling (`1.5`, `01.50`, `+1.5` against a stored `1.500000`; whole-number spellings only for an integer column), a date or time in another spelling for the types without a time zone (`2026-1-5 9:05`, a `T` between date and time, trailing zeros of the fraction, a date alone against midnight), and on PostgreSQL the spellings of a boolean (`TRUE`, `t`, `yes`, `1`). Whatever is not plainly one of these is compared as text and counts as a change — a number with an exponent (`1.5e0`), text with spaces around it, `money` and `bit` columns, types with a time zone, JSON, uuid, text columns (case, trailing spaces) — and is then run as an update that stores the same value. A value the column would round or cut (`10.004` into two decimals, a time of day into a date) is a change every time it is pasted |
 | One transaction, not batches | A run is a single transaction of single-row statements. This keeps a paste atomic but holds locks for its whole duration. Multi-batch and streamed imports are Planned (Phase 4) |
 | 10,000 pasted rows per run | Larger sources are refused. Lookups cost one query per 40 rows and each written row is one statement; duration near the limit, or on a remote server, has not been measured |
-| Problems block the whole run | There is no "skip invalid rows" option yet (Planned, Phase 3). The source has to be fixed and read again |
+| Problems block the whole run unless they are left out | A row with a problem (no key, a key used twice, a key that already exists in INSERT mode, a value that fails a pre-check) is never written. By default one such row blocks the run; "Leave these rows out and run the other N" in the preview runs the rest in the same single transaction. Both of two pasted rows with one key are left out, not the second only. What the pre-checks do not catch is still judged by the server during the run, and such a refusal rolls the whole run back: that row is not left out |
 | Empty cells in text columns | The wizard sends an empty cell as NULL for a key column and for every non-text column, and as an empty string for a text column. A NOT NULL text column with a default therefore stores an empty string, not the default: to get the default, leave the column unmapped, or paste the text `NULL` with the "Read the text NULL" option on. An empty cell of a NOT NULL non-text column takes the default only on an inserted row; without a default ("is required"), or on a row that would be updated ("cannot be empty"), the row is reported as invalid |
 | Key values of non-integer types | Integer keys must be whole numbers; other key columns get only the number-shape and declared-length checks. A key value of a type the database coerces in another way (a date, for example) is cast and compared by the server: PostgreSQL would reject a malformed one and fail the preview with the server's error instead of flagging the row; MySQL's behaviour is unknown. Not tested on either engine |
 | Tables without a primary key | Smart Paste is offered only where the grid is editable, so a table that has a unique index but no primary key has no entry point in the UI, although the backend could match on that index |
 | Composite keys | Matching is verified in the backend on both engines (live test: update, a different day unmatched, a NULL part of the key reported as a missing key, applied and read back). Not verified through the UI |
 | Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. Through the UI only UPSERT on MySQL has been run |
+
+### From a file
+
+"Open a file…" in the wizard puts the rows of a file where the clipboard's would be. What the wizard then does with them is unchanged, and independent of the engine; what differs from a copied block is how the cells become text.
+
+| Source | How a cell becomes text |
+|---|---|
+| CSV / TSV text (`.csv`, `.tsv`, `.tab`, `.txt`) | Exactly the characters in the file: nothing is trimmed or reinterpreted, `007` stays `007`. Quoted fields may hold the separator, quotes and line breaks. Empty lines are skipped |
+| Encoding | UTF-8, or UTF-16 with a byte-order mark. Anything else is refused until its encoding is chosen (Thai Windows-874, Windows-1252, Windows-1251, Shift_JIS, GBK, Big5, EUC-KR, UTF-16 without a mark); bytes the chosen encoding has no character for are an error, not `�` |
+| Separator | A `.tsv` or `.tab` file is tab-separated. Otherwise the one of comma, semicolon, tab and vertical bar that occurs most in the first ten lines, outside quotes; it can be chosen instead |
+| Workbook (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`) | One sheet, the first unless another is chosen; its used range, without the empty rows below the data |
+| Workbook: number | The stored value, not its format: `0.5` for a cell shown as `50%`, no thousands separators or currency signs. Whole numbers without a fraction; at most 15 significant digits, as Excel itself writes them, so `0.1 + 0.2` is `0.3`. **A workbook number is a double: a whole number beyond 2^53 (16 digits and more) is not exact in the file itself.** Long identifiers must be text cells, or come from CSV, where every character is kept |
+| Workbook: date, time | `2026-01-31`, `2026-01-31 13:45:07`, `13:45:00` (a value below one day is a time of day); a duration as `hh:mm:ss`. No time zone: a workbook has none |
+| Workbook: boolean, formula, error | `TRUE` / `FALSE` (what the cell shows; MySQL's `TINYINT(1)` wants `1` / `0`, so the pre-check flags it); a formula's stored result; an error cell as its text, such as `#N/A` |
+
+- **NULL and empty are the same in a file.** Neither CSV nor a workbook can say NULL. As with a pasted block, an empty cell becomes NULL in a nullable column that is not text and the empty string in a text column; "Read the text NULL as an empty (NULL) value" covers files that spell it out. A table exported with NULLs in text columns therefore comes back with empty strings there, and the preview shows those rows as updates.
+- At most 64 MB and 10,000 data rows (the limit of one run). A longer file is refused whole, with its row count; nothing is cut silently.
+- Verified with files written by PuriCat's own exporter and by `rust_xlsxwriter`. Workbooks saved by Excel, Numbers or LibreOffice, and the `.xls`, `.xlsb` and `.ods` formats, have not been tried.
 
 ## SQL console
 
@@ -281,7 +326,7 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | **PostgreSQL sessions always use `TimeZone=UTC`** | sqlx 0.8 sends `TimeZone=UTC` at connection start-up, overriding the server and role default. Consequences: `timestamptz` values are displayed in UTC with an explicit `+00` offset (unambiguous, but not the local time other clients show); a `timestamptz` typed without an offset is interpreted as UTC; and `now()`-based defaults of `timestamp without time zone` columns are computed in UTC rather than in the server's configured zone, including for rows inserted through the grid. Not fixed. A per-connection session time zone is Planned (Phase 2b). MySQL is not affected: its sessions keep the server's time zone |
 | DELETE checks the key only | A row that was changed elsewhere after it was loaded, but still exists, is deleted without a conflict. Only an already-deleted row is detected |
 | Concurrency check covers edited columns only | A concurrent change to a column the user did not edit is neither detected nor overwritten |
-| Truncated and binary cells are not editable | A cell cut to the preview length (1000 characters) cannot be edited because its full original value is unknown; binary and MySQL spatial columns are never editable. There is no full-value editor yet (Phase 3) |
+| Binary cells, and some shortened cells, are not editable | A cell cut to the preview length (1000 characters) is edited in the whole-value dialog, which first fetches its complete original. That needs the row's primary key: in a table without one, or beyond 1,000,000 characters, the cell stays read-only. Binary and MySQL spatial columns are never editable |
 | Rows with a NULL or truncated key value are not editable | The row cannot be addressed safely |
 | Keyless tables are read-only in the UI | The backend refuses UPDATE and DELETE on a table without a primary key and would allow INSERT, but the UI keeps such tables fully read-only for now. Unique keys are not used as a substitute in the grid, and Smart Paste is not offered on such tables either |
 | Views and materialized views are read-only | Even where the engine would allow an updatable view |
@@ -304,6 +349,92 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | Read-only connections and the SQL console | The read-only option is a session setting. The grid and Smart Paste never send SQL that could change it; a query tab runs what the user types, including a statement that switches the session back to read-write (see "SQL console") |
 | Permissions | Catalogue queries assume read access to `information_schema` / `pg_catalog`. Behaviour under restricted accounts is untested |
 | Large tables | No performance measurements exist |
+
+## SQLite — a database file
+
+Added on 2026-11-18 ([ADR 0018](docs/adr/0018-sqlite-files.md)). A connection is the path of an existing file; there is no server, user or password. The file's one database is called `main`.
+
+**What was tested:** files made by the same SQLite library the app carries (3.46.0), in the default rollback-journal mode and in WAL mode, by the tests in `crates/core/tests/sqlite.rs` and by the end-to-end test. **Not tested:** files written by other programs or other SQLite versions (iOS and Android apps, Django, browsers), a file another program is writing to at the same moment (beyond a held lock, which is tested), very large files, virtual tables (FTS and the like), an encrypted (SQLCipher) file, Windows paths, the native Open dialog.
+
+| Feature | SQLite |
+|---|---|
+| Open an existing file; a path that does not exist, a folder, or a file that is not a database is refused in plain words, and no file is created | Implemented & verified |
+| Read-only connection: the file is opened so that the handle cannot write (`SQLITE_OPEN_READONLY`); the default for a new SQLite connection | Implemented & verified (grid, console, `PRAGMA`, DDL all refused; the file's bytes unchanged) |
+| List tables and views (SQLite's own `sqlite_…` tables left out) | Implemented & verified |
+| Describe: columns, declared types, defaults, NOT NULL, composite keys in key order, generated columns, `WITHOUT ROWID`, `STRICT` | Implemented & verified |
+| Browse rows: page, sort; a view | Implemented & verified |
+| Filter rows | Implemented & verified (every operator) |
+| One cell read whole | Implemented & verified |
+| Edit, insert, delete rows of a table with a primary key, in one transaction, with the optimistic check | Implemented & verified |
+| Smart Paste: INSERT, UPDATE, UPSERT matched on the primary key or a unique index | Implemented & verified |
+| SQL console: scripts, impact guard, row cap, Stop, the user's own transaction, triggers | Implemented & verified |
+| The AI's tools: catalogue, a reading query on a handle that cannot write, proposals | Implemented & verified in the backend; not run through the chat panel |
+| Estimated row count | Not available: SQLite keeps none |
+| Exact row count, asked for and stoppable | Implemented & verified in the backend; not through the UI |
+| Tables without a primary key | Read-only in the grid (rows can be added), as on the other engines. The row id is not offered as a key |
+| Create a database file; attached databases; encrypted databases | Not built |
+
+### Types: a declared type is a suggestion
+
+SQLite gives a column an *affinity* from its declared type and lets any value into any column, unless the table is `STRICT`. PuriCat reads two things from the declared type:
+
+| Declared type contains | Affinity (SQLite's rule, in this order) | Shown and compared as |
+|---|---|---|
+| `INT` | INTEGER | Number |
+| `CHAR`, `CLOB`, `TEXT` | TEXT | Text |
+| `BLOB` | BLOB | Binary: `0x` and hex, the first 24 bytes in the grid; not editable; filtered on NULL only |
+| `REAL`, `FLOA`, `DOUB` | REAL | Number |
+| anything else | NUMERIC | By name: `NUMERIC`, `DECIMAL`, `DEC`, `NUMBER` → number; `BOOL…` → boolean; `DATE…`, `TIME…` → date/time; `JSON` → JSON; any other name (`UUID`, `STRING`, …) → "other" |
+| nothing (no declared type), or `ANY` in a `STRICT` table | none | "Other"; **shown, not edited** (see below) |
+
+- **Integers are exact**, to the last digit of a 64-bit value, in the grid, in filters, in keys and in the console.
+- **A REAL is shown as SQLite converts it to text: 15 significant digits** (`0.1`, `1.0e+20`). Two different stored values can therefore look the same; the optimistic check compares what is shown.
+- **SQLite has no exact decimal type.** A `DECIMAL(10,2)` column stores an integer or a floating-point number. `12.50` is stored and shown as `12.5`.
+- **Dates and times are text** (or numbers, if the application stores them so). They are shown as stored and compared as text: `2026-01-31` sorts before `2026-02-01`, and "starts with `2026-01`" finds January. Nothing validates them.
+- **Booleans** are whatever is stored, usually `1` and `0`.
+- **JSON** is text; the whole-value dialog lays it out for reading. A column holding SQLite's binary JSONB format has not been tested.
+- A declared length (`VARCHAR(20)`) is not enforced by SQLite, and PuriCat does not enforce it either.
+- A value that is not what its column's kind says (text in an `INTEGER` column, a BLOB in a `TEXT` column) is shown as text; bytes that are not valid UTF-8 are replaced.
+
+### What PuriCat checks because SQLite would not
+
+- **Text that is not a number is refused for a number column** when saving from the grid, in Smart Paste, and as a filter value. SQLite would store it as text (or, in a comparison, quietly match nothing). The SQL console is not checked: there SQLite behaves as SQLite.
+- **A column without a declared type is not edited.** It has no affinity, so a number typed in the grid would be stored as text. As a key column it is matched on the text shown.
+- A `STRICT` table is enforced by SQLite itself; its refusal is shown as it is.
+
+### Keys and generated values
+
+- `INTEGER PRIMARY KEY` of an ordinary table is the row id. SQLite assigns it; the grid does not write it, and a blank key in a Smart Paste UPSERT means "new row". A deleted row's id can be reused by a later insert (without `AUTOINCREMENT`).
+- In a `WITHOUT ROWID` table an `INTEGER PRIMARY KEY` is an ordinary, editable column.
+- Generated columns (`GENERATED ALWAYS AS`, virtual or stored) are not written.
+- Smart Paste can match on the primary key or on a unique index over plain columns. Partial indexes and indexes over expressions are not offered.
+
+### Row filter
+
+The same operators as the other engines. Comparison is by the column's affinity: text sent for a number column meets it as a number. "Is not" keeps NULL rows (`IS NOT`). Text search uses `LIKE … ESCAPE '!'`, which in SQLite ignores the case of ASCII letters only.
+
+### Writing
+
+- A save is one transaction that takes the write lock at once (`BEGIN IMMEDIATE`). A lock held by another program is waited for, for as long as the connection timeout, then reported ("database is locked"); nothing is saved.
+- Foreign keys are enforced on PuriCat's connections (`PRAGMA foreign_keys = ON`, a per-connection setting that is not stored in the file), whether or not the application that owns the file enforces them.
+- Nothing else about the file is set: journal mode, page size and the rest stay as they are.
+
+### SQL console
+
+- A query tab has its own connection to the file. Stop interrupts the statement from inside (a progress handler looks at a flag every 1,000 steps of SQLite's virtual machine).
+- **An interrupted write ends the user's transaction**: SQLite rolls all of it back. The console says so and no longer shows a transaction as open.
+- DDL is transactional; nothing commits implicitly.
+- `CREATE TRIGGER … BEGIN … END` is kept as one statement although its body has semicolons.
+- `PRAGMA`, `VACUUM`, `ATTACH`, `ANALYZE` are classed as "other": they run as typed, outside the impact guard. `ATTACH` gives the tab access to another file; attached databases do not appear in the explorer.
+- Names may be quoted as `"…"`, `` `…` `` or `[…]`. Block comments do not nest.
+- Result values are shown by their own type (SQLite types values, not columns): a BLOB as `0x` and hex wherever it appears.
+
+### Known limitations (SQLite)
+
+- No row-count estimate. The exact count is there when asked for (verified in the backend, with and without a filter, and stopped on a view that never ends).
+- A table without a primary key cannot be edited, though SQLite could address its rows by row id.
+- A file in WAL mode opened read-only needs its `-wal` and `-shm` files to be readable (and, if they do not exist yet, the folder to be writable); otherwise SQLite reports that it cannot open the file. This case has not been tested.
+- An encrypted (SQLCipher) file should be refused as "not a SQLite database, or it is encrypted"; only a plain non-database file was tested.
 
 ## SQL Server — Planned (Phase 2b)
 

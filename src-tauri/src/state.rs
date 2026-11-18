@@ -58,6 +58,12 @@ pub struct AppState {
     /// Undecided AI proposals, by id. What is approved is what is stored here, not text
     /// the web view sends back.
     pub proposals: std::sync::Mutex<HashMap<String, Proposal>>,
+    /// The file last chosen in the native Open dialog, under the token the web view was
+    /// given for it. The web view never names a path to read.
+    pub picked_file: std::sync::Mutex<Option<(String, std::path::PathBuf)>>,
+    /// How many files the end-to-end test has been handed in place of the dialog.
+    #[cfg(debug_assertions)]
+    pub e2e_picks: std::sync::atomic::AtomicUsize,
 }
 
 impl AppState {
@@ -70,6 +76,9 @@ impl AppState {
             jobs: Default::default(),
             agent_scratch: data_dir.join("agent-scratch"),
             proposals: Default::default(),
+            picked_file: Default::default(),
+            #[cfg(debug_assertions)]
+            e2e_picks: Default::default(),
         })
     }
 

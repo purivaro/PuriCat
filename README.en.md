@@ -10,7 +10,7 @@
 
 <p align="center">
   <b>A free database client that treats your data carefully.</b><br>
-  Browse and edit MySQL and PostgreSQL like a spreadsheet, see the exact SQL before anything is saved,<br>
+  Browse and edit MySQL, PostgreSQL and SQLite like a spreadsheet, see the exact SQL before anything is saved,<br>
   and let an AI look things up — while every change still waits for your approval.
 </p>
 
@@ -22,7 +22,7 @@
 
 ![PuriCat: a PostgreSQL table next to the AI agent, which has read the data and proposed a change that waits for approval](docs/images/hero.png)
 
-> **Early development (v0.1).** PuriCat connects to **MySQL** and **PostgreSQL** and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
+> **Early development (v0.1).** PuriCat connects to **MySQL** and **PostgreSQL** servers and opens **SQLite** files, and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
 
 ## Download
 
@@ -43,19 +43,19 @@ All versions and checksums are on the [Releases](https://github.com/purivaro/Pur
 
 ### Edit tables like a spreadsheet, and read the SQL before it runs
 
-Type in cells, add and delete rows, paste a block copied from Excel or Google Sheets, undo and redo. Nothing touches the database until you press Save. For deletes, larger changes and Production connections, a review shows **every statement with its values** first. Everything is saved in **one transaction**: if a row was changed by someone else in the meantime, nothing is saved.
+Type in cells, add and delete rows, paste a block copied from Excel or Google Sheets, undo and redo. A long text or a JSON document opens whole in its own dialog (double-click the cell), where it can be read, copied and edited; JSON is laid out one member per line, with every number exactly as stored. Find rows with a **filter**: conditions on any column (⌘F), or right-click a cell and choose *Filter by this value*. The footer shows the server's estimate of the rows; the exact number, of the table or of the rows that match, is counted when you ask for it. Nothing touches the database until you press Save. For deletes, larger changes and Production connections, a review shows **every statement with its values** first. Everything is saved in **one transaction**: if a row was changed by someone else in the meantime, nothing is saved.
 
 ![The review dialog: each DELETE, UPDATE and INSERT with its values, saved in one transaction](docs/images/edit-review.png)
 
-### Smart Paste: update a table from a spreadsheet
+### Smart Paste: update a table from a spreadsheet or a file
 
-Copy rows from a spreadsheet and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs.
+Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs. Rows with a problem can be left out and copied back to the spreadsheet to be fixed.
 
 ![Smart Paste: columns mapped to the table, and a preview of which rows will be inserted or updated](docs/images/smart-paste.png)
 
 ### A SQL console with guard rails
 
-Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
+Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Run the whole script, the selection, or only the statement the cursor is in (⇧⌘↵). Save a script under a name (⌘S) and open it again later from the connection's saved scripts. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
 
 ![A query tab with two statements and one result tab for each](docs/images/sql-console.png)
 
@@ -74,6 +74,10 @@ PuriCat talks to the **Claude Code** or **Codex** command-line tool that you hav
 
 To use the agent, install [Claude Code](https://claude.com/claude-code) and sign in (`claude auth login`); PuriCat finds it by itself. Codex is supported the same way, but its tool calls have not been verified yet. What you send to the AI goes to that provider under your own account: [AI_INTEGRATION.md](AI_INTEGRATION.md) says exactly what is sent.
 
+### SQLite files, opened carefully
+
+Open a `.db`, `.sqlite` or `.sqlite3` file — an app's data, a project's database — without a server or an account. A new SQLite connection is **read-only**: the file is opened so that it cannot be written, until you decide to edit. PuriCat also makes the checks SQLite does not: text that is not a number is refused for a column of numbers, instead of being stored without a word. [What works for SQLite, and its limits](DATABASE_COMPATIBILITY.md#sqlite--a-database-file).
+
 ### English and Thai, light and dark
 
 ![The same screen in Thai with the dark theme](docs/images/thai-dark.png)
@@ -90,7 +94,7 @@ The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY
 
 ## Not there yet
 
-SQL Server, SSH tunnels, creating and altering tables, import from files, backups, filtering in the grid, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+SQL Server, SSH tunnels, creating and altering tables, imports of more than 10,000 rows, backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
 
 ## Build from source
 
@@ -103,12 +107,12 @@ pnpm tauri build    # make PuriCat.app and a .dmg
 pnpm check          # type-check, unit tests, cargo fmt, clippy, cargo test
 ```
 
-Tests against real MySQL and PostgreSQL servers, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
+Tests against real MySQL and PostgreSQL servers and real SQLite files, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
 
 A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them (in a fork, for example) it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain; v0.1.0 was published that way, before the secrets were set.
 
 ```
-crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the SQL console,
+crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the file reader, the SQL console,
                the AI chat runner and the tools it serves (no Tauri dependency)
 src-tauri/     the Tauri app: IPC commands, app state, bundle configuration
 src/           the React frontend

@@ -182,3 +182,12 @@ textarea,
     transition-duration: 0.01ms !important;
   }
 }
+
+/* SQL editor: the statement the cursor is in, marked in the margin (⇧⌘↵ runs it). */
+.monaco-editor .sql-current-statement {
+  width: 3px !important;
+  margin-left: 5px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.75;
+}

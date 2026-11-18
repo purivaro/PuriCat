@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck, Eye, EyeOff, KeyRound, Lock, LockOpen, Star, TriangleAlert, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Eye, EyeOff, FolderOpen, KeyRound, Lock, LockOpen, Star, TriangleAlert, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { type FormEvent, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -7,15 +7,17 @@ import { toast } from "sonner";
 import { EngineTag } from "../../components/Brand";
 import { Button, Field, IconButton, Input, inputClass, Segmented, Switch } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
+import { fileName } from "../../lib/connection";
 import { errorMessage, ipc } from "../../lib/ipc";
 import type { ConnectionProfile, ConnectionView, Engine, Environment, PasswordChange, ServerInfo, TlsMode } from "../../lib/types";
 import { useConnections } from "../../stores/connections";
 import { useUi } from "../../stores/ui";
 
-const DEFAULT_PORT: Record<Engine, number> = { mysql: 3306, postgres: 5432, sqlserver: 1433 };
+const DEFAULT_PORT: Record<Engine, number> = { mysql: 3306, postgres: 5432, sqlite: 0, sqlserver: 1433 };
 const ENGINES: { value: Engine; available: boolean }[] = [
   { value: "mysql", available: true },
   { value: "postgres", available: true },
+  { value: "sqlite", available: true },
   { value: "sqlserver", available: false },
 ];
 const ENVIRONMENTS: { value: Environment; selected: string }[] = [
@@ -35,6 +37,7 @@ function blank(): ConnectionProfile {
     port: DEFAULT_PORT.mysql,
     username: "",
     database: null,
+    file: null,
     tls: "prefer",
     tlsCaPath: null,
     readOnly: false,
@@ -82,6 +85,9 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
   const [tags, setTags] = useState(form.tags.join(", "));
   const [port, setPort] = useState(String(form.port));
   const [test, setTest] = useState<TestState>({ status: "idle" });
+  // A new SQLite connection starts read-only; once the switch is used, it is left alone.
+  const [readOnlyChosen, setReadOnlyChosen] = useState(existing !== null);
+  const [picking, setPicking] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,17 +96,39 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
     setTest({ status: "idle" }); // a result for other settings would be misleading
   };
 
+  const isFile = form.engine === "sqlite";
   const portNumber = Number(port);
   const portValid = /^\d+$/.test(port) && portNumber >= 1 && portNumber <= 65535;
-  const complete = form.name.trim() !== "" && form.host.trim() !== "" && form.username.trim() !== "" && portValid;
+  const complete =
+    form.name.trim() !== "" &&
+    (isFile ? (form.file ?? "").trim() !== "" : form.host.trim() !== "" && form.username.trim() !== "" && portValid);
 
   const profile = (): ConnectionProfile => ({
     ...form,
-    port: portNumber,
+    // A file has no host, port, user or default database; the backend clears them too.
+    ...(isFile ? { host: "", port: 0, username: "", database: null } : { port: portNumber, file: null }),
     tags: tags.split(",").map((s) => s.trim()).filter(Boolean),
   });
   const passwordChange = (): PasswordChange =>
-    clearPassword ? { action: "clear" } : password !== "" ? { action: "set", value: password } : { action: "keep" };
+    isFile ? { action: "keep" } : clearPassword ? { action: "clear" } : password !== "" ? { action: "set", value: password } : { action: "keep" };
+
+  const chooseEngine = (engine: Engine) => {
+    // Follow the engine's default port unless the user typed their own. A file has none.
+    if (engine !== "sqlite" && (form.engine === "sqlite" || port === String(DEFAULT_PORT[form.engine]))) setPort(String(DEFAULT_PORT[engine]));
+    patch({ engine, ...(readOnlyChosen ? {} : { readOnly: engine === "sqlite" }) });
+  };
+
+  const browse = async () => {
+    setPicking(true);
+    try {
+      const file = await ipc.pickDatabaseFile();
+      if (file) patch({ file, name: form.name.trim() === "" ? fileName(file) : form.name });
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setPicking(false);
+    }
+  };
 
   const runTest = async () => {
     setTest({ status: "running" });
@@ -147,7 +175,7 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium text-fg-muted">{t("connection.engine")}</span>
-          <div role="radiogroup" aria-label={t("connection.engine")} className="grid grid-cols-3 gap-2">
+          <div role="radiogroup" aria-label={t("connection.engine")} className="grid grid-cols-2 gap-2">
             {ENGINES.map(({ value, available }) => {
               const selected = form.engine === value;
               return (
@@ -158,11 +186,8 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
                   aria-checked={selected}
                   disabled={!available}
                   title={available ? undefined : t("connection.sqlserverNote")}
-                  onClick={() => {
-                    // Follow the engine's default port unless the user typed their own.
-                    if (port === String(DEFAULT_PORT[form.engine])) setPort(String(DEFAULT_PORT[value]));
-                    patch({ engine: value });
-                  }}
+                  data-engine={value}
+                  onClick={() => chooseEngine(value)}
                   className={cn(
                     "flex h-11 items-center gap-2 rounded-xl border px-3 text-left text-[13px] transition-colors",
                     selected ? "border-accent bg-accent-soft font-semibold ring-1 ring-accent" : "border-border-strong hover:bg-sunken",
@@ -195,96 +220,125 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
           </div>
         </div>
 
-        <div className="grid grid-cols-[1fr_96px] gap-3">
-          <Field label={t("connection.host")}>
-            <Input value={form.host} placeholder="localhost" onChange={(e) => patch({ host: e.target.value })} />
-          </Field>
-          <Field label={t("connection.port")}>
-            <Input
-              value={port}
-              inputMode="numeric"
-              aria-invalid={!portValid}
-              className={cn("tabular-nums", !portValid && "border-danger focus:border-danger")}
-              onChange={(e) => {
-                setPort(e.target.value.trim());
-                setTest({ status: "idle" });
-              }}
-            />
-          </Field>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t("connection.username")}>
-            <Input value={form.username} onChange={(e) => patch({ username: e.target.value })} />
-          </Field>
-          <Field label={t("connection.database")} optional={t("common.optional")}>
-            <Input
-              value={form.database ?? ""}
-              placeholder={t(form.engine === "postgres" ? "connection.databasePlaceholderPg" : "connection.databasePlaceholderMy")}
-              onChange={(e) => patch({ database: e.target.value || null })}
-            />
-          </Field>
-        </div>
-
-        <Field
-          label={t("connection.password")}
-          hint={
-            clearPassword ? (
-              <span className="text-warn">
-                {t("connection.passwordWillClear")}{" "}
-                <button type="button" className="font-medium underline underline-offset-2" onClick={() => setClearPassword(false)}>
-                  {t("connection.undo")}
-                </button>
-              </span>
-            ) : existing?.hasPassword ? (
-              <span className="inline-flex flex-wrap items-center gap-x-1">
-                <KeyRound className="size-3 shrink-0" /> {t("connection.passwordSaved")}
-                {password === "" && (
-                  <button type="button" className="font-medium text-fg-muted underline underline-offset-2" onClick={() => setClearPassword(true)}>
-                    {t("connection.passwordClear")}
-                  </button>
-                )}
-              </span>
-            ) : (
-              t("connection.passwordHint")
-            )
-          }
-        >
-          <div className="relative">
-            <Input
-              type={showPassword ? "text" : "password"}
-              value={password}
-              disabled={clearPassword}
-              placeholder={existing?.hasPassword && !clearPassword ? "••••••••" : undefined}
-              className="pr-9"
-              onChange={(e) => {
-                setPassword(e.target.value);
-                setTest({ status: "idle" });
-              }}
-            />
-            <button
-              type="button"
-              aria-label={showPassword ? t("connection.hide") : t("connection.show")}
-              onClick={() => setShowPassword((v) => !v)}
-              className="absolute top-1 right-1 flex size-6 items-center justify-center rounded-md text-fg-subtle hover:bg-sunken hover:text-fg"
-            >
-              {showPassword ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-            </button>
+        {isFile && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-end gap-2">
+              <Field label={t("connection.file")} className="flex-1">
+                <Input
+                  data-sqlite-file
+                  value={form.file ?? ""}
+                  placeholder={t("connection.filePlaceholder")}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  className="font-mono text-xs"
+                  onChange={(e) => patch({ file: e.target.value || null })}
+                />
+              </Field>
+              <Button loading={picking} onClick={() => void browse()}>
+                {!picking && <FolderOpen className="size-3.5" />} {t("connection.fileBrowse")}
+              </Button>
+            </div>
+            <span className="text-xs leading-snug text-fg-subtle">{t("connection.fileHint")}</span>
           </div>
-        </Field>
+        )}
+
+        {!isFile && (
+          <>
+            <div className="grid grid-cols-[1fr_96px] gap-3">
+              <Field label={t("connection.host")}>
+                <Input value={form.host} placeholder="localhost" onChange={(e) => patch({ host: e.target.value })} />
+              </Field>
+              <Field label={t("connection.port")}>
+                <Input
+                  value={port}
+                  inputMode="numeric"
+                  aria-invalid={!portValid}
+                  className={cn("tabular-nums", !portValid && "border-danger focus:border-danger")}
+                  onChange={(e) => {
+                    setPort(e.target.value.trim());
+                    setTest({ status: "idle" });
+                  }}
+                />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label={t("connection.username")}>
+                <Input value={form.username} onChange={(e) => patch({ username: e.target.value })} />
+              </Field>
+              <Field label={t("connection.database")} optional={t("common.optional")}>
+                <Input
+                  value={form.database ?? ""}
+                  placeholder={t(form.engine === "postgres" ? "connection.databasePlaceholderPg" : "connection.databasePlaceholderMy")}
+                  onChange={(e) => patch({ database: e.target.value || null })}
+                />
+              </Field>
+            </div>
+
+            <Field
+              label={t("connection.password")}
+              hint={
+                clearPassword ? (
+                  <span className="text-warn">
+                    {t("connection.passwordWillClear")}{" "}
+                    <button type="button" className="font-medium underline underline-offset-2" onClick={() => setClearPassword(false)}>
+                      {t("connection.undo")}
+                    </button>
+                  </span>
+                ) : existing?.hasPassword ? (
+                  <span className="inline-flex flex-wrap items-center gap-x-1">
+                    <KeyRound className="size-3 shrink-0" /> {t("connection.passwordSaved")}
+                    {password === "" && (
+                      <button type="button" className="font-medium text-fg-muted underline underline-offset-2" onClick={() => setClearPassword(true)}>
+                        {t("connection.passwordClear")}
+                      </button>
+                    )}
+                  </span>
+                ) : (
+                  t("connection.passwordHint")
+                )
+              }
+            >
+              <div className="relative">
+                <Input
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  disabled={clearPassword}
+                  placeholder={existing?.hasPassword && !clearPassword ? "••••••••" : undefined}
+                  className="pr-9"
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setTest({ status: "idle" });
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={showPassword ? t("connection.hide") : t("connection.show")}
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute top-1 right-1 flex size-6 items-center justify-center rounded-md text-fg-subtle hover:bg-sunken hover:text-fg"
+                >
+                  {showPassword ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                </button>
+              </div>
+            </Field>
+          </>
+        )}
 
         <fieldset className="flex flex-col gap-3 rounded-xl border border-border p-3.5">
           <legend className="px-1 text-xs font-semibold text-fg-muted">{t("connection.security")}</legend>
-          <Field label={t("connection.tls")}>
-            <select value={form.tls} onChange={(e) => patch({ tls: e.target.value as TlsMode })} className={inputClass}>
-              {TLS_MODES.map((m) => (
-                <option key={m} value={m}>
-                  {t(`connection.tlsMode.${m}`)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {usesCa && (
+          {!isFile && (
+            <Field label={t("connection.tls")}>
+              <select value={form.tls} onChange={(e) => patch({ tls: e.target.value as TlsMode })} className={inputClass}>
+                {TLS_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    {t(`connection.tlsMode.${m}`)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {!isFile && usesCa && (
             <Field label={t("connection.tlsCa")} optional={t("common.optional")}>
               <Input
                 value={form.tlsCaPath ?? ""}
@@ -300,9 +354,16 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[13px] font-medium">{t("connection.readOnly")}</div>
-              <div className="text-xs leading-snug text-fg-subtle">{t("connection.readOnlyHint")}</div>
+              <div className="text-xs leading-snug text-fg-subtle">{t(isFile ? "connection.readOnlyHintFile" : "connection.readOnlyHint")}</div>
             </div>
-            <Switch checked={form.readOnly} onChange={(readOnly) => patch({ readOnly })} label={t("connection.readOnly")} />
+            <Switch
+              checked={form.readOnly}
+              onChange={(readOnly) => {
+                setReadOnlyChosen(true);
+                patch({ readOnly });
+              }}
+              label={t("connection.readOnly")}
+            />
           </div>
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
@@ -328,9 +389,11 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
               <TriangleAlert className="size-3.5 shrink-0" /> {t("connection.prodWarning")}
             </div>
           )}
-          <div className="border-t border-border pt-2.5 text-xs leading-snug text-fg-subtle">
-            <span className="font-medium text-fg-muted">{t("connection.ssh")}</span> — {t("connection.sshPlanned")}
-          </div>
+          {!isFile && (
+            <div className="border-t border-border pt-2.5 text-xs leading-snug text-fg-subtle">
+              <span className="font-medium text-fg-muted">{t("connection.ssh")}</span> — {t("connection.sshPlanned")}
+            </div>
+          )}
         </fieldset>
 
         <Field label={t("connection.tags")} optional={t("common.optional")}>

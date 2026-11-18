@@ -45,7 +45,7 @@ Each flag is the same condition as in `WHERE`, rendered as text. Every returned 
 
 `analyze_paste` returns one status per pasted row — insert, update (with the changed columns), unchanged, unmatched, missing key, duplicate, exists, invalid — the counts, and a fingerprint of every row's status and changed columns. It issues only reads. Cheap pre-checks (number shape, declared `char` / `varchar` length, NULL into NOT NULL, required columns not mapped) flag the usual spreadsheet mistakes; the server remains the authority.
 
-Any problem blocks the run. `apply_paste` receives the fingerprint of the preview the user approved, repeats the whole analysis, and refuses with a `conflict` error unless the fresh analysis produces the same fingerprint; equal counts are not enough. The statements that run come from that fresh analysis, not from the preview.
+Any problem blocks the run, unless the request says to leave the rows with problems out (`skipProblems`, added on 2026-11-17): those rows were never part of the change set, so the option only lifts the refusal, and the analysis and its fingerprint are the same with or without it. `apply_paste` receives the fingerprint of the preview the user approved, repeats the whole analysis, and refuses with a `conflict` error unless the fresh analysis produces the same fingerprint; equal counts are not enough. The statements that run come from that fresh analysis, not from the preview.
 
 ### 4. Reuse the optimistic planner
 
@@ -79,9 +79,9 @@ The brief asked for bounded batches. A single bounded transaction was chosen ins
 
 Limitations:
 
-- **"Update" is a text comparison.** The pasted text is compared with the server's rendering, so `1.5` against a stored `1.500000` is counted and run as an update that stores the same number. A value-aware comparison is Planned (Phase 3).
+- **"Unchanged" is decided on this side.** The pasted text is compared with the server's rendering. Since 2026-11-17 a value that is plainly the stored one in another spelling is also unchanged (`db::smart::same_value`: decimal numbers, dates and times without a time zone, PostgreSQL booleans); before, `1.5` against a stored `1.500000` was counted and run as an update. This is the one place where equality is not left to the database, and the reasons that rule out comparing keys here (table above) do not apply to it: a key decides *which* row is touched, this decides only whether a column of the row already found needs writing, a wrong "changed" writes the same value again, and the accepted spellings are limited to those both servers were seen to store identically. Asking the server instead would add one comparison per pasted row and column to every lookup.
 - **One transaction, 10,000 rows.** Locks are held for the whole run; duration near the limit or on a remote server has not been measured.
-- **Problems block the whole run.** There is no "skip invalid rows" option yet.
+- **Problems block the whole run unless the user leaves them out.** Leaving out covers what the analysis found. A row the server refuses during the run (a date that does not exist, a foreign key) still rolls the whole run back.
 - **The run-time fingerprint covers each row's status and changed columns, not the stored values.** A stored value that changes without changing a row's outcome passes this step; the statements use the values of the fresh analysis, and the optimistic check on each UPDATE and the unique index on each INSERT still apply.
 - **The analysis is not inside the write transaction.** Lookups run on pooled connections just before it starts.
 - **Key values of non-integer types are pre-checked only generically.** Integer keys must be whole numbers; a key value of another type that the database coerces (a date, for example) gets only the number-shape and length checks and is then cast and compared by the server. A malformed one is not tested.

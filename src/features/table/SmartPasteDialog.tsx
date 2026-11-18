@@ -1,24 +1,47 @@
-import { ArrowRight, CircleAlert, ClipboardPaste, TriangleAlert, X } from "lucide-react";
+import { ArrowRight, CircleAlert, ClipboardPaste, Copy, FileSpreadsheet, FolderOpen, TriangleAlert, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import { EngineTag, EnvBadge } from "../../components/Brand";
 import { Button, IconButton, Segmented, Spinner, StateMessage } from "../../components/ui/primitives";
-import { clipboard, parseClipboardTable } from "../../lib/clipboard";
+import { clipboard, parseClipboardTable, toClipboardTable } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
 import type {
   ApplyResult,
   ColumnMeta,
   ConnectionView,
+  FileReadOptions,
+  FileTable,
   PasteAnalysis,
   PasteMode,
+  PasteRowReport,
   PasteRowStatus,
+  PickedFile,
   TableRef,
   UniqueKey,
 } from "../../lib/types";
-import { autoMap, buildRequest, columnLetter, looksLikeHeaders, type Mapping, updatableColumns, usableKeys } from "./smartPaste";
+import {
+  autoMap,
+  buildRequest,
+  columnLetter,
+  isProblem,
+  looksLikeHeaders,
+  type Mapping,
+  otherLine,
+  problemTable,
+  updatableColumns,
+  usableKeys,
+} from "./smartPaste";
+
+/** Rows one run may hold (`db::write::MAX_STATEMENTS`). */
+const RUN_LIMIT = 10_000;
+/** Encodings offered for a text file that is not UTF-8, by the label the backend takes. */
+const ENCODINGS = ["windows-874", "windows-1252", "windows-1251", "shift_jis", "gbk", "big5", "euc-kr", "utf-16le"];
+const SEPARATORS = [",", ";", "\t", "|"];
+const SEPARATOR_NAME: Record<string, string> = { ",": "comma", ";": "semicolon", "\t": "tab", "|": "pipe" };
 
 /** Rows listed in the preview. Every row is analysed; this only bounds what is drawn. */
 const ROWS_SHOWN = 200;
@@ -45,7 +68,8 @@ interface Props {
   connection: ConnectionView;
   table: TableRef;
   columns: ColumnMeta[];
-  onDone: (result: ApplyResult) => void;
+  /** `skipped`: rows with problems that were left out of the run, by the user's choice. */
+  onDone: (result: ApplyResult, skipped: number) => void;
 }
 
 export function SmartPasteDialog(props: Props) {
@@ -68,7 +92,7 @@ export function SmartPasteDialog(props: Props) {
           onInteractOutside={(e) => e.preventDefault()}
           className="animate-pop fixed top-1/2 left-1/2 z-50 flex h-[min(90vh,780px)] w-[min(95vw,900px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-raised shadow-pop outline-none"
         >
-          {/* Mounted per opening, so every paste starts from the current clipboard. */}
+          {/* Mounted per opening, so every paste starts from the current clipboard (a file is opened from there). */}
           {props.open && <Wizard {...props} onBusy={setBusy} />}
         </Dialog.Content>
       </Dialog.Portal>
@@ -77,10 +101,14 @@ export function SmartPasteDialog(props: Props) {
 }
 
 function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props & { onBusy: (busy: boolean) => void }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const production = connection.environment === "production";
 
-  const [matrix, setMatrix] = useState<string[][] | null>(null); // null: clipboard not read yet
+  const [matrix, setMatrix] = useState<string[][] | null>(null); // null: the source is being read
+  // The rows come from the clipboard unless a file was opened; `table` is null while it loads.
+  const [file, setFile] = useState<{ picked: PickedFile; options: FileReadOptions; table: FileTable | null } | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const reading = useRef(0);
   const [hasHeaders, setHasHeaders] = useState(false);
   const [nullText, setNullText] = useState(false);
   const [mapping, setMapping] = useState<Mapping>([]);
@@ -93,6 +121,9 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [run, setRun] = useState<{ job: string; done: number; total: number } | null>(null);
+  // Chosen per preview: leave the rows with problems out of the run; list only those rows.
+  const [skip, setSkip] = useState(false);
+  const [onlyProblems, setOnlyProblems] = useState(false);
   const analysing = useRef(0);
   useEffect(() => {
     onBusy(!!run);
@@ -100,21 +131,60 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   }, [run, onBusy]);
   const previewRef = useRef<HTMLElement>(null);
 
+  const take = useCallback(
+    (next: string[][]) => {
+      const headers = looksLikeHeaders(next, columns);
+      setMatrix(next);
+      setHasHeaders(headers);
+      setMapping(autoMap(next, headers, columns));
+      setAnalysis(null);
+      setError(null);
+    },
+    [columns],
+  );
+
   const read = useCallback(async () => {
+    const id = ++reading.current;
+    setFile(null);
+    setSourceError(null);
     let text = "";
     try {
       text = await clipboard.read();
     } catch {
       /* an empty or non-text clipboard reads as nothing to paste */
     }
-    const next = parseClipboardTable(text);
-    const headers = looksLikeHeaders(next, columns);
-    setMatrix(next);
-    setHasHeaders(headers);
-    setMapping(autoMap(next, headers, columns));
-    setAnalysis(null);
-    setError(null);
-  }, [columns]);
+    if (id === reading.current) take(parseClipboardTable(text));
+  }, [take]);
+
+  const loadFile = useCallback(
+    async (picked: PickedFile, options: FileReadOptions) => {
+      const id = ++reading.current;
+      setFile({ picked, options, table: null });
+      setSourceError(null);
+      setMatrix(null);
+      try {
+        const table = await ipc.readTableFile(picked.token, options);
+        if (id !== reading.current) return;
+        setFile({ picked, options, table });
+        // More rows than one run may hold: nothing is offered for mapping, the wizard says why.
+        take(table.totalRows > table.rows.length ? [] : table.rows);
+      } catch (e) {
+        if (id !== reading.current) return;
+        setSourceError(errorMessage(e));
+        setMatrix([]);
+      }
+    },
+    [take],
+  );
+
+  const openFile = async () => {
+    try {
+      const picked = await ipc.pickTableFile();
+      if (picked) await loadFile(picked, {});
+    } catch (e) {
+      setSourceError(errorMessage(e));
+    }
+  };
 
   useEffect(() => {
     void read();
@@ -155,7 +225,10 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const mappedCount = mapping.filter(Boolean).length;
   const canPreview = !!built && dataRows > 0 && mappedCount > 0 && !checking && !run;
   const toRun = current ? current.counts.insert + current.counts.update : 0;
-  const blocked = !!current && (current.problems.length > 0 || current.counts.problems > 0);
+  const problemRows = current?.counts.problems ?? 0;
+  // Rows with problems are never written. They stop the run unless the user leaves them out.
+  const skipping = skip && problemRows > 0 && toRun > 0;
+  const blocked = !!current && (current.problems.length > 0 || (problemRows > 0 && !skipping));
 
   const preview = async () => {
     if (!built) return;
@@ -164,7 +237,11 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
     setError(null);
     try {
       const result = await ipc.analyzePaste(connection.id, table, built.request);
-      if (id === analysing.current) setAnalysis({ of: signature, result });
+      if (id !== analysing.current) return;
+      setAnalysis({ of: signature, result });
+      // A new outcome is a new decision.
+      setSkip(false);
+      setOnlyProblems(false);
     } catch (e) {
       if (id === analysing.current) setError(errorMessage(e));
     } finally {
@@ -178,14 +255,39 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
     setRun({ job, done: 0, total: toRun });
     setError(null);
     try {
-      const result = await ipc.applyPaste(connection.id, table, built.request, current.fingerprint, job, (done) =>
-        setRun((r) => r && { ...r, done }),
-      );
-      onDone(result);
+      const request = skipping ? { ...built.request, skipProblems: true } : built.request;
+      const result = await ipc.applyPaste(connection.id, table, request, current.fingerprint, job, (done) => setRun((r) => r && { ...r, done }));
+      onDone(result, skipping ? problemRows : 0);
     } catch (e) {
       setError(errorMessage(e));
       setRun(null);
       setAnalysis(null); // whatever happened, the next run needs a fresh look at the table
+    }
+  };
+
+  /** What the preview says about a row; a duplicate names the other row by its line in the source. */
+  const detail = (r: PasteRowReport) => {
+    const line = built ? otherLine(r, built.sourceRows) : null;
+    const text = r.message ?? (r.changed.length ? t("smart.changes", { columns: r.changed.join(", ") }) : "");
+    return line === null ? text : `${text} (${t("smart.rowRef", { row: line })})`;
+  };
+
+  /** The rows with problems go back to the clipboard as they were pasted, to be fixed and pasted again. */
+  const copyProblems = async () => {
+    if (!built || !current || !matrix) return;
+    const rows = problemTable({
+      matrix,
+      hasHeaders,
+      sourceRows: built.sourceRows,
+      reports: current.rows,
+      reasonHeader: t("smart.problemColumn"),
+      reason: (r) => [t(`smart.status.${r.status}`), detail(r)].filter(Boolean).join(": "),
+    });
+    try {
+      await clipboard.write(toClipboardTable(rows));
+      toast.success(t("smart.problemsCopied", { count: problemRows }), { id: "smart-problems", duration: 2500 });
+    } catch (e) {
+      toast.error(errorMessage(e));
     }
   };
 
@@ -202,6 +304,21 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const sample = (i: number) => matrix?.[hasHeaders ? 1 : 0]?.[i] ?? "";
   const keyLabel = (k: UniqueKey) => t(k.primary ? "smart.keyPrimary" : "smart.keyUnique", { columns: k.columns.join(", ") });
   const keyAt = built ? key.map((k) => built.request.columns.indexOf(k)) : [];
+  // The rows the preview lists, each with its place among the analysed rows.
+  const listed = (current?.rows ?? []).map((r, i) => ({ r, i })).filter(({ r }) => !onlyProblems || isProblem(r.status));
+  const number = new Intl.NumberFormat(i18n.language);
+  const tooMany = !!file?.table && file.table.totalRows > file.table.rows.length;
+  // The two places rows can come from, offered wherever there are none to work with.
+  const sources = (
+    <div className="flex items-center gap-2">
+      <Button variant={file ? "secondary" : "primary"} icon={<ClipboardPaste className="size-3.5" />} onClick={() => void read()}>
+        {t("smart.reread")}
+      </Button>
+      <Button data-smart-open-file variant={file ? "primary" : "secondary"} icon={<FolderOpen className="size-3.5" />} onClick={() => void openFile()}>
+        {t(file ? "smart.openAnother" : "smart.openFile")}
+      </Button>
+    </div>
+  );
 
   return (
     <>
@@ -218,21 +335,102 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
         </IconButton>
       </div>
 
+      {file && (
+        <div data-smart-file className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-sunken/50 px-5 py-2 text-[13px]">
+          <span className="flex min-w-0 items-center gap-1.5 font-medium">
+            <FileSpreadsheet className="size-4 shrink-0 text-fg-muted" />
+            <span className="truncate" title={file.picked.name}>
+              {file.picked.name}
+            </span>
+          </span>
+          {file.picked.kind === "workbook" && file.table && file.table.sheets.length > 1 && (
+            <label className="flex items-center gap-1.5">
+              <span className="text-fg-muted">{t("smart.sheet")}</span>
+              <select
+                data-smart-sheet
+                value={file.table.sheet ?? ""}
+                disabled={!!run}
+                onChange={(e) => void loadFile(file.picked, { ...file.options, sheet: e.target.value })}
+                className={cn(selectClass, "max-w-56")}
+              >
+                {file.table.sheets.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {file.picked.kind === "text" && (
+            <>
+              <label className="flex items-center gap-1.5">
+                <span className="text-fg-muted">{t("smart.encoding")}</span>
+                <select
+                  data-smart-encoding
+                  value={file.options.encoding ?? ""}
+                  disabled={!!run}
+                  onChange={(e) => void loadFile(file.picked, { ...file.options, encoding: e.target.value || undefined })}
+                  className={selectClass}
+                >
+                  <option value="">{t("smart.encodingAuto")}</option>
+                  {ENCODINGS.map((label) => (
+                    <option key={label} value={label}>
+                      {t(`smart.encodingName.${label}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5">
+                <span className="text-fg-muted">{t("smart.separator")}</span>
+                <select
+                  data-smart-separator
+                  value={file.options.delimiter ?? ""}
+                  disabled={!!run}
+                  onChange={(e) => void loadFile(file.picked, { ...file.options, delimiter: e.target.value || undefined })}
+                  className={selectClass}
+                >
+                  <option value="">
+                    {file.table?.delimiter && !file.options.delimiter
+                      ? t("smart.separatorDetected", { name: t(`smart.separatorName.${SEPARATOR_NAME[file.table.delimiter] ?? "other"}`) })
+                      : t("smart.separatorAuto")}
+                  </option>
+                  {SEPARATORS.map((s) => (
+                    <option key={s} value={s}>
+                      {t(`smart.separatorName.${SEPARATOR_NAME[s]}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+          {file.picked.kind === "workbook" && <span className="min-w-0 flex-1 truncate text-xs text-fg-subtle">{t("smart.storedValues")}</span>}
+        </div>
+      )}
+
       {matrix === null ? (
         <div className="flex flex-1 items-center justify-center gap-2 text-fg-muted">
           <Spinner /> {t("common.loading")}
         </div>
+      ) : sourceError ? (
+        <div data-smart-file-error className="flex-1">
+          <StateMessage tone="danger" icon={<CircleAlert className="size-5" />} title={t("smart.fileFailed")} body={sourceError} action={sources} />
+        </div>
+      ) : tooMany ? (
+        <div data-smart-too-many className="flex-1">
+          <StateMessage
+            icon={<TriangleAlert className="size-5" />}
+            title={t("smart.tooManyTitle")}
+            body={t("smart.tooManyBody", { total: number.format(file?.table?.totalRows ?? 0), limit: number.format(RUN_LIMIT) })}
+            action={sources}
+          />
+        </div>
       ) : matrix.length === 0 ? (
         <div className="flex-1">
           <StateMessage
-            icon={<ClipboardPaste className="size-5" />}
-            title={t("smart.emptyTitle")}
+            icon={file ? <FileSpreadsheet className="size-5" /> : <ClipboardPaste className="size-5" />}
+            title={t(file ? "smart.emptyFile" : "smart.emptyTitle")}
             body={t("smart.emptyBody")}
-            action={
-              <Button variant="primary" onClick={() => void read()}>
-                {t("smart.reread")}
-              </Button>
-            }
+            action={sources}
           />
         </div>
       ) : (
@@ -240,7 +438,13 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
           {/* 1 — what was pasted */}
           <section className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <span data-smart-source className="text-[13px] font-medium">
-              {t("smart.source", { rows: dataRows, columns: matrix[0]!.length })}
+              {file
+                ? t("smart.sourceFile", {
+                    rows: dataRows,
+                    columns: matrix[0]!.length,
+                    name: file.table?.sheet ? `${file.picked.name} › ${file.table.sheet}` : file.picked.name,
+                  })
+                : t("smart.source", { rows: dataRows, columns: matrix[0]!.length })}
               {built && built.blankRows > 0 && (
                 <span className="ml-2 font-normal text-fg-subtle">{t("smart.blankRows", { count: built.blankRows })}</span>
               )}
@@ -256,8 +460,11 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
             />
             <Check label={t("smart.nullText")} checked={nullText} disabled={!!run} onChange={setNullText} />
             <span className="flex-1" />
-            <Button size="sm" disabled={!!run} onClick={() => void read()}>
+            <Button size="sm" disabled={!!run} icon={<ClipboardPaste className="size-3.5" />} onClick={() => void read()}>
               {t("smart.reread")}
+            </Button>
+            <Button size="sm" data-smart-open-file disabled={!!run} icon={<FolderOpen className="size-3.5" />} onClick={() => void openFile()}>
+              {t("smart.openFile")}
             </Button>
           </section>
 
@@ -369,12 +576,33 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                     {(["insert", "update", "unchanged", "unmatched", "problems"] as const).map((k) => (
                       <span key={k} data-smart-count={k} className={cn(current.counts[k] === 0 && "opacity-45")}>
                         <b className={cn("text-[15px] tabular-nums", COUNT_TONE[k])}>{current.counts[k]}</b>{" "}
-                        <span className="text-fg-muted">{t(`smart.count.${k}`)}</span>
+                        <span className="text-fg-muted">{t(k === "problems" && skipping ? "smart.count.problemsSkipped" : `smart.count.${k}`)}</span>
                       </span>
                     ))}
                   </div>
-                  {current.counts.problems > 0 && <p className="text-xs text-danger">{t("smart.fixFirst")}</p>}
-                  {toRun === 0 && current.counts.problems === 0 && <p className="text-xs text-fg-muted">{t("smart.nothing")}</p>}
+                  {problemRows > 0 && (
+                    <div data-smart-problems className="flex flex-col gap-2 rounded-lg bg-danger-soft px-3 py-2.5">
+                      <p className="flex items-start gap-2 text-[13px] leading-relaxed text-danger">
+                        <CircleAlert className="mt-0.5 size-4 shrink-0" />
+                        <span>
+                          {skipping
+                            ? t("smart.leavingOut", { count: problemRows, rest: number.format(toRun) })
+                            : `${t("smart.problemRows", { count: problemRows })} ${t(toRun > 0 ? "smart.fixOrSkip" : "smart.fixFirst")}`}
+                        </span>
+                      </p>
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 pl-6">
+                        {toRun > 0 && (
+                          <Check name="skip" label={t("smart.skipProblems", { count: problemRows, rest: number.format(toRun) })} checked={skip} onChange={setSkip} />
+                        )}
+                        <Check name="only-problems" label={t("smart.onlyProblems")} checked={onlyProblems} onChange={setOnlyProblems} />
+                        <span className="flex-1" />
+                        <Button size="sm" data-smart-copy-problems icon={<Copy className="size-3.5" />} onClick={() => void copyProblems()}>
+                          {t("smart.copyProblems")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {toRun === 0 && problemRows === 0 && <p className="text-xs text-fg-muted">{t("smart.nothing")}</p>}
                   <div className="max-h-64 overflow-auto rounded-xl border border-border">
                     <table className="w-full border-separate border-spacing-0 text-xs">
                       <thead>
@@ -386,11 +614,16 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                         </tr>
                       </thead>
                       <tbody data-selectable>
-                        {current.rows.slice(0, ROWS_SHOWN).map((r, i) => {
+                        {listed.slice(0, ROWS_SHOWN).map(({ r, i }) => {
                           const values = built!.request.rows[i] ?? [];
                           const label = (key.length ? keyAt.map((at) => values[at]) : [values[0]]).map((v) => v ?? "NULL").join(", ");
                           return (
-                            <tr key={i} className="[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top">
+                            <tr
+                              key={i}
+                              data-smart-row={r.status}
+                              // Left out of the run by choice: still listed, plainly not part of it.
+                              className={cn("[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top", skipping && isProblem(r.status) && "opacity-55")}
+                            >
                               <td className="font-mono text-fg-subtle tabular-nums">{(built!.sourceRows[i] ?? i) + 1}</td>
                               <td>
                                 <span className={cn("rounded px-1.5 py-px text-[10px] font-bold uppercase", TONE[r.status])}>
@@ -399,7 +632,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                               </td>
                               <td className="max-w-56 truncate font-mono">{label}</td>
                               <td className="break-words text-fg-muted">
-                                {r.message ?? (r.changed.length ? t("smart.changes", { columns: r.changed.join(", ") }) : "")}
+                                {detail(r)}
                               </td>
                             </tr>
                           );
@@ -407,9 +640,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                       </tbody>
                     </table>
                   </div>
-                  {current.rows.length > ROWS_SHOWN && (
-                    <p className="text-xs text-fg-subtle">{t("smart.rowsShown", { shown: ROWS_SHOWN, total: current.rows.length })}</p>
-                  )}
+                  {listed.length > ROWS_SHOWN && <p className="text-xs text-fg-subtle">{t("smart.rowsShown", { shown: ROWS_SHOWN, total: listed.length })}</p>}
                 </>
               )}
             </section>
@@ -468,11 +699,12 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   );
 }
 
-function Check({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
+function Check({ label, checked, disabled, name, onChange }: { label: string; checked: boolean; disabled?: boolean; name?: string; onChange: (v: boolean) => void }) {
   return (
     <label className={cn("flex items-center gap-1.5 text-[13px] text-fg-muted", disabled && "opacity-50")}>
       <input
         type="checkbox"
+        data-smart-check={name}
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}

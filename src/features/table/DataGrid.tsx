@@ -9,9 +9,11 @@ import {
   CircleSlash,
   ClipboardPaste,
   Copy,
+  Funnel,
   Hash,
   KeyRound,
   Lock,
+  Maximize2,
   Plus,
   RotateCcw,
   ToggleLeft,
@@ -27,7 +29,8 @@ import { menuContentClass, menuDangerClass, menuItemClass, menuSeparatorClass } 
 import { clipboard, parseClipboardTable, toClipboardTable } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { errorMessage } from "../../lib/ipc";
-import type { ColumnMeta, RowPage, SortSpec, ValueKind } from "../../lib/types";
+import type { ColumnMeta, RowFilter, RowPage, SortSpec, ValueKind } from "../../lib/types";
+import { cellFilter } from "./filter";
 import {
   addRows,
   blocker,
@@ -50,6 +53,8 @@ const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 34;
 const GUTTER = 56;
 const MIN_WIDTH = 64;
+/** Values longer than this are edited in the cell dialog, not in the cell. */
+const LONG_VALUE = 1000;
 
 const KIND_ICON: Record<ValueKind, typeof Hash> = {
   number: Hash,
@@ -98,6 +103,14 @@ interface Props {
   onSort?: (sort: SortSpec | null) => void;
   /** Sorting reloads the page, which is not allowed while edits are pending. */
   sortDisabled: boolean;
+  /** Names of the columns the page is filtered on; their headers say so. */
+  filtered?: string[];
+  /** "Filter by this value" on a cell. Follows `sortDisabled`: it reloads the page too. */
+  onFilter?: (filter: RowFilter) => void;
+  /** Changes with every page loaded from the server (not when a loaded page is amended). */
+  loadId?: number;
+  /** Show one cell whole, in a dialog: a long or multi-line value, or one cut for preview. */
+  onInspect?: (cell: Cell) => void;
   /** `false` renders a plain read-only grid. */
   editable: boolean;
   pending: Pending;
@@ -116,7 +129,7 @@ interface Editing extends Cell {
 }
 
 export function DataGrid(props: Props) {
-  const { page, sort, onSort, sortDisabled, editable, pending, onChange, selection, onSelect } = props;
+  const { page, sort, onSort, sortDisabled, filtered, onFilter, loadId, onInspect, editable, pending, onChange, selection, onSelect } = props;
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
@@ -137,7 +150,9 @@ export function DataGrid(props: Props) {
   useEffect(() => {
     setEditing(null);
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [page]);
+    // With a `loadId`, a page that only learned a cell's whole value keeps its scroll position.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadId ?? page]);
 
   useEffect(() => {
     const stop = () => (dragging.current = false);
@@ -180,6 +195,13 @@ export function DataGrid(props: Props) {
   const range = selection ? rangeOf(selection) : null;
   const selectedRows = range ? Array.from({ length: range.bottom - range.top + 1 }, (_, i) => range.top + i) : [];
   const allSelectedDeleted = selectedRows.length > 0 && selectedRows.every((r) => pending.deletes[r]);
+  const oneCellAny = range && range.top === range.bottom && range.left === range.right ? range : null;
+  // One stored cell, as the server sent it: the only thing "filter by this value" can mean.
+  const oneCell = oneCellAny && !isInserted(page, oneCellAny.top) ? oneCellAny : null;
+  const filterForCell =
+    oneCell && page.columns[oneCell.left]
+      ? cellFilter(page.columns[oneCell.left]!, page.rows[oneCell.top]?.[oneCell.left] ?? null, isTruncated(page, oneCell.top, oneCell.left))
+      : null;
 
   const clampCell = (r: number, c: number): Cell => ({
     r: Math.min(rows - 1, Math.max(0, r)),
@@ -191,8 +213,12 @@ export function DataGrid(props: Props) {
   // ---- editing ---------------------------------------------------------------------
 
   const startEdit = (cell: Cell, typed?: string) => {
-    if (!editable) return;
+    // A read-only grid has nothing to edit: a double-click shows the cell whole instead.
+    if (!editable) return typed === undefined ? onInspect?.(cell) : undefined;
     const reason = blocker(page, pending, cell.r, cell.c);
+    const long = (cellValue(page, pending, cell.r, cell.c)?.length ?? 0) > LONG_VALUE;
+    // A value cut for preview, or too long for a cell, is read and edited in the dialog.
+    if (onInspect && (reason === "truncated" || (reason === null && long))) return onInspect(cell);
     if (reason) {
       toast.info(t(`table.notEditable.${reason}`), { id: "not-editable", duration: 2200 });
       return;
@@ -386,6 +412,7 @@ export function DataGrid(props: Props) {
                   column={col}
                   width={widths[c] ?? MIN_WIDTH}
                   sort={sort?.column === col.name ? sort : null}
+                  filtered={!!filtered?.includes(col.name)}
                   sortDisabled={sortDisabled || !onSort}
                   sortHint={onSort ? t("table.dirtyLocked") : undefined}
                   showLock={editable && !col.editable}
@@ -482,7 +509,7 @@ export function DataGrid(props: Props) {
                             <span className="truncate whitespace-pre">{value}</span>
                           )}
                           {cut && (
-                            <span title={t("table.truncated")} className="ml-1 shrink-0 rounded bg-sunken px-1 text-[10px] text-fg-subtle">
+                            <span title={t(onInspect ? "cell.truncatedHint" : "table.truncated")} className="ml-1 shrink-0 rounded bg-sunken px-1 text-[10px] text-fg-subtle">
                               …
                             </span>
                           )}
@@ -502,6 +529,20 @@ export function DataGrid(props: Props) {
             <Copy className="size-3.5" /> {t("common.copy")}
             <Shortcut>⌘C</Shortcut>
           </ContextMenu.Item>
+          {onInspect && (
+            <ContextMenu.Item className={menuItemClass} disabled={!oneCellAny} onSelect={() => oneCellAny && onInspect({ r: oneCellAny.top, c: oneCellAny.left })}>
+              <Maximize2 className="size-3.5" /> {t("cell.view")}
+            </ContextMenu.Item>
+          )}
+          {onFilter && (
+            <ContextMenu.Item
+              className={menuItemClass}
+              disabled={!filterForCell || sortDisabled}
+              onSelect={() => filterForCell && onFilter(filterForCell)}
+            >
+              <Funnel className="size-3.5" /> {t("filter.byValue")}
+            </ContextMenu.Item>
+          )}
           {editable && (
             <>
               <ContextMenu.Item className={menuItemClass} disabled={!range} onSelect={() => void paste()}>
@@ -605,6 +646,7 @@ interface HeaderCellProps {
   column: ColumnMeta;
   width: number;
   sort: SortSpec | null;
+  filtered: boolean;
   sortDisabled: boolean;
   sortHint?: string;
   showLock: boolean;
@@ -612,7 +654,7 @@ interface HeaderCellProps {
   onResizeStart: (e: PointerEvent<HTMLSpanElement>) => void;
 }
 
-function HeaderCell({ column, width, sort, sortDisabled, sortHint, showLock, onSort, onResizeStart }: HeaderCellProps) {
+function HeaderCell({ column, width, sort, filtered, sortDisabled, sortHint, showLock, onSort, onResizeStart }: HeaderCellProps) {
   const { t } = useTranslation();
   const Icon = column.primaryKey ? KeyRound : KIND_ICON[column.kind];
   return (
@@ -632,6 +674,7 @@ function HeaderCell({ column, width, sort, sortDisabled, sortHint, showLock, onS
         <Icon className={cn("size-3.5 shrink-0", column.primaryKey ? "text-accent-text" : "text-fg-subtle")} />
         <span className="truncate">{column.name}</span>
         {showLock && <Lock aria-label={t("table.notEditable.column")} className="size-3 shrink-0 text-fg-subtle" />}
+        {filtered && <Funnel aria-label={t("filter.filteredColumn")} className="size-3 shrink-0 text-accent-text" />}
         {sort && (sort.descending ? <ArrowDown className="size-3 shrink-0 text-accent-text" /> : <ArrowUp className="size-3 shrink-0 text-accent-text" />)}
       </button>
       <span

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import i18n from "../i18n";
+import { SQLITE_MAIN } from "../lib/connection";
 import { errorMessage, ipc } from "../lib/ipc";
 import type { ConnectionProfile, ConnectionView, DbObject, Namespace, PasswordChange, ServerInfo } from "../lib/types";
 import { useWorkspace } from "./workspace";
@@ -31,6 +32,7 @@ const SESSION_FIELDS = [
   "port",
   "username",
   "database",
+  "file",
   "tls",
   "tlsCaPath",
   "readOnly",
@@ -160,6 +162,12 @@ export const useConnections = create<ConnectionsState>((set, get) => {
       try {
         const items = await ipc.listDatabases(id);
         set((s) => ({ databases: { ...s.databases, [key]: { status: "ready", items } } }));
+        // A SQLite file holds one database: show its tables at once instead of a lone
+        // "main" that has to be opened first.
+        if (get().connections.find((c) => c.id === id)?.engine === "sqlite") {
+          set((s) => ({ expanded: { ...s.expanded, [nodeKey.database(id, SQLITE_MAIN)]: true } }));
+          await get().loadObjects(id, SQLITE_MAIN, null);
+        }
       } catch (e) {
         set((s) => ({ databases: { ...s.databases, [key]: { status: "error", message: errorMessage(e) } } }));
       }

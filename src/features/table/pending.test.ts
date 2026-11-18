@@ -6,6 +6,7 @@ import {
   blocker,
   canRedo,
   canUndo,
+  cellIndex,
   cellValue,
   current,
   EMPTY,
@@ -14,12 +15,14 @@ import {
   pasteMatrix,
   record,
   redo,
+  rowKey,
   setCells,
   setDeleted,
   summarize,
   toChangeSet,
   typedValue,
   undo,
+  withFull,
 } from "./pending";
 
 const col = (name: string, over: Partial<ColumnMeta> = {}): ColumnMeta => ({
@@ -204,6 +207,43 @@ describe("toChangeSet", () => {
       { column: "name", value: "pear" },
       { column: "id", value: "2" },
     ]);
+  });
+});
+
+describe("whole values", () => {
+  it("a cell cut for preview becomes editable once its whole value is known", () => {
+    const p = page();
+    expect(blocker(p, EMPTY, 1, 3)).toBe("truncated");
+    expect(withFull(p, {})).toBe(p); // nothing learned, nothing copied
+
+    const whole = "long text, all of it";
+    const known = withFull(p, { [cellIndex(p, 1, 3)]: whole });
+    expect(known.rows[1]![3]).toBe(whole);
+    expect(known.truncated).toEqual([]);
+    expect(blocker(known, EMPTY, 1, 3)).toBeNull();
+    // The loaded page is left as it was, and untouched rows are shared.
+    expect(p.rows[1]![3]).toBe("long…");
+    expect(known.rows[0]).toBe(p.rows[0]);
+    expect(known.columns).toBe(p.columns);
+
+    // The edit carries the complete original for the concurrency check.
+    const edited = setCells(known, EMPTY, [{ r: 1, c: 3, value: "short now" }]).pending;
+    expect(toChangeSet(known, edited).updates).toEqual([
+      { key: [{ column: "id", value: "2" }], changes: [{ column: "note", original: whole, value: "short now" }] },
+    ]);
+    // Typing the whole original back is no edit at all.
+    expect(setCells(known, edited, [{ r: 1, c: 3, value: whole }]).pending.edits).toEqual({});
+  });
+
+  it("addresses a row by its complete key, or not at all", () => {
+    expect(rowKey(page(), 1)).toEqual([{ column: "id", value: "2" }]);
+    expect(rowKey(page({ primaryKey: ["name", "id"] }), 1)).toEqual([
+      { column: "name", value: "pear" },
+      { column: "id", value: "2" },
+    ]);
+    expect(rowKey(page({ primaryKey: [] }), 1)).toBeNull();
+    expect(rowKey(page({ primaryKey: ["qty"] }), 1)).toBeNull(); // NULL key value
+    expect(rowKey(page({ primaryKey: ["note"] }), 1)).toBeNull(); // key cut for preview
   });
 });
 
