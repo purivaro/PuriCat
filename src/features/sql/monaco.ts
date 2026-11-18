@@ -175,8 +175,11 @@ export function createEditor(o: EditorOptions): monaco.editor.IStandaloneCodeEdi
     scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
   });
   editor.onDidChangeModelContent(() => o.onChange(editor.getValue()));
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, o.onRun);
+  // An action, not `addCommand`: a command's key binding is shared by every editor in the
+  // page, and the last editor created answers for all of them. An action belongs to its editor.
+  const run = editor.addAction({ id: "puricat.run", label: "Run", keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter], run: o.onRun });
   editor.onDidDispose(() => {
+    run.dispose();
     schemas.delete(model.uri.toString());
     model.dispose();
   });

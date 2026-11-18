@@ -460,6 +460,35 @@
     }
     log.push({ stage: "sql-more", allowed, failed, txn, historyItems, exported });
 
+    // Two query tabs: ⌘↵ pressed in the first runs the first tab's text, not the text of the
+    // tab opened last. The key goes to the editor itself, so that its own binding answers.
+    const editorKey = (init) =>
+      sqlTab().querySelector("textarea, .native-edit-context").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+    const pressRun = () => editorKey({ key: "Enter", code: "Enter", keyCode: 13, metaKey: true });
+    const queryTabs = () => all('[role="tablist"] [role="tab"]');
+    const queryTab = (name) => queryTabs().find((x) => x.querySelector(".truncate")?.textContent.trim() === name);
+    const inFront = (name) => queryTab(name)?.getAttribute("aria-selected") === "true" && !!sqlTab()?.__editor;
+    const hasRun = () => !!document.querySelector(`${panelSel} [data-sql-summary]`);
+    const tabsWithOne = queryTabs().length;
+    await rightClick(treeRow("Demo MySQL"));
+    await click(await waitFor(() => withText('[role="menuitem"]', "New query"), "new query menu"), "second query tab");
+    await waitFor(() => inFront("Query 2"), "second query tab", 30000);
+    sqlTab().__editor.setValue("SELECT 22 AS second_tab");
+    await click(queryTab("Query 1"), "first query tab");
+    await waitFor(() => inFront("Query 1"), "first query tab in front");
+    sqlTab().__editor.setValue("SELECT 11 AS first_tab");
+    await sleep(80);
+    pressRun();
+    await waitFor(() => gridCells().join() === "11", "⌘↵ to run the text of the tab it was pressed in", 20000);
+    await click(queryTab("Query 2"), "second query tab");
+    await waitFor(() => inFront("Query 2"), "second query tab in front");
+    if (hasRun()) throw new Error("⌘↵ in the first query tab also ran the second tab's text");
+    pressRun();
+    await waitFor(() => gridCells().join() === "22", "⌘↵ in the second tab", 20000);
+    await click(queryTab("Query 2").querySelector("button"), "close the second query tab");
+    await waitFor(() => queryTabs().length === tabsWithOne && inFront("Query 1"), "back to one query tab");
+    log.push({ stage: "sql-two-tabs", first: "11", second: "22" });
+
     // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
     await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
     await waitFor(() => cellText(0, 1) === "SO-10001" && editState() === "editable", "postgres orders tab");
