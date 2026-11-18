@@ -309,16 +309,19 @@ function Form({ existing, onDone }: { existing: ConnectionView | null; onDone: (
               <div className="text-[13px] font-medium">{t("connection.reviewRows")}</div>
               <div className="text-xs leading-snug text-fg-subtle">{t("connection.reviewRowsHint")}</div>
             </div>
-            <Input
-              value={String(form.bulkReviewRows)}
-              inputMode="numeric"
-              aria-label={t("connection.reviewRows")}
-              className="w-20 text-right tabular-nums"
-              onChange={(e) => {
-                const n = Number(e.target.value.replace(/\D/g, "").slice(0, 5));
-                setForm((f) => ({ ...f, bulkReviewRows: n }));
-              }}
-            />
+            {/* The input is as wide as its box: the width belongs on the box. */}
+            <div className="w-20 shrink-0">
+              <Input
+                value={String(form.bulkReviewRows)}
+                inputMode="numeric"
+                aria-label={t("connection.reviewRows")}
+                className="text-right tabular-nums"
+                onChange={(e) => {
+                  const n = Number(e.target.value.replace(/\D/g, "").slice(0, 5));
+                  setForm((f) => ({ ...f, bulkReviewRows: n }));
+                }}
+              />
+            </div>
           </div>
           {form.environment === "production" && !form.readOnly && (
             <div className="flex items-center gap-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn">
