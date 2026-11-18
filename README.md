@@ -1,135 +1,116 @@
 <p align="center">
-  <img src="branding/app-icon.png" width="112" alt="PuriCat icon">
+  ภาษาไทย &nbsp;·&nbsp; <a href="README.en.md"><b>Read this page in English</b></a>
+</p>
+
+<p align="center">
+  <img src="branding/app-icon.png" width="112" alt="ไอคอน PuriCat">
 </p>
 
 <h1 align="center">PuriCat</h1>
 
 <p align="center">
-  <b>A free database client that treats your data carefully.</b><br>
-  Browse and edit MySQL and PostgreSQL like a spreadsheet, see the exact SQL before anything is saved,<br>
-  and let an AI look things up — while every change still waits for your approval.
+  <b>โปรแกรมจัดการฐานข้อมูลที่ใช้ฟรี และดูแลข้อมูลของคุณอย่างระมัดระวัง</b><br>
+  เปิดดูและแก้ไข MySQL กับ PostgreSQL ได้เหมือนตารางคำนวณ เห็น SQL จริงก่อนบันทึกทุกครั้ง<br>
+  และให้ AI ช่วยค้นข้อมูลได้ โดยการแก้ไขทุกอย่างยังต้องรอคุณอนุมัติ
 </p>
 
 <p align="center">
-  <a href="https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg"><b>Download for macOS</b></a>
-  &nbsp;·&nbsp; <a href="README.th.md">ภาษาไทย</a>
-  &nbsp;·&nbsp; <a href="STATUS.md">What works today</a>
-  &nbsp;·&nbsp; <a href="LICENSE">MIT licence</a>
+  <a href="https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg"><b>ดาวน์โหลดสำหรับ macOS</b></a>
+  &nbsp;·&nbsp; <a href="STATUS.md">ตอนนี้ทำอะไรได้บ้าง</a>
+  &nbsp;·&nbsp; <a href="LICENSE">สัญญาอนุญาต MIT</a>
 </p>
 
-![PuriCat: a PostgreSQL table next to the AI agent, which has read the data and proposed a change that waits for approval](docs/images/hero.png)
+![PuriCat ภาษาไทย ธีมมืด: ตาราง PostgreSQL อยู่ข้างผู้ช่วย AI ที่อ่านข้อมูลแล้วเสนอการแก้ไขซึ่งรอการอนุมัติ](docs/images/thai-dark.png)
 
-> **Early development (v0.1).** PuriCat connects to **MySQL** and **PostgreSQL** and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
+> **อยู่ในช่วงเริ่มพัฒนา (v0.1)** PuriCat เชื่อมต่อ **MySQL** และ **PostgreSQL** ได้ และทดสอบแล้วบน **macOS (Apple Silicon)** เท่านั้น ยังไม่มีรุ่นสำหรับ Windows หรือ Linux ระหว่างที่ยังไม่คุ้นกับโปรแกรม ขอให้ใช้กับข้อมูลที่เสียได้ หรือใช้บัญชีที่อ่านได้อย่างเดียว เอกสาร [STATUS.md](STATUS.md) บอกทุกความสามารถพร้อมวิธีที่ทดสอบ
 
-## Download
+## ดาวน์โหลด
 
-| System | File |
+| ระบบ | ไฟล์ |
 |---|---|
-| **macOS** 12 or newer | [**PuriCat-mac.dmg**](https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg) — a universal app. Tested on Apple Silicon; the Intel half has not been run |
-| Windows, Linux | Not built yet |
+| **macOS** 12 ขึ้นไป | [**PuriCat-mac.dmg**](https://github.com/purivaro/PuriCat/releases/latest/download/PuriCat-mac.dmg) — แอปแบบ universal ทดสอบแล้วบน Apple Silicon ส่วนของ Intel ยังไม่เคยลองรัน |
+| Windows, Linux | ยังไม่มี |
 
-All versions and checksums are on the [Releases](https://github.com/purivaro/PuriCat/releases) page.
+ทุกเวอร์ชันและค่า checksum อยู่ที่หน้า [Releases](https://github.com/purivaro/PuriCat/releases)
 
-### Install on a Mac
+### ติดตั้งบน Mac
 
-1. Open `PuriCat-mac.dmg` and drag **PuriCat** into Applications.
-2. Open PuriCat. The app is **signed with a Developer ID and notarized by Apple**, so it opens like any other downloaded app: macOS asks once whether to open an app downloaded from the internet.
-3. Passwords you save are kept in the **macOS Keychain**, never in a file.
+1. เปิด `PuriCat-mac.dmg` แล้วลาก **PuriCat** ไปใส่โฟลเดอร์ Applications
+2. เปิด PuriCat ได้เลย แอป **เซ็นด้วย Developer ID และผ่านการตรวจ (notarize) ของ Apple แล้ว** macOS จะถามครั้งเดียวว่าต้องการเปิดแอปที่ดาวน์โหลดจากอินเทอร์เน็ตหรือไม่ เหมือนแอปทั่วไป
+3. รหัสผ่านที่บันทึกไว้เก็บใน **Keychain ของ macOS** ไม่เขียนลงไฟล์
 
-## What it does
+## ทำอะไรได้บ้าง
 
-### Edit tables like a spreadsheet, and read the SQL before it runs
+### แก้ไขตารางเหมือนตารางคำนวณ และอ่าน SQL ก่อนรัน
 
-Type in cells, add and delete rows, paste a block copied from Excel or Google Sheets, undo and redo. Nothing touches the database until you press Save. For deletes, larger changes and Production connections, a review shows **every statement with its values** first. Everything is saved in **one transaction**: if a row was changed by someone else in the meantime, nothing is saved.
+พิมพ์ในช่องได้เลย เพิ่มและลบแถว วางข้อมูลที่คัดลอกจาก Excel หรือ Google Sheets ย้อนกลับและทำซ้ำได้ ไม่มีอะไรไปถึงฐานข้อมูลจนกว่าจะกดบันทึก ถ้ามีการลบ แก้หลายแถว หรือเป็นการเชื่อมต่อ Production จะมีหน้าตรวจที่แสดง **ทุกคำสั่งพร้อมค่าที่ใช้** ก่อน และบันทึกทั้งหมดใน **transaction เดียว** ถ้ามีคนอื่นแก้แถวเดียวกันไประหว่างนั้น จะไม่มีอะไรถูกบันทึก
 
-![The review dialog: each DELETE, UPDATE and INSERT with its values, saved in one transaction](docs/images/edit-review.png)
+![หน้าตรวจก่อนบันทึก: คำสั่ง DELETE, UPDATE และ INSERT แต่ละคำสั่งพร้อมค่า](docs/images/edit-review.png)
 
-### Smart Paste: update a table from a spreadsheet
+### Smart Paste: อัปเดตตารางจากสเปรดชีต
 
-Copy rows from a spreadsheet and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs.
+คัดลอกแถวจากสเปรดชีตแล้วเลือก INSERT, UPDATE หรือ UPSERT PuriCat จับคู่แถวด้วยคีย์ที่ไม่ซ้ำ แล้วแสดงว่าแต่ละแถวจะถูกเพิ่ม แก้ เหมือนเดิมอยู่แล้ว หรือมีปัญหา ก่อนที่จะรันอะไร
 
-![Smart Paste: columns mapped to the table, and a preview of which rows will be inserted or updated](docs/images/smart-paste.png)
+![Smart Paste: จับคู่คอลัมน์กับตาราง และแสดงตัวอย่างว่าแถวใดจะถูกเพิ่มหรือแก้](docs/images/smart-paste.png)
 
-### A SQL console with guard rails
+### หน้าเขียน SQL ที่มีราวกันตก
 
-Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
+แท็บ query มีการไฮไลต์ไวยากรณ์ เติมคำอัตโนมัติ ประวัติคำสั่ง และส่งออกผลลัพธ์เป็น CSV, JSON หรือ XLSX แต่ละแท็บใช้การเชื่อมต่อของตัวเอง คำสั่งที่จะแก้เกินจำนวนแถวที่ตั้งไว้ (ค่าเริ่มต้น 10 แถว) จะถูก **ย้อนกลับ** แล้วถามคุณอีกครั้ง คำสั่งที่ทำลายข้อมูลต้องยืนยันก่อน และ transaction ที่เปิดค้างจะแสดงให้เห็นเสมอ
 
-![A query tab with two statements and one result tab for each](docs/images/sql-console.png)
+![แท็บ query ที่มีสองคำสั่ง และแท็บผลลัพธ์ของแต่ละคำสั่ง](docs/images/sql-console.png)
 
-### An AI agent that asks before it changes anything
+### ผู้ช่วย AI ที่ต้องขอก่อนแก้ไขอะไร
 
-PuriCat talks to the **Claude Code** or **Codex** command-line tool that you have installed and signed in to. It never asks for an API key or a password.
+PuriCat ใช้โปรแกรมบรรทัดคำสั่ง **Claude Code** หรือ **Codex** ที่คุณติดตั้งและลงชื่อเข้าใช้ไว้เอง แอปไม่ขอ API key หรือรหัสผ่านใด ๆ
 
-- **Off by default.** Out of the box the AI only sees table and column names, and only writes text.
-- **Structure**, or **Structure and rows**: you choose whether it may look at the catalogue, or also run read-only queries (one statement at a time, in a read-only transaction, at most 200 rows).
-- **It cannot write.** A change is a *proposal*: you read the SQL and see which connection and database it will run on, and PuriCat runs it only after you approve it. The row limit of the SQL console applies here too.
-- **Everything is visible.** Each step opens to show exactly what the AI was given, and an activity log on your computer records every read, proposal and decision.
+- **ปิดไว้เป็นค่าเริ่มต้น** ตอนแรก AI เห็นแค่ชื่อตารางกับชื่อคอลัมน์ และทำได้แค่เขียนข้อความ
+- **โครงสร้าง** หรือ **โครงสร้างและข้อมูล**: คุณเลือกเองว่าจะให้ AI ดูโครงสร้างได้ หรือรัน query แบบอ่านอย่างเดียวได้ด้วย (ครั้งละหนึ่งคำสั่ง ใน transaction แบบอ่านอย่างเดียว ไม่เกิน 200 แถว)
+- **AI เขียนข้อมูลเองไม่ได้** การแก้ไขเป็นเพียง *ข้อเสนอ* คุณอ่าน SQL และเห็นว่าจะรันบนการเชื่อมต่อและฐานข้อมูลใด PuriCat จะรันก็ต่อเมื่อคุณอนุมัติ และขีดจำกัดจำนวนแถวของหน้า SQL ใช้กับข้อเสนอด้วย
+- **เห็นได้ทุกอย่าง** แต่ละขั้นตอนเปิดดูได้ว่า AI ได้รับอะไรไปบ้าง และมีบันทึกกิจกรรมในเครื่องของคุณที่เก็บทุกการอ่าน ทุกข้อเสนอ และทุกการตัดสินใจ
 
-![The approval dialog: the proposed SQL, the connection it runs on and the guards that apply](docs/images/ai-review.png)
+![หน้าต่างอนุมัติ: SQL ที่เสนอ การเชื่อมต่อที่จะรัน และสิ่งที่คอยกันไว้](docs/images/ai-review.png)
 
-![The activity log: the queries the AI ran, what it proposed and what was approved](docs/images/ai-activity-log.png)
+![บันทึกกิจกรรม: query ที่ AI รัน สิ่งที่เสนอ และสิ่งที่ได้รับอนุมัติ](docs/images/ai-activity-log.png)
 
-To use the agent, install [Claude Code](https://claude.com/claude-code) and sign in (`claude auth login`); PuriCat finds it by itself. Codex is supported the same way, but its tool calls have not been verified yet. What you send to the AI goes to that provider under your own account: [AI_INTEGRATION.md](AI_INTEGRATION.md) says exactly what is sent.
+วิธีใช้ผู้ช่วย: ติดตั้ง [Claude Code](https://claude.com/claude-code) แล้วลงชื่อเข้าใช้ (`claude auth login`) PuriCat จะหาเจอเอง Codex ใช้ได้แบบเดียวกัน แต่ยังไม่ได้ยืนยันการเรียกเครื่องมือ สิ่งที่ส่งให้ AI จะไปถึงผู้ให้บริการรายนั้นภายใต้บัญชีของคุณเอง เอกสาร [AI_INTEGRATION.md](AI_INTEGRATION.md) บอกไว้ว่าส่งอะไรบ้าง
 
-### English and Thai, light and dark
+### ภาษาไทยและอังกฤษ ธีมสว่างและมืด
 
-![The same screen in Thai with the dark theme](docs/images/thai-dark.png)
+![หน้าจอเดียวกันในภาษาอังกฤษ ธีมสว่าง](docs/images/hero.png)
 
-## Built to be safe
+## ออกแบบมาให้ปลอดภัย
 
-- **Passwords stay in the macOS Keychain.** They are never written to PuriCat's settings or logs, and never sent to the AI.
-- **No telemetry.** PuriCat's own code opens no connection except to your databases. The AI panel starts the CLI you installed, and that tool talks to its provider.
-- **Environment labels.** Mark a connection as Development, Staging or Production; Production adds confirmations. A connection can also be opened read-only, enforced by the server.
-- **Exact values.** Numbers, dates and JSON are shown as the server renders them: no rounding of a `DECIMAL`, no loss beyond 2^53.
-- **The AI never holds your credentials.** Its tools run inside PuriCat on the connection you already opened, for the length of one answer.
+- **รหัสผ่านอยู่ใน Keychain ของ macOS** ไม่เขียนลงไฟล์ตั้งค่าหรือ log และไม่ส่งให้ AI
+- **ไม่มีการเก็บสถิติการใช้งาน** โค้ดของ PuriCat เองไม่เชื่อมต่อไปที่ใดนอกจากฐานข้อมูลของคุณ ส่วนผู้ช่วย AI เรียกโปรแกรมที่คุณติดตั้งไว้ ซึ่งติดต่อกับผู้ให้บริการของมันเอง
+- **ป้ายสภาพแวดล้อม** ระบุได้ว่าการเชื่อมต่อเป็น Development, Staging หรือ Production โดย Production จะมีการยืนยันเพิ่ม และเปิดการเชื่อมต่อแบบอ่านอย่างเดียวที่บังคับโดยเซิร์ฟเวอร์ได้
+- **ค่าตรงตามจริง** ตัวเลข วันที่ และ JSON แสดงตามที่เซิร์ฟเวอร์ให้มา ไม่ปัดเศษ `DECIMAL` และไม่เพี้ยนเมื่อเลขเกิน 2^53
+- **AI ไม่เคยได้รหัสผ่านของคุณ** เครื่องมือของ AI ทำงานอยู่ใน PuriCat บนการเชื่อมต่อที่คุณเปิดไว้แล้ว และมีอยู่เฉพาะช่วงที่ตอบหนึ่งคำถาม
 
-The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY.md).
+รายละเอียดและข้อจำกัดของแต่ละข้ออยู่ใน [SECURITY.md](SECURITY.md)
 
-## Not there yet
+## สิ่งที่ยังไม่มี
 
-SQL Server, SSH tunnels, creating and altering tables, import from files, backups, filtering in the grid, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+SQL Server, SSH tunnel, การสร้างและแก้โครงสร้างตาราง, การนำเข้าจากไฟล์, การสำรองข้อมูล, การกรองข้อมูลในตาราง และรุ่นสำหรับ Windows หรือ Linux อยู่ในแผนแต่ยังไม่ได้ทำ ลำดับงานอยู่ใน [ROADMAP.md](ROADMAP.md)
 
-## Build from source
+## สร้างจากซอร์สโค้ด
 
-You need Rust 1.85 or newer, Node.js 22 or newer and pnpm 10, on macOS 12 or newer with the Xcode Command Line Tools.
+ต้องมี Rust 1.85 ขึ้นไป, Node.js 22 ขึ้นไป และ pnpm 10 บน macOS 12 ขึ้นไปที่ติดตั้ง Xcode Command Line Tools แล้ว
 
 ```sh
 pnpm install
-pnpm tauri dev      # run the app (the first build takes several minutes)
-pnpm tauri build    # make PuriCat.app and a .dmg
-pnpm check          # type-check, unit tests, cargo fmt, clippy, cargo test
+pnpm tauri dev      # เปิดแอป (build ครั้งแรกใช้เวลาหลายนาที)
+pnpm tauri build    # สร้าง PuriCat.app และไฟล์ .dmg
+pnpm check          # ตรวจชนิดข้อมูล unit test, cargo fmt, clippy, cargo test
 ```
 
-Tests against real MySQL and PostgreSQL servers, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
+การทดสอบกับเซิร์ฟเวอร์ MySQL และ PostgreSQL จริง และการทดสอบแบบ end-to-end ที่ขับหน้าต่างจริง อธิบายไว้ใน [TESTING.md](TESTING.md)
 
-A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them (in a fork, for example) it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain; v0.1.0 was published that way, before the secrets were set.
+การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มี (เช่นใน fork) จะเซ็นแบบ ad-hoc เท่านั้น ส่วน [`scripts/release-mac.sh`](scripts/release-mac.sh) ใช้สร้างไฟล์แบบเดียวกันด้วยมือบน Mac ที่มี Developer ID ใน Keychain (v0.1.0 ออกด้วยวิธีนี้ ก่อนจะตั้ง secrets)
 
-```
-crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the SQL console,
-               the AI chat runner and the tools it serves (no Tauri dependency)
-src-tauri/     the Tauri app: IPC commands, app state, bundle configuration
-src/           the React frontend
-e2e/           the end-to-end test: runner, script, SQL fixtures, stand-in AI CLIs
-docs/          decision records (docs/adr) and the screenshots on this page
-```
+เอกสารทั้งหมด (ภาษาอังกฤษ) อยู่ในตารางท้าย [README.en.md](README.en.md#documentation)
 
-## Documentation
+## สัญญาอนุญาต
 
-| Document | Contents |
-|---|---|
-| [STATUS.md](STATUS.md) | Every feature, and how it is known to work |
-| [ROADMAP.md](ROADMAP.md) | What comes next |
-| [SECURITY.md](SECURITY.md) | Threat model, credentials, TLS, the SQL console, the AI |
-| [AI_INTEGRATION.md](AI_INTEGRATION.md) | How the AI CLIs are run, what is sent, the database tools |
-| [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md) | Engines, versions and features |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Components, data flow, IPC surface |
-| [TESTING.md](TESTING.md) | Test layers, commands, results and gaps |
-| [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements and acceptance criteria |
-| [docs/adr/](docs/adr/README.md) | Architecture decision records |
-| [LICENSES.md](LICENSES.md) | Licences of the libraries PuriCat uses |
+PuriCat เป็นซอฟต์แวร์เสรีและเปิดซอร์สภายใต้ [สัญญาอนุญาต MIT](LICENSE) ใช้ แจกจ่าย และแก้ไขได้
 
-## Licence
-
-PuriCat is free and open source under the [MIT licence](LICENSE). Use it, share it, change it.
-
-The screenshots on this page were taken from a debug build running against a demo database. The AI answers in them are real answers from Claude Code.
+ภาพหน้าจอในหน้านี้ถ่ายจากรุ่น debug ที่ต่อกับฐานข้อมูลตัวอย่าง คำตอบของ AI ในภาพเป็นคำตอบจริงจาก Claude Code
