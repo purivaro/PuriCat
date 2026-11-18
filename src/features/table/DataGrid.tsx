@@ -598,28 +598,38 @@ function CellEditor({ editing, numeric, onText, onDone }: CellEditorProps) {
     el.setSelectionRange(el.value.length, el.value.length);
   }, [multiline]);
 
+  // An edit ends once. Ending it hands the focus back to the grid, which blurs this input:
+  // without the guard that blur would commit what Escape had just cancelled, and record
+  // an edit ended with Enter or Tab a second time (so the first undo seemed to do nothing).
+  const ended = useRef(false);
+  const end = (commit: boolean, move?: [number, number]) => {
+    if (ended.current) return;
+    ended.current = true;
+    onDone(commit, move);
+  };
+
   const shared = {
     ref,
     value: editing.text,
     spellCheck: false,
     "aria-label": "Edit cell",
     onChange: (e: { target: { value: string } }) => onText(e.target.value),
-    onBlur: () => onDone(true),
+    onBlur: () => end(true),
     onMouseDown: (e: { stopPropagation: () => void }) => e.stopPropagation(),
     onDoubleClick: (e: { stopPropagation: () => void }) => e.stopPropagation(),
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
       e.stopPropagation(); // the grid's own shortcuts must not fire while typing
-      if (e.key === "Escape") onDone(false);
+      if (e.key === "Escape") end(false);
       else if (e.key === "Tab") {
         e.preventDefault();
-        onDone(true, [0, e.shiftKey ? -1 : 1]);
+        end(true, [0, e.shiftKey ? -1 : 1]);
       } else if (e.key === "Enter" && e.altKey) {
         e.preventDefault();
         const el = e.currentTarget as HTMLTextAreaElement;
         onText(`${el.value.slice(0, el.selectionStart)}\n${el.value.slice(el.selectionEnd)}`);
       } else if (e.key === "Enter") {
         e.preventDefault();
-        onDone(true, [e.shiftKey ? -1 : 1, 0]);
+        end(true, [e.shiftKey ? -1 : 1, 0]);
       }
     },
   };
