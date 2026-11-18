@@ -36,6 +36,7 @@ import {
   StateMessage,
 } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
+import { homeDatabase } from "../../lib/connection";
 import { errorMessage, ipc, toAppError } from "../../lib/ipc";
 import type {
   ExportFormat,
@@ -104,7 +105,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   const theme = useSettings((s) => s.theme);
   const connected = session.status === "connected";
   const hasSchemas = connected && session.info.capabilities.schemas;
-  const database = tab.database ?? connection?.database ?? (hasSchemas ? "postgres" : null);
+  const database = tab.database ?? (connection ? homeDatabase(connection, hasSchemas) : null);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -474,7 +475,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
       const selection = editor.getSelection();
       const whole = !selection || selection.isEmpty();
       const formatted = formatSql(monaco.textToRun(editor), {
-        language: engine === "postgres" ? "postgresql" : engine === "mysql" ? "mysql" : "sql",
+        language: engine === "postgres" ? "postgresql" : engine === "mysql" ? "mysql" : engine === "sqlite" ? "sqlite" : "sql",
         keywordCase: "upper",
         tabWidth: 2,
       });
@@ -557,7 +558,8 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
           <span className="truncate font-medium">{connection.name}</span>
           <EnvBadge environment={connection.environment} />
         </div>
-        {hasSchemas ? (
+        {/* A PostgreSQL tab stays on its database, and a SQLite file has only one. */}
+        {hasSchemas || connection.engine === "sqlite" ? (
           <span className="shrink-0 rounded-md bg-sunken px-2 py-1 font-mono text-xs text-fg-muted" title={t("sql.database")}>
             {database}
           </span>

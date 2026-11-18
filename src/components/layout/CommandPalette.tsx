@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { LANGUAGES } from "../../i18n";
+import { place } from "../../lib/connection";
 import type { ObjectKind, TableRef } from "../../lib/types";
 import { nodeKey, sessionOf, useConnections } from "../../stores/connections";
 import { resolveTheme, useSettings } from "../../stores/settings";
@@ -127,7 +128,7 @@ export function CommandPalette() {
             {connections.map((c) => (
               <Item
                 key={c.id}
-                value={`connection ${c.name} ${c.host} ${c.tags.join(" ")} ${c.id}`}
+                value={`connection ${c.name} ${place(c)} ${c.tags.join(" ")} ${c.id}`}
                 icon={<EngineTag engine={c.engine} />}
                 trailing={
                   <>
@@ -142,7 +143,7 @@ export function CommandPalette() {
                 onSelect={run(() => void openConnection(c.id))}
               >
                 {c.name}
-                <span className="ml-2 text-xs text-fg-subtle">{c.host}</span>
+                <span className="ml-2 text-xs text-fg-subtle">{c.engine === "sqlite" ? place(c) : c.host}</span>
               </Item>
             ))}
           </Command.Group>

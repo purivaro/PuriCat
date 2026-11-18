@@ -1,6 +1,6 @@
 // Mirrors the serde types in crates/core. Keep the two in sync.
 
-export type Engine = "mysql" | "postgres" | "sqlserver";
+export type Engine = "mysql" | "postgres" | "sqlite" | "sqlserver";
 export type Environment = "development" | "staging" | "production";
 export type TlsMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 
@@ -13,6 +13,8 @@ export interface ConnectionProfile {
   port: number;
   username: string;
   database: string | null;
+  /** SQLite only: the database file, as an absolute path. */
+  file: string | null;
   tls: TlsMode;
   tlsCaPath: string | null;
   readOnly: boolean;

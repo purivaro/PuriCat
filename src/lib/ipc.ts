@@ -109,6 +109,8 @@ export const ipc = {
     invoke<number>("export_result", { tab, result, format, path }),
   /** Shows the native Open dialog (CSV, Excel). `null` when it was cancelled. */
   pickTableFile: () => invoke<PickedFile | null>("pick_table_file"),
+  /** Shows the native Open dialog for a SQLite file and gives its path. `null` when it was cancelled. */
+  pickDatabaseFile: () => invoke<string | null>("pick_database_file"),
   readTableFile: (token: string, options: FileReadOptions) => invoke<FileTable>("read_table_file", { token, options }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),

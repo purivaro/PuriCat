@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end smoke test: real window, real IPC, real local MySQL + PostgreSQL.
+# End-to-end smoke test: real window, real IPC, real local MySQL + PostgreSQL, and a SQLite file.
 #
 #   e2e/run.sh            run the test
 #   SHOTS=1 e2e/run.sh    also save a screenshot of the window at each stage (macOS)
 #   KEEP_DB=1 e2e/run.sh  leave the `puricat_e2e` demo databases in place afterwards
+#   SMOKE=<file> e2e/run.sh   inject another script (a part of smoke.js, while working on it);
+#                             the checks of the full run's files then do not apply
 #
 # Needs local servers that accept:  mysql -u$MYSQL_USER -h127.0.0.1   /   psql -U$PG_USER -h127.0.0.1
 # It creates ONE database on each server, `puricat_e2e`, and drops it again. Nothing else is touched,
@@ -26,7 +28,11 @@ echo "› fixtures"
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' -c 'CREATE DATABASE puricat_e2e'
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -v ON_ERROR_STOP=1 -f "$ROOT/e2e/fixtures/postgres.sql" >/dev/null
 
-sed -e "s/__MYSQL_USER__/$MYSQL_USER/" -e "s/__PG_USER__/$PG_USER/" -e "s|__WORK__|$WORK|g" "$ROOT/e2e/smoke.js" >"$WORK/smoke.js"
+# SQLite needs no server: a throwaway file, made with the sqlite3 that ships with macOS.
+SQLITE3=${SQLITE3:-sqlite3}
+"$SQLITE3" "$WORK/demo.sqlite" <"$ROOT/e2e/fixtures/sqlite.sql"
+
+sed -e "s/__MYSQL_USER__/$MYSQL_USER/" -e "s/__PG_USER__/$PG_USER/" -e "s|__WORK__|$WORK|g" "${SMOKE:-$ROOT/e2e/smoke.js}" >"$WORK/smoke.js"
 # A script that does not parse would leave the app waiting for a test that never starts.
 if command -v node >/dev/null 2>&1; then
   node --check "$WORK/smoke.js" || { echo "✗ e2e/smoke.js has a syntax error"; exit 1; }
@@ -126,6 +132,13 @@ if [ "$last" = done ]; then
   unzip -p "$WORK/export.xlsx" xl/sharedStrings.xml | grep -q 'สมชาย ใจดี' || { echo "✗ export check failed: xlsx"; exit 1; }
   head -c 3 "$WORK/export.csv" | xxd -p | grep -q '^efbbbf$' || { echo "✗ export check failed: CSV has no byte-order mark"; exit 1; }
   echo "  · exported CSV, JSON and XLSX verified"
+
+  # SQLite: the edit saved through the grid is in the file, the refused one is not, and
+  # testing a path that does not exist did not create a database there.
+  title=$("$SQLITE3" "$WORK/demo.sqlite" "SELECT title || '|' || pages || '|' || typeof(pages) FROM books WHERE id = 1")
+  [ "$title" = "ธรรมบท ภาค ๑ (ตรวจแล้ว)|248|integer" ] || { echo "✗ sqlite check failed: the file holds $title"; exit 1; }
+  [ ! -e "$WORK/nothing-here.sqlite" ] || { echo "✗ sqlite check failed: a database was created at a mistyped path"; exit 1; }
+  echo "  · SQLite: the saved edit is in the file"
 
   # What the agent chat gave the CLI: the schema and the conversation on stdin, nothing that
   # identifies the server, no tools, and an empty working directory of the app's own.

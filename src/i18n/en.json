@@ -29,6 +29,7 @@
   "engine": {
     "mysql": "MySQL",
     "postgres": "PostgreSQL",
+    "sqlite": "SQLite",
     "sqlserver": "SQL Server"
   },
   "titlebar": {
@@ -49,7 +50,7 @@
     "favorites": "Favorites",
     "all": "All connections",
     "emptyTitle": "No connections yet",
-    "emptyBody": "Add a MySQL or PostgreSQL server to start browsing.",
+    "emptyBody": "Add a MySQL or PostgreSQL server, or a SQLite file, to start browsing.",
     "noMatch": "Nothing matches “{{query}}”.",
     "noDatabases": "No databases visible to this user",
     "noSchemas": "No schemas",
@@ -114,6 +115,11 @@
     "tlsCaPlaceholder": "/path/to/ca.pem — uses system certificates if empty",
     "readOnly": "Read-only session",
     "readOnlyHint": "The server rejects every write made through this connection.",
+    "readOnlyHintFile": "The file is opened so that it cannot be written. Turn this off to edit its data.",
+    "file": "Database file",
+    "filePlaceholder": "/Users/you/project/data.sqlite",
+    "fileBrowse": "Browse…",
+    "fileHint": "An existing SQLite file on this computer (.db, .sqlite, .sqlite3 or any other name). Nothing in it changes until you save an edit or run a statement.",
     "ssh": "SSH tunnel",
     "sshPlanned": "SSH tunnelling with host-key verification is planned for the next milestone.",
     "tags": "Tags",
@@ -151,7 +157,7 @@
     "next": "Coming next",
     "features": {
       "connections": "Saved connections with passwords in the system keychain",
-      "engines": "MySQL and PostgreSQL, with TLS and server-enforced read-only sessions",
+      "engines": "MySQL and PostgreSQL servers and SQLite files, with TLS and read-only sessions that the server or the file handle enforces",
       "browse": "Explore databases, schemas, tables and views across several servers at once",
       "grid": "Fast virtualized data grid with sorting, paging and exact server-side values",
       "themes": "Light and dark themes, English and Thai",

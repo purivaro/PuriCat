@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { BrandMark, EngineTag, EnvBadge } from "../../components/Brand";
 import { Button } from "../../components/ui/primitives";
+import { place } from "../../lib/connection";
 import { nodeKey, useConnections } from "../../stores/connections";
 import { useSettings } from "../../stores/settings";
 import { useUi } from "../../stores/ui";
@@ -71,7 +72,7 @@ export function WelcomeTab() {
                         <EnvBadge environment={c.environment} />
                       </span>
                       <span className="block truncate text-xs text-fg-subtle">
-                        {c.host}:{c.port} · {c.lastUsedAt ? when.format(c.lastUsedAt) : t("welcome.neverUsed")}
+                        {place(c)} · {c.lastUsedAt ? when.format(c.lastUsedAt) : t("welcome.neverUsed")}
                       </span>
                     </span>
                     <ArrowRight className="size-4 shrink-0 text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100" />

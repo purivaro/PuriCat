@@ -29,7 +29,7 @@ import type { Engine } from "../../lib/types";
   getWorker: () => new EditorWorker(),
 };
 
-export const LANGUAGE: Record<Engine, string> = { mysql: "mysql", postgres: "pgsql", sqlserver: "sql" };
+export const LANGUAGE: Record<Engine, string> = { mysql: "mysql", postgres: "pgsql", sqlite: "sql", sqlserver: "sql" };
 
 let swatch: CanvasRenderingContext2D | null | undefined;
 

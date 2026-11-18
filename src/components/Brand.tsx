@@ -13,6 +13,7 @@ export function BrandMark({ className }: { className?: string }) {
 const ENGINES: Record<Engine, { short: string; className: string }> = {
   mysql: { short: "My", className: "bg-[#e6f1f5] text-[#0b6480] dark:bg-[#0b6480]/25 dark:text-[#7cc7de]" },
   postgres: { short: "Pg", className: "bg-[#e8eef7] text-[#2f5d8f] dark:bg-[#2f5d8f]/30 dark:text-[#8fb6e3]" },
+  sqlite: { short: "Sq", className: "bg-[#e7f3ec] text-[#256b45] dark:bg-[#256b45]/30 dark:text-[#8fd3ab]" },
   sqlserver: { short: "Ms", className: "bg-[#f8e9e9] text-[#a3262b] dark:bg-[#a3262b]/25 dark:text-[#ec9a9d]" },
 };
 

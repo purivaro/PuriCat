@@ -1237,6 +1237,88 @@
     const codexAnswer = flat(lastAnswer());
     await stage("agent-codex", { codex, codexModels, codexRefused, codexAnswer, opened, modelRefused, retried, stopped });
 
+    // ---- SQLite: a database file, from the connection form to a saved edit --------------
+    await click(document.querySelector('button[aria-label="New connection"]'), "new connection");
+    await waitFor(dialog, "connection dialog");
+    await click(document.querySelector('[role="dialog"] [data-engine="sqlite"]'), "sqlite engine");
+    const fileInput = await waitFor(() => document.querySelector('[role="dialog"] [data-sqlite-file]'), "the file field");
+    const readOnlySwitch = () => document.querySelector('[role="dialog"] [role="switch"]');
+    const sqliteForm = {
+      // Nothing of a server is asked for a file, and a new file connection starts read-only.
+      serverFields: ["Host", "Port", "Username", "Password", "TLS"].filter((label) =>
+        all('[role="dialog"] label').some((l) => l.querySelector("span")?.textContent.trim().startsWith(label)),
+      ),
+      readOnlyByDefault: readOnlySwitch().getAttribute("aria-checked"),
+    };
+    if (sqliteForm.serverFields.length > 0 || sqliteForm.readOnlyByDefault !== "true") throw new Error(`the SQLite form is not what it should be: ${JSON.stringify(sqliteForm)}`);
+    await type(field("Name"), "Demo SQLite");
+    const testFile = async (path) => {
+      await type(fileInput, path);
+      await waitFor(() => !document.querySelector('[role="dialog"] [data-test-result]'), "the earlier test result to go");
+      await click(exact('[role="dialog"] button', "Test connection"), "test");
+      return (await waitFor(() => document.querySelector('[role="dialog"] [data-test-result]'), `test result for ${path}`, 20000)).textContent.replace(/\s+/g, " ").trim();
+    };
+    // A file that is something else, and a path that does not exist: clear refusals.
+    const notADatabase = await testFile("__WORK__/export.csv");
+    if (!notADatabase.includes("not a SQLite database")) throw new Error(`a CSV file was not refused as it should be: ${notADatabase}`);
+    const missingFile = await testFile("__WORK__/nothing-here.sqlite");
+    if (missingFile.startsWith("Connected")) throw new Error("a file that does not exist reported success");
+    const sqliteTest = await testFile("__WORK__/demo.sqlite");
+    if (!sqliteTest.startsWith("Connected to SQLite 3.")) throw new Error(`SQLite test failed: ${sqliteTest}`);
+    await stage("dialog-sqlite", { sqliteForm, notADatabase, missingFile, sqliteTest });
+    await save();
+
+    // Its tables are listed at once (the file's one database is opened for you), and as the
+    // connection is read-only the table cannot be edited.
+    await click(treeRow("Demo SQLite"), "sqlite node");
+    await click(await waitFor(() => treeRow("books"), "sqlite tables"), "books");
+    await waitFor(() => cellText(0, 1) === "ธรรมบท ภาค ๑", "sqlite rows");
+    const sqliteReadOnly = { state: editState(), firstRow: gridCells(), footer: footer(), tree: all("[data-tree-row]").map(rowLabel).filter((x) => ["main", "books", "tags", "long_books"].includes(x)) };
+    if (sqliteReadOnly.state !== "read-only") throw new Error("a read-only SQLite connection shows an editable table");
+    // 2^53 + 1 and a blob, exactly as stored.
+    if (cellText(2, 2) !== "9007199254740993" || cellText(0, 6) !== "0x89504E47") throw new Error(`SQLite values are not shown exactly: ${cellText(2, 2)}, ${cellText(0, 6)}`);
+
+    // Turn read-only off in the connection form; the session is opened again with it.
+    await rightClick(treeRow("Demo SQLite"));
+    await click(await waitFor(() => menuItem("Edit…"), "context menu"), "edit connection");
+    await waitFor(() => document.querySelector('[role="dialog"] [data-sqlite-file]')?.value === "__WORK__/demo.sqlite", "the form of the saved connection");
+    await click(readOnlySwitch(), "read-only off");
+    await waitFor(() => readOnlySwitch().getAttribute("aria-checked") === "false", "switch off");
+    await click(exact('[role="dialog"] button', "Save"), "save connection");
+    await waitFor(() => !dialog(), "dialog to close");
+    await click(treeRow("Demo SQLite"), "sqlite node again");
+    await waitFor(() => editState() === "editable" && cellText(0, 1) === "ธรรมบท ภาค ๑", "an editable table", 20000);
+
+    // An edit, and text that is not a number for a column of numbers: SQLite would store
+    // it, PuriCat refuses the save and keeps what was typed.
+    mouse(cellAt(0, 1), "dblclick");
+    await typeInEditor("ธรรมบท ภาค ๑ (ตรวจแล้ว)");
+    await waitFor(() => cellAt(0, 1)?.dataset.edited === "true", "staged title");
+    mouse(cellAt(0, 3), "dblclick");
+    await typeInEditor("many");
+    await waitFor(() => cellAt(0, 3)?.dataset.edited === "true", "staged pages");
+    await click(panelButton("Save"), "save with a bad number");
+    const sqliteRefused = (await waitFor(() => document.querySelector(`${panelSel} [data-save-error]`), "the refusal")).textContent.replace(/\s+/g, " ").trim();
+    if (!sqliteRefused.includes("not a number")) throw new Error(`the bad number was not refused as it should be: ${sqliteRefused}`);
+    if (cellText(0, 1) !== "ธรรมบท ภาค ๑ (ตรวจแล้ว)") throw new Error("the staged title was lost after the refused save");
+    await gridKey("z", { metaKey: true });
+    await waitFor(() => cellText(0, 3) === "248", "the bad number undone");
+    await click(panelButton("Save"), "save");
+    await waitFor(() => !document.querySelector(`${panelSel} [data-dirty-bar]`) && cellText(0, 1) === "ธรรมบท ภาค ๑ (ตรวจแล้ว)" && cellAt(0, 1).dataset.edited !== "true", "saved and reloaded", 15000);
+    await stage("sqlite-books", { sqliteReadOnly, sqliteRefused, firstRow: gridCells(), footer: footer() });
+
+    // A query tab on the file: what SQLite really stores, and a statement of its own dialect.
+    await rightClick(treeRow("Demo SQLite"));
+    await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
+    await waitFor(() => sqlTab()?.__editor && activePanel().textContent.includes("Demo SQLite"), "sqlite query tab", 30000);
+    await runSql("SELECT title, typeof(price) AS stored_as, price FROM books ORDER BY id;\nPRAGMA table_info(tags);");
+    await waitFor(() => gridCells().includes("ธรรมบท ภาค ๑ (ตรวจแล้ว)"), "sqlite result rows", 20000);
+    await stage("sqlite-sql", {
+      row: gridCells(),
+      tabs: all(`${panelSel} [role="tab"]`).map((b) => b.textContent.replace(/\s+/g, " ").trim()),
+      summary: document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim(),
+    });
+
     // ---- duplicate + delete through context menus -----------------------------------
     await rightClick(treeRow("Demo MySQL"));
     await click(await waitFor(() => menuItem("Duplicate"), "context menu"), "duplicate");
@@ -1302,6 +1384,19 @@
     const thaiScripts = (await waitFor(() => document.querySelector("[data-sql-scripts][data-state=open] [data-script-empty]"), "empty list in Thai")).parentElement.parentElement.textContent.replace(/\s+/g, " ").trim();
     await stage("thai-dark-sql", { thaiScripts, save: saveButton().getAttribute("aria-label") });
     await closeScripts();
+    // The SQLite connection form in Thai and dark.
+    await rightClick(treeRow("Demo SQLite"));
+    await click(await waitFor(() => menuItem("แก้ไข…"), "context menu in Thai"), "edit the sqlite connection");
+    await waitFor(() => document.querySelector('[role="dialog"] [data-sqlite-file]')?.value === "__WORK__/demo.sqlite", "the sqlite form in Thai");
+    const thaiSqlite = {
+      labels: all('[role="dialog"] label > span:first-child').map((x) => x.textContent.replace(/\s+/g, " ").trim()),
+      buttons: all('[role="dialog"] button').map((b) => b.textContent.replace(/\s+/g, " ").trim()).filter(Boolean),
+      readOnly: document.querySelector('[role="dialog"] [role="switch"]').getAttribute("aria-checked"),
+    };
+    if (!thaiSqlite.labels.includes("ไฟล์ฐานข้อมูล") || !thaiSqlite.buttons.includes("เลือกไฟล์…")) throw new Error(`the SQLite form is not in Thai: ${JSON.stringify(thaiSqlite)}`);
+    await stage("thai-dark-sqlite", { thaiSqlite });
+    await click(exact('[role="dialog"] button', "ยกเลิก"), "cancel the form");
+    await waitFor(() => !dialog(), "dialog to close");
     await palette("ธีมสว่าง");
     await waitFor(() => document.documentElement.dataset.theme === "light", "light theme");
     await click(all('[role="tab"]')[0], "welcome tab");
