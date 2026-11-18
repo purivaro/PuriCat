@@ -206,11 +206,29 @@
     await waitFor(() => cellText(0, 1) === "สมชาย ใจดี", "customers rows");
     if (editState() !== "editable") throw new Error("customers should be editable");
 
-    // 1. double-click a cell and type
+    // 0. Escape leaves the cell as it was: nothing is staged
+    const cityBefore = cellText(0, 2);
+    mouse(cellAt(0, 2), "dblclick");
+    const discarded = await waitFor(editor, "cell editor");
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(discarded, "typed, then given up");
+    discarded.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(60);
+    editor().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await waitFor(() => !editor(), "editor closed by Escape");
+    await sleep(150);
+    if (cellText(0, 2) !== cityBefore || cellAt(0, 2).dataset.edited === "true" || dirtySummary()) {
+      throw new Error(`Escape kept the edit: ${cellText(0, 2)} / ${dirtySummary()}`);
+    }
+
+    // 1. double-click a cell and type; one undo takes it back, one redo restores it
     mouse(cellAt(0, 2), "dblclick");
     await typeInEditor("เชียงราย");
     await waitFor(() => cellAt(0, 2)?.dataset.edited === "true" && cellText(0, 2) === "เชียงราย", "staged edit");
     const afterTyping = dirtySummary();
+    await gridKey("z", { metaKey: true });
+    await waitFor(() => cellText(0, 2) === cityBefore && !dirtySummary(), "one undo for one typed edit");
+    await gridKey("z", { metaKey: true, shiftKey: true });
+    await waitFor(() => cellText(0, 2) === "เชียงราย" && dirtySummary() === afterTyping, "redo of the typed edit");
 
     // 2. paste a 3x2 block copied from a spreadsheet: quotes, a tab inside a cell, and one row past the end
     let previousClipboard = null;
