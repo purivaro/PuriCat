@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>A free database client that treats your data carefully.</b><br>
-  Browse and edit MySQL and PostgreSQL like a spreadsheet, see the exact SQL before anything is saved,<br>
+  Browse and edit MySQL, PostgreSQL and SQLite like a spreadsheet, see the exact SQL before anything is saved,<br>
   and let an AI look things up — while every change still waits for your approval.
 </p>
 
@@ -19,7 +19,7 @@
 
 ![PuriCat: a PostgreSQL table next to the AI agent, which has read the data and proposed a change that waits for approval](docs/images/hero.png)
 
-> **Early development (v0.1).** PuriCat connects to **MySQL** and **PostgreSQL** and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
+> **Early development (v0.1).** PuriCat connects to **MySQL** and **PostgreSQL** servers and opens **SQLite** files, and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
 
 ## Download
 
@@ -71,6 +71,10 @@ PuriCat talks to the **Claude Code** or **Codex** command-line tool that you hav
 
 To use the agent, install [Claude Code](https://claude.com/claude-code) and sign in (`claude auth login`); PuriCat finds it by itself. Codex is supported the same way, but its tool calls have not been verified yet. What you send to the AI goes to that provider under your own account: [AI_INTEGRATION.md](AI_INTEGRATION.md) says exactly what is sent.
 
+### SQLite files, opened carefully
+
+Open a `.db`, `.sqlite` or `.sqlite3` file — an app's data, a project's database — without a server or an account. A new SQLite connection is **read-only**: the file is opened so that it cannot be written, until you decide to edit. PuriCat also makes the checks SQLite does not: text that is not a number is refused for a column of numbers, instead of being stored without a word. [What works for SQLite, and its limits](DATABASE_COMPATIBILITY.md#sqlite--a-database-file).
+
 ### English and Thai, light and dark
 
 ![The same screen in Thai with the dark theme](docs/images/thai-dark.png)
@@ -100,7 +104,7 @@ pnpm tauri build    # make PuriCat.app and a .dmg
 pnpm check          # type-check, unit tests, cargo fmt, clippy, cargo test
 ```
 
-Tests against real MySQL and PostgreSQL servers, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
+Tests against real MySQL and PostgreSQL servers and real SQLite files, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
 
 A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them (in a fork, for example) it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain; v0.1.0 was published that way, before the secrets were set.
 

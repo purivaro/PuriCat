@@ -40,6 +40,7 @@ Done:
 
 | Item | Notes |
 |---|---|
+| SQLite follow-ups | Done: a SQLite file as a connection ([ADR 0018](docs/adr/0018-sqlite-files.md)). Open: try files made by other programs (iOS and Android apps, Django, browsers) and by older SQLite versions; a WAL-mode file opened read-only in a folder that cannot be written; an encrypted (SQLCipher) file, at least to confirm the refusal; tables without a primary key edited by row id, with its caveats shown; creating a new database file; opening a file by dropping it on the window; recent files; the JSONB binary format; listing attached databases; the AI chat on a SQLite connection through the UI |
 | SQL Server adapter | Evaluate `tiberius` first ([ADR 0003](docs/adr/0003-database-drivers.md)); needs a disposable test instance (blocker below) |
 | SSH tunnels | `russh`, host-key verification, key / passphrase / agent ([ADR 0009](docs/adr/0009-ssh-tunnels.md)); needs a disposable `sshd` |
 | TLS verification test | Run `require`, `verify-ca`, `verify-full` against a TLS-enforcing server, including the failure cases; decide a stricter default for Production connections |

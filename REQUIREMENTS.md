@@ -35,6 +35,7 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 | Reconnect | Dropped sessions recover or report clearly | Partial: a query tab whose own connection was ended reports it and opens a new connection on its next run (backend live test on both engines; not exercised through the UI). The session's pooled connections (explorer, grids) have no reconnect logic: Planned (Phase 2b) |
 | MySQL and PostgreSQL: host, port, user, password, database, TLS | Connect with typed options; real error on failure | Done |
 | Timeouts and connection options | Per-connection connect timeout and options | Partial: timeout is stored (default 10 s, clamped 1–120) but has no field in the dialog |
+| SQLite files (not in the original brief; asked for by a user, [issue #10](https://github.com/purivaro/PuriCat/issues/10)) | Open an existing file; browse, edit and query it under the same safety rules as a server; read-only by default; limits documented | Done: [ADR 0018](docs/adr/0018-sqlite-files.md). Creating a database, encrypted databases and attached databases are not built |
 | SQL Server, including an honest account of integrated auth | Connect, browse; limits documented | Planned (Phase 2b) |
 | Secrets in the OS credential store | Passwords never in SQLite, logs or IPC responses | Done on macOS; Windows not yet verified |
 | TLS modes with verification | `verify-full` rejects a wrong host or untrusted CA | Partial: modes are mapped to the drivers; verification untested against a TLS-enforcing server |

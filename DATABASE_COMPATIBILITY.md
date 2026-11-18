@@ -1,6 +1,6 @@
 # Database compatibility
 
-Status on 2026-11-16. Labels: **Implemented & verified** (a test against a real server passed), **Implemented, not yet verified**, **Planned (Phase N)**.
+Status on 2026-11-18. Labels: **Implemented & verified** (a test against a real server passed), **Implemented, not yet verified**, **Planned (Phase N)**.
 
 ## Tested versions
 
@@ -8,11 +8,14 @@ Status on 2026-11-16. Labels: **Implemented & verified** (a test against a real 
 |---|---|---|
 | MySQL | 9.3.0 (local) | Untested, including 8.x, 5.7 and MariaDB |
 | PostgreSQL | 16.13 (local) | Untested |
+| SQLite | 3.46.0 (the library compiled into the app); files made by that same library | Files written by other versions or other programs: untested |
 | SQL Server | — | No adapter |
 
-Only these two versions have been exercised. Nothing is claimed for older, newer or compatible-protocol servers (MariaDB, Aurora, CockroachDB and similar).
+Only these versions have been exercised. Nothing is claimed for older, newer or compatible-protocol servers (MariaDB, Aurora, CockroachDB and similar).
 
 ## Feature matrix
+
+SQLite has its own section, "SQLite — a database file", further down: what applies to a file differs enough from a server that one more column here would mislead.
 
 | Feature | MySQL | PostgreSQL | SQL Server |
 |---|---|---|---|
@@ -75,11 +78,11 @@ Only these two versions have been exercised. Nothing is claimed for older, newer
 
 Reported by each adapter so the UI asks instead of guessing from the engine name.
 
-| Flag | MySQL | PostgreSQL | Meaning |
-|---|---|---|---|
-| `schemas` | false | true | Objects live in schemas inside a database |
-| `transactionalDdl` | false | true | DDL can be rolled back |
-| `returning` | false | true | `INSERT/UPDATE/DELETE ... RETURNING` is available |
+| Flag | MySQL | PostgreSQL | SQLite | Meaning |
+|---|---|---|---|---|
+| `schemas` | false | true | false | Objects live in schemas inside a database |
+| `transactionalDdl` | false | true | true | DDL can be rolled back |
+| `returning` | false | true | true | `INSERT/UPDATE/DELETE ... RETURNING` is available |
 
 Only `schemas` affects behaviour today. The write path does not use `returning` or `transactionalDdl` yet: after a save the grid reloads the page instead of reading returned rows. The SQL console does not consult them either; it branches on the engine.
 
@@ -345,6 +348,91 @@ System namespaces are marked: `information_schema`, `mysql`, `performance_schema
 | Read-only connections and the SQL console | The read-only option is a session setting. The grid and Smart Paste never send SQL that could change it; a query tab runs what the user types, including a statement that switches the session back to read-write (see "SQL console") |
 | Permissions | Catalogue queries assume read access to `information_schema` / `pg_catalog`. Behaviour under restricted accounts is untested |
 | Large tables | No performance measurements exist |
+
+## SQLite — a database file
+
+Added on 2026-11-18 ([ADR 0018](docs/adr/0018-sqlite-files.md)). A connection is the path of an existing file; there is no server, user or password. The file's one database is called `main`.
+
+**What was tested:** files made by the same SQLite library the app carries (3.46.0), in the default rollback-journal mode and in WAL mode, by the tests in `crates/core/tests/sqlite.rs` and by the end-to-end test. **Not tested:** files written by other programs or other SQLite versions (iOS and Android apps, Django, browsers), a file another program is writing to at the same moment (beyond a held lock, which is tested), very large files, virtual tables (FTS and the like), an encrypted (SQLCipher) file, Windows paths, the native Open dialog.
+
+| Feature | SQLite |
+|---|---|
+| Open an existing file; a path that does not exist, a folder, or a file that is not a database is refused in plain words, and no file is created | Implemented & verified |
+| Read-only connection: the file is opened so that the handle cannot write (`SQLITE_OPEN_READONLY`); the default for a new SQLite connection | Implemented & verified (grid, console, `PRAGMA`, DDL all refused; the file's bytes unchanged) |
+| List tables and views (SQLite's own `sqlite_…` tables left out) | Implemented & verified |
+| Describe: columns, declared types, defaults, NOT NULL, composite keys in key order, generated columns, `WITHOUT ROWID`, `STRICT` | Implemented & verified |
+| Browse rows: page, sort; a view | Implemented & verified |
+| Filter rows | Implemented & verified (every operator) |
+| One cell read whole | Implemented & verified |
+| Edit, insert, delete rows of a table with a primary key, in one transaction, with the optimistic check | Implemented & verified |
+| Smart Paste: INSERT, UPDATE, UPSERT matched on the primary key or a unique index | Implemented & verified |
+| SQL console: scripts, impact guard, row cap, Stop, the user's own transaction, triggers | Implemented & verified |
+| The AI's tools: catalogue, a reading query on a handle that cannot write, proposals | Implemented & verified in the backend; not run through the chat panel |
+| Estimated row count | Not available: SQLite keeps none |
+| Tables without a primary key | Read-only in the grid (rows can be added), as on the other engines. The row id is not offered as a key |
+| Create a database file; attached databases; encrypted databases | Not built |
+
+### Types: a declared type is a suggestion
+
+SQLite gives a column an *affinity* from its declared type and lets any value into any column, unless the table is `STRICT`. PuriCat reads two things from the declared type:
+
+| Declared type contains | Affinity (SQLite's rule, in this order) | Shown and compared as |
+|---|---|---|
+| `INT` | INTEGER | Number |
+| `CHAR`, `CLOB`, `TEXT` | TEXT | Text |
+| `BLOB` | BLOB | Binary: `0x` and hex, the first 24 bytes in the grid; not editable; filtered on NULL only |
+| `REAL`, `FLOA`, `DOUB` | REAL | Number |
+| anything else | NUMERIC | By name: `NUMERIC`, `DECIMAL`, `DEC`, `NUMBER` → number; `BOOL…` → boolean; `DATE…`, `TIME…` → date/time; `JSON` → JSON; any other name (`UUID`, `STRING`, …) → "other" |
+| nothing (no declared type), or `ANY` in a `STRICT` table | none | "Other"; **shown, not edited** (see below) |
+
+- **Integers are exact**, to the last digit of a 64-bit value, in the grid, in filters, in keys and in the console.
+- **A REAL is shown as SQLite converts it to text: 15 significant digits** (`0.1`, `1.0e+20`). Two different stored values can therefore look the same; the optimistic check compares what is shown.
+- **SQLite has no exact decimal type.** A `DECIMAL(10,2)` column stores an integer or a floating-point number. `12.50` is stored and shown as `12.5`.
+- **Dates and times are text** (or numbers, if the application stores them so). They are shown as stored and compared as text: `2026-01-31` sorts before `2026-02-01`, and "starts with `2026-01`" finds January. Nothing validates them.
+- **Booleans** are whatever is stored, usually `1` and `0`.
+- **JSON** is text; the whole-value dialog lays it out for reading. A column holding SQLite's binary JSONB format has not been tested.
+- A declared length (`VARCHAR(20)`) is not enforced by SQLite, and PuriCat does not enforce it either.
+- A value that is not what its column's kind says (text in an `INTEGER` column, a BLOB in a `TEXT` column) is shown as text; bytes that are not valid UTF-8 are replaced.
+
+### What PuriCat checks because SQLite would not
+
+- **Text that is not a number is refused for a number column** when saving from the grid, in Smart Paste, and as a filter value. SQLite would store it as text (or, in a comparison, quietly match nothing). The SQL console is not checked: there SQLite behaves as SQLite.
+- **A column without a declared type is not edited.** It has no affinity, so a number typed in the grid would be stored as text. As a key column it is matched on the text shown.
+- A `STRICT` table is enforced by SQLite itself; its refusal is shown as it is.
+
+### Keys and generated values
+
+- `INTEGER PRIMARY KEY` of an ordinary table is the row id. SQLite assigns it; the grid does not write it, and a blank key in a Smart Paste UPSERT means "new row". A deleted row's id can be reused by a later insert (without `AUTOINCREMENT`).
+- In a `WITHOUT ROWID` table an `INTEGER PRIMARY KEY` is an ordinary, editable column.
+- Generated columns (`GENERATED ALWAYS AS`, virtual or stored) are not written.
+- Smart Paste can match on the primary key or on a unique index over plain columns. Partial indexes and indexes over expressions are not offered.
+
+### Row filter
+
+The same operators as the other engines. Comparison is by the column's affinity: text sent for a number column meets it as a number. "Is not" keeps NULL rows (`IS NOT`). Text search uses `LIKE … ESCAPE '!'`, which in SQLite ignores the case of ASCII letters only.
+
+### Writing
+
+- A save is one transaction that takes the write lock at once (`BEGIN IMMEDIATE`). A lock held by another program is waited for, for as long as the connection timeout, then reported ("database is locked"); nothing is saved.
+- Foreign keys are enforced on PuriCat's connections (`PRAGMA foreign_keys = ON`, a per-connection setting that is not stored in the file), whether or not the application that owns the file enforces them.
+- Nothing else about the file is set: journal mode, page size and the rest stay as they are.
+
+### SQL console
+
+- A query tab has its own connection to the file. Stop interrupts the statement from inside (a progress handler looks at a flag every 1,000 steps of SQLite's virtual machine).
+- **An interrupted write ends the user's transaction**: SQLite rolls all of it back. The console says so and no longer shows a transaction as open.
+- DDL is transactional; nothing commits implicitly.
+- `CREATE TRIGGER … BEGIN … END` is kept as one statement although its body has semicolons.
+- `PRAGMA`, `VACUUM`, `ATTACH`, `ANALYZE` are classed as "other": they run as typed, outside the impact guard. `ATTACH` gives the tab access to another file; attached databases do not appear in the explorer.
+- Names may be quoted as `"…"`, `` `…` `` or `[…]`. Block comments do not nest.
+- Result values are shown by their own type (SQLite types values, not columns): a BLOB as `0x` and hex wherever it appears.
+
+### Known limitations (SQLite)
+
+- No row-count estimate; no exact count yet either.
+- A table without a primary key cannot be edited, though SQLite could address its rows by row id.
+- A file in WAL mode opened read-only needs its `-wal` and `-shm` files to be readable (and, if they do not exist yet, the folder to be writable); otherwise SQLite reports that it cannot open the file. This case has not been tested.
+- An encrypted (SQLCipher) file should be refused as "not a SQLite database, or it is encrypted"; only a plain non-database file was tested.
 
 ## SQL Server — Planned (Phase 2b)
 
