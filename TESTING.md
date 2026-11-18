@@ -554,6 +554,35 @@ One run of the dev-server mode failed before these, at `delete-confirm`, for a r
 The first run with the file stages failed in the test's own expectation: it required every row of the exported files to come back identical, and one customer had a NULL city, which a file cannot express. The app was right (it showed that row as an update of `city`); the check now expects exactly the rows with a NULL city to be updates.
 
 **Corrected later on 2026-11-17.** In the runs above the request after the last listed file was not answered as a cancelled dialog: the debug hook fell through to the real Open dialog, which stayed open on the screen until the run ended, and the "changes nothing" check passed only because that request never came back. No file was chosen and nothing was read. The hook now answers every request past its list as cancelled, and the test sends one more request and fails unless it comes back as cancelled within three seconds. This correction has not been run on this branch by itself; it runs in the smoke test of the changes stacked on top of it.
+## Results — 2026-11-18 (an edit ends once; a row of the connection form)
+
+Two defects of v0.1.0, found while testing another change:
+
+- **Escape did not cancel an edit in the grid**: the text just given up was staged as an edit. And an edit ended with Enter or Tab was recorded twice, so the first ⌘Z after it seemed to do nothing. Ending an edit hands the focus back to the grid; that blurred the editor, and the blur ended the edit a second time.
+- **The "Review larger saves" row of the connection form** gave its number box the whole row and squeezed the text beside it into a column one word wide.
+
+| Check | Result |
+|---|---|
+| `pnpm typecheck`, `pnpm test` | Pass (47 Vitest cases; no Rust code changed) |
+| `e2e/run.sh` (dev-server mode), the whole smoke test | Pass, once, with an empty `problems` list. New checks inside `mysql-editing`, on the `customers` table: text typed into a cell and abandoned with Escape leaves the cell as it was and stages nothing; a typed edit is taken back by one ⌘Z and restored by one ⇧⌘Z |
+| The same two checks before the fix | Seen failing through the same synthetic events: after Escape the cell held the abandoned text and counted as edited; the first ⌘Z changed nothing |
+| Screenshot of the connection form (`SHOTS=1`) | Looked at by hand, English and light: the text of the row on two lines, the number box at its width |
+
+Not verified: real key presses (the test sends synthetic `keydown` events to the focused editor), ending an edit with Tab, the debug bundle.
+
+## Results — 2026-11-17 (⌘↵ with several query tabs)
+
+A defect in v0.1.0: with two query tabs open, ⌘↵ in the first one did nothing there and ran the text of the tab opened last. The editor's key binding was registered with Monaco's `addCommand`, whose bindings are shared by every editor in the page; the last editor created answered for all. It is now an action of its own editor (`addAction`). The Run button was never affected.
+
+| Check | Result |
+|---|---|
+| `pnpm check` | Pass with both servers configured: 64 Rust unit tests (2 ignored), 47 Vitest cases in 7 files, the live suites unchanged |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the new `sql-two-tabs` step | Pass, once, on the final code, with an empty `problems` list |
+| `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP), the whole smoke test | Pass, once, on the final code, with an empty `problems` list |
+
+The new step was not run against the code before the fix on this branch. The same check was seen to fail for this reason on the branch where the defect was found ("timed out waiting for ⌘↵ ran this tab's text"), and to pass there after the same change.
+
+When this fix met the saved-scripts work on `main` (2026-11-18), the `sql-two-tabs` step was dropped: the stage `sql-scripts` already makes the same check, with a second query tab open (⌘↵ in `Query 1` must run that tab's text).
 
 ## Results — 2026-11-16
 
