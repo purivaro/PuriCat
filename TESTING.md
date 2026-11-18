@@ -367,6 +367,22 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-18 (an edit ends once; a row of the connection form)
+
+Two defects of v0.1.0, found while testing another change:
+
+- **Escape did not cancel an edit in the grid**: the text just given up was staged as an edit. And an edit ended with Enter or Tab was recorded twice, so the first ⌘Z after it seemed to do nothing. Ending an edit hands the focus back to the grid; that blurred the editor, and the blur ended the edit a second time.
+- **The "Review larger saves" row of the connection form** gave its number box the whole row and squeezed the text beside it into a column one word wide.
+
+| Check | Result |
+|---|---|
+| `pnpm typecheck`, `pnpm test` | Pass (47 Vitest cases; no Rust code changed) |
+| `e2e/run.sh` (dev-server mode), the whole smoke test | Pass, once, with an empty `problems` list. New checks inside `mysql-editing`, on the `customers` table: text typed into a cell and abandoned with Escape leaves the cell as it was and stages nothing; a typed edit is taken back by one ⌘Z and restored by one ⇧⌘Z |
+| The same two checks before the fix | Seen failing through the same synthetic events: after Escape the cell held the abandoned text and counted as edited; the first ⌘Z changed nothing |
+| Screenshot of the connection form (`SHOTS=1`) | Looked at by hand, English and light: the text of the row on two lines, the number box at its width |
+
+Not verified: real key presses (the test sends synthetic `keydown` events to the focused editor), ending an edit with Tab, the debug bundle.
+
 ## Results — 2026-11-16
 
 Environment: macOS 26 on Apple Silicon, Rust 1.99, Node 25, pnpm 10, local MySQL 9.3.0 and PostgreSQL 16.13. Run on the development machine, not in CI.
