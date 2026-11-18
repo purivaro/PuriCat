@@ -108,7 +108,7 @@ Side effects to know about:
 
 ## What each suite covers
 
-### Rust unit tests (89, plus 2 ignored)
+### Rust unit tests (90, plus 2 ignored)
 
 | Module | Covers |
 |---|---|
@@ -116,7 +116,7 @@ Side effects to know about:
 | `store` (8) | Connection CRUD and ordering, update of a missing connection, settings round trip, reopening an existing database file. Query history (1 test): entries are per connection and newest first, the database name and start time are kept, no more than 1,000 entries survive over all connections, clearing one connection's history leaves the other's. AI activity log (1 test, new): entries come back newest first with an id and a time assigned by the store, the connection's name and the model are kept, clearing a connection's query history leaves the log alone, `clear_audit` empties it. The 5,000-entry cap is not exercised. Saved scripts (2 tests, new): a script is stored exactly as written (a password literal is not masked) with a trimmed name; scripts are listed by name without regard to case and per connection; a name already used on the connection, in any case, is a conflict for a new script and for a rename, while a script may change the case of its own name; an update keeps the name and the creation time; updating a deleted script is "not found"; `clear_scripts` removes one connection's scripts only; empty, blank, multi-line and over-long names are refused, the length counted in characters (120 Thai letters pass); text over 1 MB is refused for a new script and for an update |
 | `secrets` | In-memory store round trip; (ignored) real OS credential store round trip |
 | `db::ident` | Quoting for MySQL, PostgreSQL and SQL Server, escaping of the quote character, rejection of empty and NUL names |
-| `db` | Default order by primary key, validation of the sort column, page limit, truncation on character boundaries, binary prefix |
+| `db` | Default order by primary key, validation of the sort column, page limit, truncation on character boundaries, binary prefix. The count statement (1 test, new): its exact text on each engine, the number rendered to text by the server, the page's `WHERE` clause appended |
 | `db::sqlite` (3, new) | Affinity from a declared type by SQLite's own rule and in its order (`POINT` and `CHARINT` are INTEGER, `STRING` is NUMERIC, `ANY` has no affinity only in a STRICT table); the value kind read from the name (`DECIMAL(12,2)` a number, `BOOLEAN`, `DATETIME`, `JSON`, and `UUID` or `STRING` as "other"); the generated `SELECT` text, with a NULL blob kept NULL |
 | `db::mysql`, `db::postgres` | The generated `SELECT` text, type classification; MySQL expression defaults (`DEFAULT_GENERATED`) not treated as generated columns |
 | `db::filter` (6, new) | The exact `WHERE` text and parameter list on both engines: typed comparison (integers, decimals, dates, text), a hostile value only in the parameters, `%`, `_` and `!` made literal in a search, NULL kept by "≠" and "does not contain", NULL tests without a value and on a binary column, the shown text for JSON and for equality on a MySQL `FLOAT`. Refusals: unknown column, a missing value, anything but a NULL test on a binary or a MySQL spatial column, ordering on JSON, more than 20 conditions, and on MySQL text that is not a number (`abc`, empty, `nan`, `0x10`) or not a complete date or time (`2026`, `2026-01`, `2026-13-01`) |
@@ -133,7 +133,7 @@ Side effects to know about:
 
 Also new in the shared modules, for SQLite: `db::write` (1 test: the exact plan — no casts, `CAST(col AS TEXT) IS ?` as the concurrency condition, `DEFAULT VALUES` — the refusal of text that is not a number for a number column while MySQL's plan is left to its server, and a key column without a type matched on the text shown); `db::filter` (1 test: the exact `WHERE` text and parameters, `IS NOT` for "≠", the refusals); `db::script` (1 test: names in double quotes, backticks and brackets, no backslash escapes, block comments that do not nest, `$` as an ordinary character, a `CREATE TRIGGER` kept whole up to its lone `END`, a table merely named `trigger`, the kinds of `REPLACE`, `PRAGMA`, `VACUUM`, `ATTACH`, and the reading tool's text check with its one-semicolon rule).
 
-### SQLite tests: `sqlite` (12 tests)
+### SQLite tests: `sqlite` (13 tests)
 
 Against real files, with the SQLite the app carries (3.46.0). They need no server and run in `pnpm check` and in CI.
 
@@ -150,6 +150,7 @@ Against real files, with the SQLite the app carries (3.46.0). They need no serve
 | Stop | An endless query stopped; an endless `UPDATE` under the guard stopped, undone and reported as cancelled; the same inside the user's transaction, which SQLite rolls back whole — the console says so and shows no open transaction |
 | The AI's reader | A query, a `WITH`, an `EXPLAIN QUERY PLAN` accepted; 11 texts refused by the tool; then, on the tool's own connection, a `DELETE`, a `CREATE TABLE` and a write to an attached database all fail and the table is unchanged; an ordinary console writes again after `read_only` has run on it |
 | A held lock | With another connection inside `BEGIN EXCLUSIVE`, a save waits for the connection timeout (1 s in the tests) and reports "locked"; after the lock is released it goes through |
+| Exact row count | The table, the rows a filter leaves, none, a view; the refusals of a page; a count of a view that never ends is stopped and reported as cancelled, and the next count is not affected by that stop |
 | WAL mode | With another connection that put the file in WAL mode: its committed rows are seen; while it is in the middle of a write, reading goes on and a save waits and reports "locked"; our save is then seen by it; the journal mode is still WAL; a read-only connection reads the file and cannot write it |
 
 Not covered: files written by other programs or other versions of SQLite; a second *process* (the "other program" is a second connection in the test process); an encrypted file; virtual tables; a file on a read-only volume; Windows paths.
@@ -163,6 +164,7 @@ Not covered: files written by other programs or other versions of SQLite; a seco
 | `unreachable_server_fails_fast_with_the_real_reason` | Both engines against a closed port: a "refused" error in under 5 seconds. Needs no server |
 | `sort_spec_wire_format` | Default of `descending`. Needs no server |
 | One cell read whole, inside both browse tests (`full_cell_checks`, new) | By the row's primary key: the 1,500-character Thai text a page cuts at 1,000, whole; a 30-byte binary value as hex; NULL; a short value; a row that is gone (`conflict`); an unknown column; an incomplete key; a table without a primary key (`unsupported`) |
+| Exact row count, inside both browse tests (`count_checks`, `count_is_stopped`, new) | The count of the table equals the number of rows a page returns; with a filter on a 64-bit integer beyond 2^53 it is 1, with one nothing passes it is 0; a value the column cannot hold and a table that does not exist are refused as on a page. **Stopping**: a count that cannot finish — on MySQL the table is write-locked by another connection, on PostgreSQL the "table" is a view that never ends — is interrupted 300 ms in and comes back as cancelled within seconds |
 | Row filter, inside both browse tests (`filter_checks`, new) | On the same three rows on each engine: equality on a 64-bit integer beyond 2^53 (the neighbouring value finds nothing), on a decimal written two ways, ordering on decimals and timestamps; "≠" and "does not contain" keeping NULL rows; case-insensitive search including Thai text and quotes, `%` and `_` finding nothing, a search in a number, a timestamp and JSON; NULL tests including a binary column; two conditions together; a filter with a sort and a page of one row; the refusals, and a non-number or a non-date as an error. MySQL only: `TINYINT(1)` and `BIT`. PostgreSQL only: case-sensitive text equality, `boolean`, `uuid`, enum, array, ordering on an enum refused |
 
 ### Live database tests: `live_write` (4 tests)
@@ -328,6 +330,8 @@ Empty welcome state; create and test a MySQL and a PostgreSQL connection through
 
 Row filter, in the real window on the PostgreSQL `orders` table (stages `table-filter`, `table-filter-empty`, `table-filter-cell`): the Filter button opens the bar and a new condition on a number offers the comparisons; a search in an enum column whatever the case, sent with Enter, leaves only matching rows, marks the column header and shows "1 condition applied" in the footer; a second condition on a number, sent with "Apply" after the bar said it was not applied yet, leaves exactly the 4 rows that meet both; a filter nothing matches shows the no-match state, whose button clears it and resets the bar; text in a numeric condition shows the server's own refusal, and "Clear filter" there brings the rows back; "Filter by this value" in a cell's menu adds the condition and shows it in the bar. Before the theme and language stages the bar is opened again with one condition applied and one unwritten, so `dark` and `thai-dark` show it, and the Thai footer is asserted. Not covered: MySQL, ⌘F and Escape, a view, the lock while edits are unsaved, the narrow header (looked at in the screenshots only).
 
+The exact count, on the PostgreSQL `orders` table (stage `table-count`): the footer starts with the estimate and no exact number; "Count rows" puts "1,250 in total" there; it is still there on the second page; after a filter it is gone, "Count matches" counts the rows the filter leaves and the number is compared with a `COUNT(*)` run on a separate console. Not covered: Stop, a count that fails, MySQL and SQLite, the texts in Thai.
+
 SQLite, in the real window (stages `dialog-sqlite`, `sqlite-books`, `sqlite-sql`, and `thai-dark-sqlite` for the form in Thai and dark). The runner makes a throwaway file with the `sqlite3` that ships with macOS (`e2e/fixtures/sqlite.sql`). In the connection form, choosing SQLite removes the host, port, user, password and TLS fields and turns "Read-only" on; "Test connection" refuses a CSV file ("not a SQLite database") and a path that does not exist, then connects to the demo file. The path is typed into the field: the native Open dialog is not driven. The saved connection lists its tables at once, the table opens read-only, 2^53+1 and a blob are shown exactly. Read-only is then turned off in the form, the session reopens, a title is edited and `many` is typed into the INTEGER `pages` column: Save is refused in words ("not a number … SQLite would store it as text"), the staged title survives, the bad edit is undone and the save goes through. A query tab on the file runs a `SELECT` with `typeof()` and a `PRAGMA`. Afterwards `run.sh` reads the file with `sqlite3`: the new title is there, `pages` is still the integer 248, and no file exists at the mistyped path. Not covered for SQLite through the window: Smart Paste, the filter, the AI panel, a file used by another program, and the Open dialog.
 
 Ending an edit, on the MySQL `customers` table (inside `mysql-editing`): text typed into a cell and abandoned with Escape leaves the cell as it was and stages nothing; a typed edit is taken back by **one** ⌘Z and restored by one ⇧⌘Z. (Both were wrong before 2026-11-18: handing the focus back to the grid blurred the editor, and that blur committed the edit a second time — or, after Escape, for the first time.)
@@ -431,6 +435,18 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The end-to-end test starts no real AI CLI and sends nothing to an AI provider: `e2e/fixtures/bin` is put first on `PATH` for the app it launches, and the stand-ins only print canned lines and write what they were given into the runner's temporary work directory. In the database-tool stages the stand-in also starts the app's own executable as a relay and calls PuriCat's tools on `puricat_e2e`; what the tools return goes to the stand-in and into that work directory, nowhere else. `PURICAT_STAND_IN_DIR` is read by the stand-in scripts, not by PuriCat.
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
+
+## Results — 2026-11-18 (exact row count)
+
+| Check | Result |
+|---|---|
+| `pnpm check` | Pass on the final code: 90 Rust unit tests (2 ignored), 13 SQLite tests, 74 Vitest cases in 11 files |
+| `cargo test -p puricat-core --test live_db --test sqlite` with both servers configured | Pass (MySQL 9.3.0, PostgreSQL 16.13, SQLite 3.46.0), including a stopped count on each engine |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the count checks | Pass, once, with an empty `problems` list (before the `table-count` stage was added to take a screenshot; the checks themselves were already there) |
+| `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Pass, once, on the final code, with an empty `problems` list |
+| Screenshot of the footer (`SHOTS=1`) | Looked at by hand, English and light, under a filter: "Rows 1–200 · 1 condition applied · 313 match · about 1,250 in the table". The footer without a filter, the counting state and Stop were not looked at |
+
+A first version of the PostgreSQL stop test locked the table (`ACCESS EXCLUSIVE`) and never returned: reading the table's structure, which comes before the count and cannot be interrupted, waits for that lock. The test now counts a view that never ends. The behaviour it ran into is real and is listed in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), "Row filter".
 
 ## Results — 2026-11-18 (SQLite files)
 

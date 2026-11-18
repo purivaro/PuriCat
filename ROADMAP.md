@@ -48,7 +48,6 @@ Done:
 | Query cancellation outside query tabs | A statement in a query tab can be stopped (Phase 4, done). Browse, catalogue and Smart Paste lookup queries cannot; the console's canceller (`KILL QUERY`, `pg_cancel_backend`) shows the way |
 | Reconnect on dropped connections | A query tab reconnects its own connection on the next run (Phase 4, done). For the pooled session a dropped connection is still an error on the next action |
 | Keyset pagination | Replace `OFFSET` where a usable key exists |
-| Exact row count on demand | Opt-in, cancellable |
 | Per-connection session time zone (PostgreSQL) | The driver always starts sessions with `TimeZone=UTC`; let the user choose the server default or a named zone ([DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), known limitations) |
 
 Smaller follow-ups found while documenting: a connect-timeout field in the dialog; display of the TLS state of an open session; a live test for wrong passwords (needs a server with password authentication); a tie-breaker or an "unstable order" flag when a keyless table is sorted.
@@ -80,7 +79,7 @@ Remaining:
 | Smart Paste: more than 10,000 rows | One run is one transaction of single-row statements. A longer file is refused today. Multi-batch or streamed imports belong to the Phase 4 import tool |
 | Smart Paste from a file: follow-ups and gaps | Drag a file onto the table; a header row that is not the first row; skipping leading lines; number formats (percent, currency) applied on request. Not verified: the native Open dialog, a run from a file, workbooks made by Excel / Numbers / LibreOffice, `.xls` / `.xlsb` / `.ods`, the sheet chooser through the UI, files near 64 MB |
 | Whole-value dialog: follow-ups | Folding and colours in the formatted view of JSON; binary values beyond the first 65,536 bytes, and saving one to a file; values beyond 1,000,000 characters; a shortened cell in a table without a primary key (it cannot be fetched). Not verified through the UI: PostgreSQL, read-only tables, Thai and the dark theme |
-| Filter: follow-ups | OR and groups of conditions, a list of values (`IN`), a free `WHERE` box; the filter kept with the tab across a restart; an exact count of the matching rows; typed comparison (and index use) for `uuid` and other PostgreSQL types that have an equality operator. Verification gaps: MySQL, ⌘F and Escape, a view, the lock while edits are unsaved — all through the UI |
+| Filter: follow-ups | OR and groups of conditions, a list of values (`IN`), a free `WHERE` box; the filter kept with the tab across a restart; typed comparison (and index use) for `uuid` and other PostgreSQL types that have an equality operator. Verification gaps: MySQL, ⌘F and Escape, a view, the lock while edits are unsaved — all through the UI |
 | Column reorder / hide, pinned key columns | Not started |
 | Multi-range (non-contiguous) selection | Only one rectangular range today |
 | Keyset pagination | Also listed under Phase 2b |

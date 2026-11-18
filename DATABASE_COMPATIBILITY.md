@@ -37,7 +37,8 @@ SQLite has its own section, "SQLite — a database file", further down: what app
 | Filter rows by conditions on columns (see "Row filter") | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | Composite primary keys, names needing quotes | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
 | One cell read whole, by the row's primary key (a value the page shows shortened) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
-| Keyset pagination, exact row count | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
+| Exact row count, asked for by the user and stoppable (of the table, or of the rows a filter leaves) | Implemented & verified | Implemented & verified | Planned (Phase 2b) |
+| Keyset pagination | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Cancellation of browse and catalogue queries; reconnect of the pooled session | Planned (Phase 2b) | Planned (Phase 2b) | Planned (Phase 2b) |
 | Edit rows of a table with a primary key (UPDATE by complete key) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
 | Insert rows (omitted columns take server defaults) | Implemented & verified | Implemented & verified | Planned (Phase 3) |
@@ -164,7 +165,7 @@ A table tab can be narrowed with conditions on its columns; all of them must hol
 - **A value the column cannot hold is an error, never a silent result.** PostgreSQL refuses the cast itself and its message is shown. MySQL would read text that is not a number as `0` (and show the rows holding 0) and text that is not a date as NULL (and show no rows), each with only a warning, so PuriCat checks these itself before sending anything: a number must look like one, and a date or time must be complete (`2026-01-31`, `2026-01-31 13:45:00`, `13:45:00`). To find part of a date, use "starts with" or "contains".
 - Filters do not use an index when they compare the shown text (JSON, uuid, enum, the text searches on non-text columns). On a large table an equality filter on a `uuid` column scans the table.
 - At most 20 conditions. They are joined with AND only; there is no OR, no list of values and no free `WHERE` text. Use a query tab for those.
-- Sorting and paging apply to the rows that are left. The row estimate in the footer is still the whole table's; there is no count of the matching rows.
+- Sorting and paging apply to the rows that are left. The row estimate in the footer is still the whole table's. The number of matching rows is counted when asked for ("Count matches"): `SELECT COUNT(*)` with the same `WHERE` clause and parameters as the page, on a connection of its own so that it can be interrupted (`KILL QUERY` on MySQL, `pg_cancel_backend` on PostgreSQL, the connection's own stop flag on SQLite). Reading the table's structure comes first and cannot be interrupted: if the table is locked exclusively by another session, the count waits there, as a page does.
 
 ## Writing values
 
@@ -369,6 +370,7 @@ Added on 2026-11-18 ([ADR 0018](docs/adr/0018-sqlite-files.md)). A connection is
 | SQL console: scripts, impact guard, row cap, Stop, the user's own transaction, triggers | Implemented & verified |
 | The AI's tools: catalogue, a reading query on a handle that cannot write, proposals | Implemented & verified in the backend; not run through the chat panel |
 | Estimated row count | Not available: SQLite keeps none |
+| Exact row count, asked for and stoppable | Implemented & verified in the backend; not through the UI |
 | Tables without a primary key | Read-only in the grid (rows can be added), as on the other engines. The row id is not offered as a key |
 | Create a database file; attached databases; encrypted databases | Not built |
 
@@ -429,7 +431,7 @@ The same operators as the other engines. Comparison is by the column's affinity:
 
 ### Known limitations (SQLite)
 
-- No row-count estimate; no exact count yet either.
+- No row-count estimate. The exact count is there when asked for (verified in the backend, with and without a filter, and stopped on a view that never ends).
 - A table without a primary key cannot be edited, though SQLite could address its rows by row id.
 - A file in WAL mode opened read-only needs its `-wal` and `-shm` files to be readable (and, if they do not exist yet, the folder to be writable); otherwise SQLite reports that it cannot open the file. This case has not been tested.
 - An encrypted (SQLCipher) file should be refused as "not a SQLite database, or it is encrypted"; only a plain non-database file was tested.

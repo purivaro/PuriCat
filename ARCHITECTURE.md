@@ -102,6 +102,7 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `list_schemas` | `id`, `database` | Namespaces (PostgreSQL only) |
 | `list_objects` | `id`, `database`, `schema?` | Tables, views, materialized views |
 | `describe_table` | `id`, `table` | Columns and primary key of one table (used by the SQL editor's completion) |
+| `count_rows` | `id`, `table`, `filters`, `job` | `RowCount`: `count`, `elapsedMs`. `SELECT COUNT(*)` with the page's `WHERE` clause, on a connection of its own; `cancel_job(job)` interrupts it and the call fails with `conflict` |
 | `fetch_rows` | `id`, `table`, `page` (`offset`, `limit`, `sort?`, `filters?`: `column`, `op`, `value?`) | `RowPage`: columns (with `editable`), rows, truncation flags, primary key, estimated rows |
 | `fetch_cell` | `id`, `table`, `key` (the complete primary key), `column` | `CellContent`: the cell's whole `value` as the page would render it (at most 1,000,000 characters, or 65,536 bytes in hex) and `cut` when even that was not all. Read-only; `conflict` when the row is gone |
 | `plan_changes` | `id`, `table`, `changes` (`updates`, `inserts`, `deletes`) | The statements a save would run, in order: `kind`, `sql`, `params`, row label. Nothing is executed |
