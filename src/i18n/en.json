@@ -292,7 +292,12 @@
     "length_other": "{{formatted}} characters",
     "cutNotice": "Only the first {{shown}} characters are shown: the value is longer than PuriCat reads for one cell. It can be read here, not edited.",
     "noKeyNotice": "This is the shortened preview. The whole value cannot be fetched, because the row cannot be identified by a primary key.",
-    "binaryNotice": "Binary data, shown as hexadecimal. It cannot be edited here."
+    "binaryNotice": "Binary data, shown as hexadecimal. It cannot be edited here.",
+    "viewLabel": "How the value is shown",
+    "formatted": "Formatted",
+    "asStored": "As stored",
+    "formattedHint": "Laid out for reading. Only the spacing differs from the stored text.",
+    "formattedHintEdit": "Laid out for reading. Only the spacing differs from the stored text; edit it under “As stored”."
   },
   "ai": {
     "title": "AI agent",

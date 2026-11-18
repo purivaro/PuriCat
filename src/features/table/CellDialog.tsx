@@ -1,14 +1,15 @@
 import { CircleAlert, Copy, Info, X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
-import { Button, IconButton, Spinner } from "../../components/ui/primitives";
+import { Button, IconButton, Segmented, Spinner } from "../../components/ui/primitives";
 import { clipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
 import type { RowPage, TableRef } from "../../lib/types";
+import { formatJson } from "./json";
 import { blocker, type Cell, cellValue, isEdited, isInserted, isTruncated, type Pending, rowKey, typedValue } from "./pending";
 
 interface Props {
@@ -80,6 +81,8 @@ function Body({ cell, onClose, connectionId, table, page, pending, editable, onA
   const staged = cellValue(page, pending, r, c);
   const [text, setText] = useState<string | null>(() => (inserted || isEdited(pending, r, c) ? (staged ?? null) : null));
   const [touched, setTouched] = useState(false);
+  // A JSON column opens laid out for reading; text that happens to be JSON opens as stored.
+  const [view, setView] = useState<"stored" | "formatted">(column.kind === "json" ? "formatted" : "stored");
 
   useEffect(() => {
     if (stored.status !== "loading" || !key) return;
@@ -105,6 +108,10 @@ function Body({ cell, onClose, connectionId, table, page, pending, editable, onA
   const baseline = inserted || isEdited(pending, r, c) ? (staged ?? null) : original;
   const changed = canEdit && touched && shown !== baseline;
   const number = new Intl.NumberFormat(i18n.language);
+  // The same text with one member per line, when it is a JSON object or array. Offered as a
+  // way to read the value: what is edited and saved is always the text as stored.
+  const laidOut = useMemo(() => (ready && shown !== null ? formatJson(shown) : null), [ready, shown]);
+  const formatted = view === "formatted" ? laidOut : null;
 
   const edit = (next: string | null) => {
     setTouched(true);
@@ -116,7 +123,7 @@ function Body({ cell, onClose, connectionId, table, page, pending, editable, onA
     onApply(cell, original, shown === null ? null : typedValue(column, shown));
   };
   const copy = async () => {
-    await clipboard.write(shown ?? "");
+    await clipboard.write(formatted ?? shown ?? "");
     toast.success(t("common.copied"), { id: "cell-copied", duration: 1500 });
   };
 
@@ -157,6 +164,20 @@ function Body({ cell, onClose, connectionId, table, page, pending, editable, onA
             <span>{notice}</span>
           </div>
         )}
+        {laidOut !== null && (
+          <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+            <Segmented
+              label={t("cell.viewLabel")}
+              value={view}
+              onChange={setView}
+              options={[
+                { value: "formatted", label: t("cell.formatted") },
+                { value: "stored", label: t("cell.asStored") },
+              ]}
+            />
+            {formatted !== null && <span className="min-w-0 flex-1 text-xs leading-snug text-fg-subtle">{t(canEdit ? "cell.formattedHintEdit" : "cell.formattedHint")}</span>}
+          </div>
+        )}
         {stored.status === "loading" ? (
           <div className="flex flex-1 items-center justify-center gap-2 text-[13px] text-fg-muted">
             <Spinner className="size-4" /> {t("common.loading")}
@@ -168,6 +189,16 @@ function Body({ cell, onClose, connectionId, table, page, pending, editable, onA
               {stored.message}
             </span>
           </div>
+        ) : formatted !== null ? (
+          <pre
+            data-cell-formatted
+            data-selectable
+            tabIndex={0}
+            aria-label={column.name}
+            className="min-h-0 flex-1 overflow-auto rounded-lg border border-border-strong bg-sunken/60 px-3 py-2 font-mono text-[12.5px] leading-relaxed whitespace-pre text-fg outline-none focus:border-accent focus:ring-3 focus:ring-accent-soft"
+          >
+            {formatted}
+          </pre>
         ) : (
           <textarea
             data-cell-value

@@ -287,6 +287,26 @@
     await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
     await waitFor(() => !filterBar(), "filter bar hidden");
 
+    // ---- a JSON value opens laid out for reading (PostgreSQL orders, a jsonb column) -------
+    const META = 6;
+    const openCell = '[data-cell-dialog][data-state="open"]';
+    const metaRow = dataRows().findIndex((_, r) => cellText(r, META)?.trim().startsWith("{"));
+    const storedJson = cellText(metaRow, META).trim();
+    await selectCell(metaRow, META);
+    await rightClick(cellAt(metaRow, META));
+    await click(await waitFor(() => menuItem("View whole value"), "cell menu"), "view the json value");
+    const laidOut = (await waitFor(() => document.querySelector(`${openCell} [data-cell-formatted]`), "json laid out")).textContent;
+    const jsonViews = all(`${openCell} [role="radio"]`).map((r) => `${r.getAttribute("aria-checked") === "true" ? "●" : "○"} ${r.textContent.trim()}`);
+    await stage("cell-json", { storedJson, laidOut, jsonViews });
+    await click(all(`${openCell} [role="radio"]`).find((r) => r.textContent.trim() === "As stored"), "as stored");
+    const asStored = (await waitFor(() => document.querySelector(`${openCell} [data-cell-value]`), "the stored text")).value;
+    // Only the spacing differs, and the text to edit is the stored one.
+    if (!/^\{\n  "channel": "(web|line)"\n\}$/.test(laidOut) || laidOut.replace(/\s+/g, "") !== storedJson.replace(/\s+/g, "") || asStored !== storedJson || jsonViews.join() !== "● Formatted,○ As stored") {
+      throw new Error(`the json view is wrong: ${JSON.stringify({ storedJson, laidOut, asStored, jsonViews })}`);
+    }
+    await click(all(`${openCell} button`).find((b) => b.textContent.trim() === "Cancel"), "close the json value");
+    await waitFor(() => all("[data-cell-dialog]").every((d) => d.dataset.state === "closed"), "json value closed");
+
     // ---- one cell, whole: a note longer than a page shows (MySQL orders) ----------------
     // The row is found with the filter, which this also exercises on MySQL.
     await click(all('[role="tablist"] [role="tab"]').find((x) => x.textContent.includes("orders") && x.textContent.includes("Demo MySQL")), "mysql orders tab");
