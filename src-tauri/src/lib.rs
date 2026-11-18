@@ -53,6 +53,7 @@ pub fn run() {
             commands::delete_script,
             commands::export_result,
             commands::pick_table_file,
+            commands::pick_database_file,
             commands::read_table_file,
             commands::get_settings,
             commands::set_setting,

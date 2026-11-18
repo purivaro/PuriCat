@@ -11,6 +11,7 @@ mod mysql;
 mod postgres;
 pub mod script;
 pub mod smart;
+mod sqlite;
 pub mod write;
 
 use std::time::Instant;
@@ -181,10 +182,11 @@ pub struct CellContent {
     pub cut: bool,
 }
 
-/// An open, pooled connection to one server.
+/// An open, pooled connection to one server, or to one SQLite file.
 pub enum Session {
     MySql(mysql::MySqlSession),
     Postgres(Box<postgres::PgSession>),
+    Sqlite(Box<sqlite::SqliteSession>),
 }
 
 impl Session {
@@ -197,6 +199,10 @@ impl Session {
             Engine::Postgres => Ok(Session::Postgres(Box::new(
                 postgres::PgSession::connect(profile, password).await?,
             ))),
+            // A file has no password: nothing is read from the keychain for it.
+            Engine::Sqlite => Ok(Session::Sqlite(Box::new(
+                sqlite::SqliteSession::connect(profile).await?,
+            ))),
             Engine::Sqlserver => Err(Error::Unsupported(
                 "SQL Server connections are not implemented yet".into(),
             )),
@@ -207,6 +213,7 @@ impl Session {
         match self {
             Session::MySql(_) => mysql::CAPABILITIES,
             Session::Postgres(_) => postgres::CAPABILITIES,
+            Session::Sqlite(_) => sqlite::CAPABILITIES,
         }
     }
 
@@ -225,6 +232,7 @@ impl Session {
                 s.tls().await?,
                 s.read_only().await?,
             ),
+            Session::Sqlite(s) => (Engine::Sqlite, s.version().await?, None, s.read_only()),
         };
         Ok(ServerInfo {
             engine,
@@ -240,6 +248,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.list_databases().await,
             Session::Postgres(s) => s.list_databases().await,
+            Session::Sqlite(s) => Ok(s.list_databases()),
         }
     }
 
@@ -247,6 +256,9 @@ impl Session {
         match self {
             Session::MySql(_) => Err(Error::Unsupported(
                 "MySQL has no schemas inside a database".into(),
+            )),
+            Session::Sqlite(_) => Err(Error::Unsupported(
+                "SQLite has no schemas inside a database".into(),
             )),
             Session::Postgres(s) => s.list_schemas(database).await,
         }
@@ -260,6 +272,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.list_objects(database).await,
             Session::Postgres(s) => s.list_objects(database, require_schema(schema)?).await,
+            Session::Sqlite(s) => s.list_objects(database).await,
         }
     }
 
@@ -267,6 +280,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.describe_table(table).await,
             Session::Postgres(s) => s.describe_table(table).await,
+            Session::Sqlite(s) => s.describe_table(table).await,
         }
     }
 
@@ -287,6 +301,7 @@ impl Session {
         let raw = match self {
             Session::MySql(s) => s.select_page(table, &meta, &filter, &order, req).await?,
             Session::Postgres(s) => s.select_page(table, &meta, &filter, &order, req).await?,
+            Session::Sqlite(s) => s.select_page(table, &meta, &filter, &order, req).await?,
         };
         Ok(finish_page(meta, raw, order, req, started))
     }
@@ -309,6 +324,7 @@ impl Session {
             Session::Postgres(_) => {
                 postgres::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?
             }
+            Session::Sqlite(_) => sqlite::cell_expr(col, MAX_FULL_CHARS + 1, MAX_FULL_BYTES + 1)?,
         };
         let (clause, params) = write::row_clause(engine, &meta, key)?;
         let sql = format!(
@@ -359,11 +375,7 @@ impl Session {
         if meta.columns.is_empty() {
             return Err(Error::NotFound(format!("Table {}", table.name)));
         }
-        let engine = match self {
-            Session::MySql(_) => Engine::Mysql,
-            Session::Postgres(_) => Engine::Postgres,
-        };
-        write::plan(engine, table, &meta, changes)
+        write::plan(self.engine(), table, &meta, changes)
     }
 
     /// Run a change set in one transaction. Either every row change is applied, or none.
@@ -377,6 +389,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.apply(&statements, &|_| true).await?,
             Session::Postgres(s) => s.apply(&table.database, &statements, &|_| true).await?,
+            Session::Sqlite(s) => s.apply(&statements, &|_| true).await?,
         }
         Ok(write::tally(
             &statements,
@@ -388,6 +401,7 @@ impl Session {
         match self {
             Session::MySql(_) => Engine::Mysql,
             Session::Postgres(_) => Engine::Postgres,
+            Session::Sqlite(_) => Engine::Sqlite,
         }
     }
 
@@ -396,6 +410,17 @@ impl Session {
         match self {
             Session::MySql(s) => s.open_console(database).await,
             Session::Postgres(s) => s.open_console(database).await,
+            Session::Sqlite(s) => s.open_console(false).await,
+        }
+    }
+
+    /// A connection of its own for a caller that must only read (the AI's query tool; see
+    /// [`console::Console::read_only`]). On SQLite the file is opened so that the handle
+    /// cannot write; the servers are held by a read-only transaction instead.
+    pub async fn open_reader(&self, database: Option<&str>) -> Result<console::Console> {
+        match self {
+            Session::Sqlite(s) => s.open_console(true).await,
+            _ => self.open_console(database).await,
         }
     }
 
@@ -404,6 +429,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.unique_keys(table).await,
             Session::Postgres(s) => s.unique_keys(table).await,
+            Session::Sqlite(s) => s.unique_keys(table).await,
         }
     }
 
@@ -416,6 +442,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.query_text(sql, params).await,
             Session::Postgres(s) => s.query_text(database, sql, params).await,
+            Session::Sqlite(s) => s.query_text(sql, params).await,
         }
     }
 
@@ -492,6 +519,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.apply(&statements, keep_going).await?,
             Session::Postgres(s) => s.apply(&table.database, &statements, keep_going).await?,
+            Session::Sqlite(s) => s.apply(&statements, keep_going).await?,
         }
         Ok(write::tally(
             &statements,
@@ -503,6 +531,7 @@ impl Session {
         match self {
             Session::MySql(s) => s.close().await,
             Session::Postgres(s) => s.close().await,
+            Session::Sqlite(s) => s.close().await,
         }
     }
 }

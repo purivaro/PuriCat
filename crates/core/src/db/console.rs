@@ -12,11 +12,12 @@
 //!   while anything that writes runs to its end (cancelling it would undo it).
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, Either, Executor, Row, TypeInfo, ValueRef};
+use sqlx::{Column, ConnectOptions, Either, Executor, Row, TypeInfo, ValueRef};
 
 use super::script::{self, Kind};
 use super::{ValueKind, MAX_CELL_CHARS};
@@ -109,6 +110,7 @@ pub struct RunOutcome {
 enum Conn {
     MySql(sqlx::MySqlConnection),
     Postgres(sqlx::PgConnection),
+    Sqlite(sqlx::SqliteConnection),
 }
 
 /// Stops whatever the console's connection is running, from another connection.
@@ -121,6 +123,11 @@ pub enum Canceller {
     Postgres {
         pool: sqlx::PgPool,
         pid: i32,
+    },
+    /// SQLite runs inside this process: the connection looks at this flag every few
+    /// hundred steps of a statement and gives up when it is set.
+    Sqlite {
+        interrupt: Arc<AtomicBool>,
     },
 }
 
@@ -143,6 +150,7 @@ impl Canceller {
                     .await
                     .map_err(Error::database)?;
             }
+            Canceller::Sqlite { interrupt } => interrupt.store(true, Ordering::Relaxed),
         }
         Ok(())
     }
@@ -209,8 +217,9 @@ fn hex(bytes: &[u8]) -> String {
 
 fn is_cancellation(e: &sqlx::Error) -> bool {
     // PostgreSQL: query_canceled. MySQL: ER_QUERY_INTERRUPTED (SQLSTATE 70100).
+    // SQLite: SQLITE_INTERRUPT (9).
     e.as_database_error()
-        .and_then(|d| d.code().map(|c| c == "57014" || c == "70100"))
+        .and_then(|d| d.code().map(|c| c == "57014" || c == "70100" || c == "9"))
         .unwrap_or(false)
 }
 
@@ -222,6 +231,9 @@ fn connection_ended(e: &sqlx::Error) -> bool {
     if let Some(mysql) = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
         // Server shutdown, connection killed, disconnected for inactivity.
         return matches!(mysql.number(), 1053 | 1927 | 4031);
+    }
+    if db.try_downcast_ref::<sqlx::sqlite::SqliteError>().is_some() {
+        return false; // a file: there is no connection to lose
     }
     // PostgreSQL: connection exceptions, and an operator ending the session.
     db.code()
@@ -343,7 +355,52 @@ fn decode_postgres(row: &sqlx::postgres::PgRow, i: usize, column: &ResultColumn)
     })
 }
 
+/// SQLite types a value, not a column: each cell is read as what it is. Text and numbers come
+/// as SQLite renders them (a REAL with 15 significant digits, as in the grid); a BLOB as hex.
+fn decode_sqlite(row: &sqlx::sqlite::SqliteRow, i: usize, _: &ResultColumn) -> Option<String> {
+    let raw = row.try_get_raw(i).ok()?;
+    if raw.is_null() {
+        return None;
+    }
+    let blob = raw.type_info().name() == "BLOB";
+    let bytes: Vec<u8> = row.try_get_unchecked(i).ok()?;
+    Some(if blob {
+        hex(&bytes)
+    } else {
+        match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        }
+    })
+}
+
+/// How many steps of SQLite's virtual machine pass between two looks at the stop flag.
+const SQLITE_STEPS_PER_CHECK: i32 = 1000;
+
 impl Console {
+    /// A connection of its own to the file. Not taken from the session's pool: a query
+    /// tab's connection carries the stop flag below, and may be opened read-only.
+    pub(crate) async fn sqlite(options: sqlx::sqlite::SqliteConnectOptions) -> Result<Self> {
+        let mut conn = options.connect().await.map_err(Error::database)?;
+        let interrupt = Arc::new(AtomicBool::new(false));
+        {
+            let asked = interrupt.clone();
+            let mut handle = conn.lock_handle().await.map_err(Error::database)?;
+            // Returning `false` interrupts the statement that is running.
+            handle.set_progress_handler(SQLITE_STEPS_PER_CHECK, move || {
+                !asked.load(Ordering::Relaxed)
+            });
+        }
+        Ok(Console {
+            conn: Conn::Sqlite(conn),
+            canceller: Canceller::Sqlite { interrupt },
+            in_transaction: false,
+            autocommit: Some(true),
+            lost: false,
+            stored: Vec::new(),
+        })
+    }
+
     pub(crate) async fn mysql(pool: &sqlx::MySqlPool, database: Option<&str>) -> Result<Self> {
         // Acquired through the pool so the session set-up (strict mode, read-only) applies.
         let mut conn = pool.acquire().await.map_err(Error::database)?.detach();
@@ -396,6 +453,7 @@ impl Console {
         match self.conn {
             Conn::MySql(_) => Engine::Mysql,
             Conn::Postgres(_) => Engine::Postgres,
+            Conn::Sqlite(_) => Engine::Sqlite,
         }
     }
 
@@ -418,6 +476,10 @@ impl Console {
         stop: &AtomicBool,
     ) -> Executed {
         let canceller = self.canceller.clone();
+        // A stop asked for earlier was for the statement that ran then.
+        if let Canceller::Sqlite { interrupt } = &canceller {
+            interrupt.store(false, Ordering::Relaxed);
+        }
         let out = match &mut self.conn {
             Conn::MySql(conn) => {
                 drain!(
@@ -439,6 +501,17 @@ impl Console {
                     stop,
                     canceller,
                     decode_postgres
+                )
+            }
+            Conn::Sqlite(conn) => {
+                drain!(
+                    conn,
+                    sql,
+                    max_rows,
+                    cancel_at_cap,
+                    stop,
+                    canceller,
+                    decode_sqlite
                 )
             }
         };
@@ -502,7 +575,19 @@ impl Console {
         match &mut self.conn {
             Conn::MySql(conn) => columns!(conn),
             Conn::Postgres(conn) => columns!(conn),
+            Conn::Sqlite(conn) => columns!(conn),
         }
+    }
+
+    /// SQLite ends a transaction by itself in a few cases (an interrupted write, a full
+    /// disk, a trigger that says so). Whether one is still open is asked the only way SQL
+    /// offers: a second `BEGIN` is refused inside a transaction.
+    async fn sqlite_transaction_ended(&mut self) -> bool {
+        if self.control("BEGIN").await.is_err() {
+            return false;
+        }
+        let _ = self.control("ROLLBACK").await;
+        true
     }
 
     /// Run one reading statement for a caller that must not be able to change anything
@@ -513,6 +598,11 @@ impl Console {
     /// - the server prepares it first, and neither engine prepares more than one statement,
     ///   so nothing can follow it that would leave the transaction;
     /// - it runs in a `READ ONLY` transaction that is rolled back.
+    ///
+    /// SQLite has no such transaction and prepares a whole script, so there the text may
+    /// hold no semicolon but a last one, the connection refuses writes while the statement
+    /// runs (`PRAGMA query_only`), and the caller opens the file read-only
+    /// ([`super::Session::open_reader`]).
     ///
     /// A function with effects outside the transaction (terminating a session, sleeping) can
     /// still be called: an account without write privileges remains the strong control.
@@ -528,15 +618,16 @@ impl Console {
         let engine = self.engine();
         let statement =
             script::single_read(engine, sql).map_err(|why| Error::Invalid(why.into()))?;
-        let begin = if engine == Engine::Mysql {
-            "START TRANSACTION READ ONLY"
-        } else {
-            "BEGIN TRANSACTION READ ONLY"
+        let (begin, end) = match engine {
+            Engine::Mysql => ("START TRANSACTION READ ONLY", "ROLLBACK"),
+            Engine::Sqlite => ("PRAGMA query_only = ON", "PRAGMA query_only = OFF"),
+            _ => ("BEGIN TRANSACTION READ ONLY", "ROLLBACK"),
         };
         self.control(begin).await.map_err(Error::Database)?;
         let prepared = match &mut self.conn {
             Conn::MySql(conn) => (&mut *conn).prepare(&statement.text).await.map(|_| ()),
             Conn::Postgres(conn) => (&mut *conn).prepare(&statement.text).await.map(|_| ()),
+            Conn::Sqlite(conn) => (&mut *conn).prepare(&statement.text).await.map(|_| ()),
         };
         let result = match prepared {
             Err(e) => Err(Error::Database(message_of(&e))),
@@ -561,7 +652,7 @@ impl Console {
             }
         };
         if !self.lost {
-            let _ = self.control("ROLLBACK").await;
+            let _ = self.control(end).await;
         }
         result
     }
@@ -666,8 +757,15 @@ impl Console {
                     "ROLLBACK"
                 };
                 if let Err(e) = self.control(finish).await {
-                    outcome.status = Status::Error;
-                    outcome.message = Some(format!("{finish} failed: {e}"));
+                    // SQLite has already undone a write that was interrupted: there is
+                    // nothing left to roll back, which is the outcome asked for.
+                    let undone = engine == Engine::Sqlite
+                        && finish == "ROLLBACK"
+                        && e.contains("no transaction is active");
+                    if !undone {
+                        outcome.status = Status::Error;
+                        outcome.message = Some(format!("{finish} failed: {e}"));
+                    }
                 }
             }
 
@@ -705,6 +803,16 @@ impl Console {
                         .push(preview(self.stored.len(), &set, capped));
                     self.stored.push(set);
                 }
+            } else if self.in_transaction
+                && engine == Engine::Sqlite
+                && self.sqlite_transaction_ended().await
+            {
+                self.in_transaction = false;
+                let note = "SQLite rolled the open transaction back.";
+                outcome.message = Some(match outcome.message.take() {
+                    Some(m) => format!("{m} — {note}"),
+                    None => note.to_string(),
+                });
             } else if self.in_transaction
                 && !self.lost
                 && engine == Engine::Postgres

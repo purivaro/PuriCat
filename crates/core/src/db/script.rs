@@ -47,14 +47,18 @@ fn scan(
 ) {
     let bytes = sql.as_bytes();
     let mysql = engine == Engine::Mysql;
+    let sqlite = engine == Engine::Sqlite;
     let mut depth = 0usize;
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
         match c {
-            b'\'' | b'"' | b'`' if c != b'`' || mysql => {
-                // PostgreSQL treats backslashes literally unless the string is E'...'.
+            // SQLite accepts MySQL's backticks around a name.
+            b'\'' | b'"' | b'`' if c != b'`' || mysql || sqlite => {
+                // PostgreSQL treats backslashes literally unless the string is E'...';
+                // SQLite always does.
                 let escapes = c != b'`'
+                    && !sqlite
                     && (mysql || (c == b'\'' && i > 0 && matches!(bytes[i - 1], b'e' | b'E')));
                 i += 1;
                 while i < bytes.len() {
@@ -84,15 +88,23 @@ fn scan(
                     i += 1;
                 }
             }
+            // SQLite also accepts SQL Server's brackets around a name; nothing escapes in them.
+            b'[' if sqlite => {
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                i += 1;
+            }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                // PostgreSQL block comments nest.
+                // PostgreSQL block comments nest; the others end at the first `*/`.
+                let nests = !mysql && !sqlite;
                 let mut level = 1;
                 i += 2;
                 while i < bytes.len() && level > 0 {
                     if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
                         level -= 1;
                         i += 2;
-                    } else if !mysql && bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    } else if nests && bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
                         level += 1;
                         i += 2;
                     } else {
@@ -100,7 +112,7 @@ fn scan(
                     }
                 }
             }
-            b'$' if !mysql => {
+            b'$' if !mysql && !sqlite => {
                 // Dollar-quoted string: $tag$ ... $tag$. `$1` is a parameter, not a quote.
                 let tag_end = (i + 1..bytes.len())
                     .find(|&j| !(bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_'));
@@ -147,7 +159,11 @@ fn scan(
 /// Statements that contain nothing but whitespace and comments are dropped.
 pub fn split(engine: Engine, sql: &str) -> Vec<Statement> {
     let mut ends = Vec::new();
-    scan(engine, sql, |_, _, _| {}, |at| ends.push(at));
+    if engine == Engine::Sqlite {
+        ends = sqlite_ends(sql);
+    } else {
+        scan(engine, sql, |_, _, _| {}, |at| ends.push(at));
+    }
     ends.push(sql.len());
 
     let mut out = Vec::new();
@@ -178,6 +194,48 @@ pub fn split(engine: Engine, sql: &str) -> Vec<Statement> {
         from = (end + 1).min(sql.len());
     }
     out
+}
+
+/// Where the statements of a SQLite script end. A trigger's body has statements of its own,
+/// each closed by a semicolon: `CREATE TRIGGER` runs on to the `END` that stands alone
+/// between two semicolons, the rule SQLite's own `sqlite3_complete()` applies.
+fn sqlite_ends(sql: &str) -> Vec<usize> {
+    use std::cell::RefCell;
+    // The words since the last semicolon: the first three, and how many there were.
+    let piece: RefCell<(Vec<String>, usize)> = RefCell::new((Vec::new(), 0));
+    let mut in_trigger = false;
+    let mut ends = Vec::new();
+    scan(
+        Engine::Sqlite,
+        sql,
+        |word, _, _| {
+            let mut piece = piece.borrow_mut();
+            piece.1 += 1;
+            if piece.0.len() < 3 {
+                piece.0.push(word.to_ascii_uppercase());
+            }
+        },
+        |at| {
+            let (words, count) = piece.replace((Vec::new(), 0));
+            let word = |i: usize| words.get(i).map(String::as_str);
+            if in_trigger {
+                // Still inside the body unless this piece is the closing END.
+                if count != 1 || word(0) != Some("END") {
+                    return;
+                }
+                in_trigger = false;
+            } else if word(0) == Some("CREATE")
+                && (word(1) == Some("TRIGGER")
+                    || (matches!(word(1), Some("TEMP" | "TEMPORARY"))
+                        && word(2) == Some("TRIGGER")))
+            {
+                in_trigger = true;
+                return;
+            }
+            ends.push(at);
+        },
+    );
+    ends
 }
 
 const DML: &[&str] = &["INSERT", "UPDATE", "DELETE", "REPLACE", "MERGE"];
@@ -243,6 +301,7 @@ const OUTSIDE_EFFECTS: &[&str] = &[
     "lo_import",
     "pg_reload_conf",
     "load_file",
+    "load_extension",
 ];
 
 /// The one statement a read-only tool may run, or why the text is refused.
@@ -254,6 +313,12 @@ pub fn single_read(engine: Engine, sql: &str) -> std::result::Result<Statement, 
     // MySQL and MariaDB execute what is inside these comments; a reader skips it.
     if engine == Engine::Mysql && (sql.contains("/*!") || sql.contains("/*M!")) {
         return Err("Version comments (/*! ... */) are not accepted here");
+    }
+    // SQLite prepares a whole script, so the server cannot be asked to confirm that the text
+    // is one statement. A statement cannot follow another without a semicolon between them:
+    // the text may end with one, and hold no other, not even inside a string.
+    if engine == Engine::Sqlite && sql.trim_end().trim_end_matches(';').contains(';') {
+        return Err("A semicolon inside the statement is not accepted here");
     }
     let mut statements = split(engine, sql);
     if statements.len() != 1 {
@@ -501,6 +566,85 @@ mod tests {
             texts(Engine::Postgres, "SELECT E'a\\';b'; SELECT 2").len(),
             2
         );
+    }
+
+    #[test]
+    fn sqlite_scripts_are_read_the_way_sqlite_reads_them() {
+        let split = |sql: &str| texts(Engine::Sqlite, sql);
+        // Names in double quotes, backticks and brackets; a backslash escapes nothing.
+        assert_eq!(
+            split("SELECT 'a;b\\'; SELECT \"c;d\", `e;f`, [g;h] FROM t; -- x; y\nSELECT 3"),
+            [
+                "SELECT 'a;b\\'",
+                "SELECT \"c;d\", `e;f`, [g;h] FROM t",
+                "-- x; y\nSELECT 3"
+            ]
+        );
+        // A block comment ends at the first `*/`: what follows it is SQL.
+        assert_eq!(
+            split("SELECT 1 /* /* */ ; DELETE FROM t; -- */"),
+            ["SELECT 1 /* /* */", "DELETE FROM t"]
+        );
+        // `#` and `$` are ordinary characters.
+        assert_eq!(split("SELECT $a$; SELECT 2 -- $a$").len(), 2);
+
+        // A trigger runs on to the END that stands alone between two semicolons.
+        let script = "CREATE TEMP TRIGGER IF NOT EXISTS t AFTER INSERT ON a BEGIN\n\
+                      UPDATE b SET n = CASE WHEN n > 1 THEN 0 ELSE n END;\n\
+                      DELETE FROM c; -- END;\n\
+                      END; SELECT 1; create trigger u after delete on a begin select 1; end; SELECT 2";
+        let statements = split(script);
+        assert_eq!(statements.len(), 4, "{statements:?}");
+        assert!(statements[0].ends_with("END") && statements[0].contains("DELETE FROM c"));
+        assert_eq!(statements[1], "SELECT 1");
+        assert_eq!(statements[3], "SELECT 2");
+        // A table that is merely called `trigger`, and an unfinished trigger.
+        assert_eq!(split("CREATE TABLE trigger (x); SELECT 1").len(), 2);
+        assert_eq!(
+            split("CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; SELECT 2").len(),
+            1
+        );
+
+        let kind = |sql: &str| classify(Engine::Sqlite, sql).0;
+        assert_eq!(kind("SELECT 1"), Kind::Read);
+        assert_eq!(kind("EXPLAIN QUERY PLAN DELETE FROM t"), Kind::Read);
+        assert_eq!(kind("INSERT OR REPLACE INTO t VALUES (1)"), Kind::Dml);
+        assert_eq!(kind("REPLACE INTO t VALUES (1)"), Kind::Dml);
+        assert_eq!(kind("WITH x AS (SELECT 1) DELETE FROM t"), Kind::Dml);
+        assert_eq!(
+            kind("CREATE TRIGGER t AFTER INSERT ON a BEGIN DELETE FROM b; END"),
+            Kind::Ddl
+        );
+        assert_eq!(kind("BEGIN IMMEDIATE"), Kind::Transaction);
+        for sql in [
+            "PRAGMA journal_mode = WAL",
+            "VACUUM",
+            "ATTACH 'x.db' AS x",
+            "ANALYZE",
+        ] {
+            assert_eq!(kind(sql), Kind::Other, "{sql}");
+        }
+
+        // The read-only tool: one reading statement, and no semicolon but a last one.
+        for sql in [
+            "SELECT 1",
+            "SELECT 1;  ",
+            "WITH t AS (SELECT 1) SELECT * FROM t;",
+        ] {
+            assert!(single_read(Engine::Sqlite, sql).is_ok(), "{sql}");
+        }
+        for sql in [
+            "SELECT 1; DELETE FROM t",
+            "SELECT ';'",
+            "SELECT 1 /* ; */",
+            "SELECT [a;b] FROM t",
+            "PRAGMA table_info(t)",
+            "ATTACH 'x.db' AS x",
+            "SELECT load_extension('x')",
+            "DELETE FROM t RETURNING *",
+        ] {
+            assert!(single_read(Engine::Sqlite, sql).is_err(), "{sql}");
+        }
     }
 
     #[test]

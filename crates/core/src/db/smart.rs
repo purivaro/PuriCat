@@ -603,7 +603,7 @@ impl<'a> Draft<'a> {
                                     Engine::Postgres => format!("${}", params.len()),
                                     _ => "?".to_string(),
                                 };
-                                format!("{quoted} = {}", write::key_expr(engine, col, &placeholder))
+                                write::key_equals(engine, col, quoted, &placeholder)
                             })
                             .collect();
                         format!("({})", parts.join(" AND "))
@@ -614,6 +614,7 @@ impl<'a> Draft<'a> {
                 .into_iter()
                 .map(|c| match engine {
                     Engine::Postgres => format!("{c}::text"),
+                    Engine::Sqlite => format!("CAST({c} AS TEXT)"),
                     _ => format!("CAST({c} AS CHAR)"),
                 })
                 .collect();

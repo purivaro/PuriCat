@@ -232,7 +232,7 @@ impl DbTools {
             ))
         })?;
         // A connection of its own, closed afterwards: nothing it sets can outlive the call.
-        let mut console = self.session.open_console(Some(&self.database)).await?;
+        let mut console = self.session.open_reader(Some(&self.database)).await?;
         let canceller = console.canceller();
         // If this call is dropped while the query runs (the turn ended), the query is still
         // cancelled on the server instead of running on unseen.

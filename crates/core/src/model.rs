@@ -7,6 +7,8 @@ use crate::{Error, Result};
 pub enum Engine {
     Mysql,
     Postgres,
+    /// A database file on this computer. No server, host, user or password.
+    Sqlite,
     /// Declared so saved profiles stay forward compatible; no adapter yet.
     Sqlserver,
 }
@@ -16,6 +18,7 @@ impl Engine {
         match self {
             Engine::Mysql => 3306,
             Engine::Postgres => 5432,
+            Engine::Sqlite => 0,
             Engine::Sqlserver => 1433,
         }
     }
@@ -57,12 +60,19 @@ pub struct ConnectionProfile {
     pub engine: Engine,
     #[serde(default)]
     pub environment: Environment,
+    /// Empty for SQLite, like the port and the user name: a file has none of them.
+    #[serde(default)]
     pub host: String,
+    #[serde(default)]
     pub port: u16,
+    #[serde(default)]
     pub username: String,
     /// Default database. Optional for MySQL; PostgreSQL falls back to `postgres`.
     #[serde(default)]
     pub database: Option<String>,
+    /// SQLite only: the database file, as an absolute path.
+    #[serde(default)]
+    pub file: Option<String>,
     #[serde(default)]
     pub tls: TlsMode,
     /// Extra CA bundle (PEM) used with `verify-ca` / `verify-full`.
@@ -103,6 +113,7 @@ impl ConnectionProfile {
         self.host = self.host.trim().to_string();
         self.username = self.username.trim().to_string();
         self.database = clean_opt(self.database);
+        self.file = clean_opt(self.file);
         self.tls_ca_path = clean_opt(self.tls_ca_path);
         self.tags = self
             .tags
@@ -115,6 +126,28 @@ impl ConnectionProfile {
         if self.name.is_empty() {
             return Err(Error::Invalid("Connection name is required".into()));
         }
+        self.connect_timeout_secs = self.connect_timeout_secs.clamp(1, 120);
+        if self.engine == Engine::Sqlite {
+            let Some(file) = &self.file else {
+                return Err(Error::Invalid("Choose the SQLite file to open".into()));
+            };
+            // A relative path would depend on where the app happened to be started.
+            if !std::path::Path::new(file).is_absolute() {
+                return Err(Error::Invalid(
+                    "Give the full path of the SQLite file (it must start at the root of the disk)"
+                        .into(),
+                ));
+            }
+            // Nothing of a server applies to a file.
+            self.host.clear();
+            self.username.clear();
+            self.port = 0;
+            self.database = None;
+            self.tls = TlsMode::Disable;
+            self.tls_ca_path = None;
+            return Ok(self);
+        }
+        self.file = None;
         if self.host.is_empty() {
             return Err(Error::Invalid("Host is required".into()));
         }
@@ -124,7 +157,6 @@ impl ConnectionProfile {
         if self.username.is_empty() {
             return Err(Error::Invalid("Username is required".into()));
         }
-        self.connect_timeout_secs = self.connect_timeout_secs.clamp(1, 120);
         Ok(self)
     }
 }
@@ -167,6 +199,39 @@ mod tests {
         let mut p = sample();
         p.port = 0;
         assert!(p.normalized().is_err());
+    }
+
+    #[test]
+    fn a_sqlite_profile_is_a_file_and_nothing_else() {
+        let sqlite = |file: Option<&str>| -> Result<ConnectionProfile> {
+            serde_json::from_value::<ConnectionProfile>(serde_json::json!({
+                "name": "Notes", "engine": "sqlite", "file": file,
+                "host": "db.example", "port": 3306, "username": "root", "database": "shop",
+                "tls": "verify-full", "tlsCaPath": "/tmp/ca.pem"
+            }))
+            .unwrap()
+            .normalized()
+        };
+        let p = sqlite(Some("  /Users/me/notes.sqlite ")).unwrap();
+        assert_eq!(p.file.as_deref(), Some("/Users/me/notes.sqlite"));
+        assert_eq!((p.host.as_str(), p.port, p.username.as_str()), ("", 0, ""));
+        assert_eq!(
+            (p.database, p.tls, p.tls_ca_path),
+            (None, TlsMode::Disable, None)
+        );
+        // A file is required, and a relative path is not accepted.
+        assert!(matches!(sqlite(None), Err(Error::Invalid(_))));
+        assert!(matches!(sqlite(Some("  ")), Err(Error::Invalid(_))));
+        assert!(matches!(
+            sqlite(Some("notes.sqlite")),
+            Err(Error::Invalid(_))
+        ));
+        // A profile saved before SQLite existed has no `file`, and a server profile drops one.
+        let mut server = sample();
+        server.file = Some("/tmp/x.db".into());
+        assert_eq!(server.normalized().unwrap().file, None);
+        let json = serde_json::to_value(sqlite(Some("/a.db")).unwrap()).unwrap();
+        assert_eq!(json["engine"], "sqlite");
     }
 
     #[test]

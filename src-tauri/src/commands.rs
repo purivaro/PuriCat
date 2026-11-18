@@ -19,7 +19,7 @@ use puricat_core::db::{
     CellContent, DbObject, Namespace, PageRequest, RowPage, ServerInfo, Session, TableMeta,
     TableRef,
 };
-use puricat_core::model::ConnectionProfile;
+use puricat_core::model::{ConnectionProfile, Engine};
 use puricat_core::secrets::password_key;
 use puricat_core::store::{AuditEntry, HistoryEntry, SavedScript};
 use puricat_core::table_file::{self, FileKind, FileTable, ReadOptions};
@@ -61,11 +61,12 @@ async fn view(state: &AppState, profile: ConnectionProfile) -> Result<Connection
     })
 }
 
-async fn stored_password(state: &AppState, connection_id: &str) -> Result<Option<String>> {
-    if connection_id.is_empty() {
+async fn stored_password(state: &AppState, profile: &ConnectionProfile) -> Result<Option<String>> {
+    // A SQLite file has no password: the keychain is not asked.
+    if profile.id.is_empty() || profile.engine == Engine::Sqlite {
         return Ok(None);
     }
-    let key = password_key(connection_id);
+    let key = password_key(&profile.id);
     state.with_secrets(move |s| s.get(&key)).await
 }
 
@@ -142,7 +143,7 @@ pub async fn duplicate_connection(
     name: String,
 ) -> Result<ConnectionView> {
     let mut copy = state.store.get_connection(&id).await?;
-    let password = stored_password(&state, &id).await?;
+    let password = stored_password(&state, &copy).await?;
     copy.id = String::new();
     copy.name = name;
     copy.favorite = false;
@@ -177,7 +178,7 @@ pub async fn test_connection(
     let password = match password {
         PasswordChange::Set { value } => Some(value),
         PasswordChange::Clear => None,
-        PasswordChange::Keep => stored_password(&state, &profile.id).await?,
+        PasswordChange::Keep => stored_password(&state, &profile).await?,
     };
     let started = std::time::Instant::now();
     let session = Session::connect(&profile, password.as_deref()).await?;
@@ -191,7 +192,7 @@ pub async fn test_connection(
 #[tauri::command]
 pub async fn open_connection(state: State<'_, AppState>, id: String) -> Result<ServerInfo> {
     let profile = state.store.get_connection(&id).await?;
-    let password = stored_password(&state, &id).await?;
+    let password = stored_password(&state, &profile).await?;
     let started = std::time::Instant::now();
     let session = Session::connect(&profile, password.as_deref()).await?;
     let mut info = match session.server_info().await {
@@ -656,6 +657,40 @@ pub async fn pick_table_file(
     let token = table_file::new_token();
     *state.picked_file.lock().unwrap() = Some((token.clone(), path));
     Ok(Some(PickedFile { token, name, kind }))
+}
+
+/// Let the user choose a SQLite file for a connection. Unlike a file to import, its path
+/// goes back to the form: it is part of the connection, shown there and editable.
+/// `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn pick_database_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<String>> {
+    let path = match e2e_pick(&state) {
+        Some(answer) => answer,
+        None => {
+            use tauri_plugin_dialog::DialogExt;
+            let (chosen, answer) = tokio::sync::oneshot::channel();
+            // No filter by extension: SQLite files are called anything (`.db`, `.sqlite`,
+            // `.storedata`, no extension at all). Connecting tells whether it is one.
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .pick_file(move |file| {
+                    let _ = chosen.send(file);
+                });
+            match answer.await {
+                Ok(Some(file)) => Some(
+                    file.into_path()
+                        .map_err(|e| Error::Invalid(format!("This file cannot be opened: {e}")))?,
+                ),
+                _ => None,
+            }
+        }
+    };
+    Ok(path.map(|p| p.to_string_lossy().into_owned()))
 }
 
 /// The end-to-end test cannot click in a native dialog. A debug build started with

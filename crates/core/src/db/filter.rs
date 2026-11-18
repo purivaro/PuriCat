@@ -12,6 +12,9 @@
 //! - "contains", "starts with" and "ends with" look at the text the grid shows;
 //! - binary columns, and MySQL's spatial columns, can only be tested for NULL.
 //!
+//! SQLite compares by the column's affinity: text sent for an INTEGER, REAL or NUMERIC
+//! column meets it as a number when it is one. Dates there are text, and compare as text.
+//!
 //! "Is not" and "does not contain" keep the rows whose value is NULL: to a person reading the
 //! grid an empty cell is "not X", whatever three-valued logic says.
 
@@ -167,11 +170,14 @@ fn condition(
         )));
     }
     // MySQL turns text that is not a number into 0 with a warning, which would silently
-    // show the rows that hold 0. PostgreSQL refuses the cast by itself.
-    if engine == Engine::Mysql
-        && matches!(col.kind, ValueKind::Number | ValueKind::Bool)
-        && !is_number(value)
-    {
+    // show the rows that hold 0. PostgreSQL refuses the cast by itself. SQLite compares
+    // such text as text, after every number: "greater than abc" would quietly show nothing.
+    let numbers_only = match engine {
+        Engine::Mysql => matches!(col.kind, ValueKind::Number | ValueKind::Bool),
+        Engine::Sqlite => col.kind == ValueKind::Number,
+        _ => false,
+    };
+    if numbers_only && !is_number(value) {
         return Err(Error::Invalid(format!(
             "“{value}” is not a number, and column {} holds numbers",
             col.name
@@ -195,6 +201,7 @@ fn condition(
     Ok(match filter.op {
         Equals => format!("{left} = {right}"),
         NotEquals if engine == Engine::Postgres => format!("{left} IS DISTINCT FROM {right}"),
+        NotEquals if engine == Engine::Sqlite => format!("{left} IS NOT {right}"),
         NotEquals => format!("NOT ({left} <=> {right})"),
         Greater => format!("{left} > {right}"),
         GreaterOrEqual => format!("{left} >= {right}"),
@@ -216,7 +223,7 @@ fn like_escape(value: &str) -> String {
     out
 }
 
-fn is_number(text: &str) -> bool {
+pub(crate) fn is_number(text: &str) -> bool {
     let text = text.trim();
     // `parse` alone also accepts "inf" and "nan".
     text.bytes()
@@ -311,6 +318,33 @@ mod tests {
 
     fn postgres(filters: &[Filter]) -> Result<Where> {
         where_clause(Engine::Postgres, &meta(), filters)
+    }
+
+    #[test]
+    fn sqlite_compares_by_affinity() {
+        use FilterOp::*;
+        let sqlite = |filters: &[Filter]| where_clause(Engine::Sqlite, &meta(), filters);
+        let w = sqlite(&[
+            filter("id", Greater, Some("5")),
+            filter("na`me", NotEquals, Some("x")),
+            filter("na`me", Contains, Some("50%")),
+            filter("price", NotContains, Some("9")),
+            filter("made", LessOrEqual, Some("2026-01")),
+            filter("doc", Equals, Some("{}")),
+            filter("spot", Equals, Some("1")),
+        ])
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE \"id\" > ? AND \"na`me\" IS NOT ? AND \"na`me\" LIKE ? ESCAPE '!' \
+             AND (CAST(\"price\" AS TEXT) NOT LIKE ? ESCAPE '!' OR \"price\" IS NULL) \
+             AND \"made\" <= ? AND CAST(\"doc\" AS TEXT) = ? AND CAST(\"spot\" AS TEXT) = ?"
+        );
+        assert_eq!(w.params, ["5", "x", "%50!%%", "%9%", "2026-01", "{}", "1"]);
+        // Dates are text there: part of one is a value like any other. A number is not.
+        assert!(sqlite(&[filter("id", Equals, Some("five"))]).is_err());
+        assert!(sqlite(&[filter("spot", Greater, Some("1"))]).is_err());
+        assert!(sqlite(&[filter("photo", Equals, Some("0x00"))]).is_err());
     }
 
     #[test]
