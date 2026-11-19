@@ -12,6 +12,7 @@ import type {
   CliStatus,
   ConnectionProfile,
   ConnectionView,
+  DatabaseOptions,
   DbObject,
   ExportFormat,
   FileReadOptions,
@@ -19,6 +20,7 @@ import type {
   HistoryEntry,
   ModelChoice,
   Namespace,
+  NewDatabase,
   PasswordChange,
   PasteAnalysis,
   PickedFile,
@@ -116,6 +118,10 @@ export const ipc = {
   /** Shows the native Open dialog for a SQLite file and gives its path. `null` when it was cancelled. */
   pickDatabaseFile: () => invoke<string | null>("pick_database_file"),
   readTableFile: (token: string, options: FileReadOptions) => invoke<FileTable>("read_table_file", { token, options }),
+  databaseOptions: (id: string) => invoke<DatabaseOptions>("database_options", { id }),
+  /** The exact statement `createDatabase` would run. Runs nothing. */
+  planCreateDatabase: (id: string, spec: NewDatabase) => invoke<string>("plan_create_database", { id, spec }),
+  createDatabase: (id: string, spec: NewDatabase) => invoke<string>("create_database", { id, spec }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),

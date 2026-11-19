@@ -755,5 +755,31 @@
     "scriptDeleteAsk": "Delete “{{name}}”? It cannot be brought back.",
     "scriptDeleted": "Deleted “{{name}}”",
     "scriptNameTaken": "This connection already has a script named “{{name}}”. Names do not differ by upper or lower case."
+  },
+  "schema": {
+    "newDatabase": "New database…",
+    "newDatabaseTitle": "New database on {{name}}",
+    "name": "Name",
+    "namePlaceholder": "e.g. shop_2026",
+    "charset": "Character set",
+    "collation": "Collation",
+    "serverDefault": "Server default ({{value}})",
+    "charsetDefault": "Default of the character set ({{value}})",
+    "owner": "Owner",
+    "ownerDefault": "You ({{value}})",
+    "encoding": "Encoding",
+    "encodingDefault": "Same as the template ({{value}})",
+    "template": "Template",
+    "templateDefault": "template1 (default)",
+    "templateHint": "An encoding other than the template's needs template0.",
+    "statement": "Statement that will run",
+    "statementEmpty": "Type a name to see the statement.",
+    "readOnly": "This connection is read-only, so it cannot create a database. Turn off the read-only session in its settings first.",
+    "prodWarning": "You are about to create a database on a PRODUCTION server.",
+    "create": "Create database",
+    "createProd": "Create on production",
+    "creating": "Creating…",
+    "created": "Database “{{name}}” created",
+    "optionsFailed": "The server's options could not be read: {{message}}"
   }
 }

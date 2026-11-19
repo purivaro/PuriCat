@@ -4,6 +4,7 @@
 //! into another. `Session` is a plain enum so adding an engine is a compile-time checklist.
 
 pub mod console;
+pub mod ddl;
 pub mod export;
 pub mod filter;
 pub mod ident;
@@ -272,6 +273,123 @@ impl Session {
             Session::Postgres(s) => s.list_databases().await,
             Session::Sqlite(s) => Ok(s.list_databases()),
         }
+    }
+
+    /// What the server offers for a new database, to fill the form's lists.
+    pub async fn database_options(&self) -> Result<ddl::DatabaseOptions> {
+        let text =
+            |row: &[Option<String>], i: usize| row.get(i).cloned().flatten().unwrap_or_default();
+        let mut options = ddl::DatabaseOptions::default();
+        match self {
+            Session::MySql(s) => {
+                let rows = s
+                    .query_text(
+                        "SELECT CHARACTER_SET_NAME, DEFAULT_COLLATE_NAME, DESCRIPTION
+                         FROM information_schema.CHARACTER_SETS ORDER BY CHARACTER_SET_NAME",
+                        &[],
+                    )
+                    .await?;
+                options.charsets = rows
+                    .iter()
+                    .map(|r| ddl::Charset {
+                        name: text(r, 0),
+                        default_collation: text(r, 1),
+                        description: text(r, 2),
+                    })
+                    .collect();
+                let rows = s
+                    .query_text(
+                        "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.COLLATIONS
+                         WHERE CHARACTER_SET_NAME IS NOT NULL ORDER BY COLLATION_NAME",
+                        &[],
+                    )
+                    .await?;
+                options.collations = rows
+                    .iter()
+                    .map(|r| ddl::Collation {
+                        name: text(r, 0),
+                        charset: text(r, 1),
+                    })
+                    .collect();
+                let rows = s
+                    .query_text("SELECT @@character_set_server, @@collation_server", &[])
+                    .await?;
+                if let Some(r) = rows.first() {
+                    options.default_charset = r.first().cloned().flatten();
+                    options.default_collation = r.get(1).cloned().flatten();
+                }
+            }
+            Session::Postgres(s) => {
+                let home = s.home().to_string();
+                let column = |rows: Vec<Vec<Option<String>>>| -> Vec<String> {
+                    rows.iter().map(|r| text(r, 0)).collect()
+                };
+                options.owners = column(
+                    s.query_text(
+                        &home,
+                        "SELECT rolname::text FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname",
+                        &[],
+                    )
+                    .await?,
+                );
+                options.current_user = column(
+                    s.query_text(&home, "SELECT current_user::text", &[])
+                        .await?,
+                )
+                .into_iter()
+                .next();
+                options.templates = column(
+                    s.query_text(
+                        &home,
+                        "SELECT datname::text FROM pg_database WHERE datistemplate ORDER BY datname",
+                        &[],
+                    )
+                    .await?,
+                );
+                // Encoding ids 0..=34 are the ones a database can be stored in; the ids above
+                // (SJIS, BIG5, ...) exist for clients only. The server refuses any other.
+                options.encodings = column(
+                    s.query_text(
+                        &home,
+                        "SELECT pg_encoding_to_char(e)::text FROM generate_series(0, 34) AS e
+                         WHERE pg_encoding_to_char(e) <> '' ORDER BY 1",
+                        &[],
+                    )
+                    .await?,
+                );
+                options.default_encoding = column(
+                    s.query_text(
+                        &home,
+                        "SELECT pg_encoding_to_char(encoding)::text FROM pg_database WHERE datname = 'template1'",
+                        &[],
+                    )
+                    .await?,
+                )
+                .into_iter()
+                .next();
+            }
+            Session::Sqlite(_) => {
+                // Refuse with the same explanation the statement builder gives.
+                ddl::create_database(Engine::Sqlite, &ddl::NewDatabase::default()).map(|_| ())?;
+            }
+        }
+        Ok(options)
+    }
+
+    /// The exact statement `create_database` would run, for the form's preview.
+    pub fn create_database_sql(&self, spec: &ddl::NewDatabase) -> Result<String> {
+        ddl::create_database(self.engine(), spec)
+    }
+
+    /// Create a database. Returns the statement that ran.
+    pub async fn create_database(&self, spec: &ddl::NewDatabase) -> Result<String> {
+        let sql = self.create_database_sql(spec)?;
+        match self {
+            Session::MySql(s) => s.execute_statement(&sql).await?,
+            Session::Postgres(s) => s.execute_statement(&sql).await?,
+            Session::Sqlite(_) => unreachable!("refused by create_database_sql"),
+        }
+        Ok(sql)
     }
 
     pub async fn list_schemas(&self, database: &str) -> Result<Vec<Namespace>> {

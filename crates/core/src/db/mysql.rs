@@ -336,6 +336,15 @@ impl MySqlSession {
     }
 
     /// Run a read-only query whose columns are all text.
+    /// Run one statement that is not a query and has no parameters (DDL from a form).
+    pub async fn execute_statement(&self, sql: &str) -> Result<()> {
+        sqlx::raw_sql(sql)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::database)?;
+        Ok(())
+    }
+
     pub async fn query_text(
         &self,
         sql: &str,

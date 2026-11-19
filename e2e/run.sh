@@ -27,6 +27,12 @@ echo "› fixtures"
 "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 puricat_e2e <"$ROOT/e2e/fixtures/mysql.sql"
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' -c 'CREATE DATABASE puricat_e2e'
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -v ON_ERROR_STOP=1 -f "$ROOT/e2e/fixtures/postgres.sql" >/dev/null
+# The "new database" stage creates this one through the app; it must not exist beforehand.
+drop_made() {
+  "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e_made' 2>/dev/null || true
+  "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_made WITH (FORCE)' >/dev/null 2>&1 || true
+}
+drop_made
 
 # SQLite needs no server: a throwaway file, made with the sqlite3 that ships with macOS.
 SQLITE3=${SQLITE3:-sqlite3}
@@ -40,6 +46,7 @@ fi
 
 cleanup() {
   rm -rf "$WORK"
+  drop_made
   if [ "${KEEP_DB:-0}" != 1 ]; then
     "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e' 2>/dev/null || true
     "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' 2>/dev/null || true
@@ -82,14 +89,21 @@ else
     pnpm tauri dev >"$WORK/app.log" 2>&1 &
 fi
 
-# The app's main window: the largest one it owns. Not only "on screen" windows at layer 0:
-# the test keeps its window on top (another layer), and a window on another Space is not
-# listed as on screen but can still be captured by its number.
+# The test's own main window: the largest one owned by the test's process. Not only "on
+# screen" windows at layer 0: the test keeps its window on top (another layer), and a window
+# on another Space is not listed as on screen but can still be captured by its number.
+# A PuriCat the user has open for real work is another process: its window must never be
+# captured (it shows their databases), so windows are matched by process id, not by name.
 window_id() {
-  swift -e 'import CoreGraphics
+  local pids
+  if [ -n "${APP_PID:-}" ]; then pids=$APP_PID; else pids=$(pgrep -f "$ROOT/target/debug/puricat" | tr '\n' ' '); fi
+  [ -n "$pids" ] || return 0
+  PURICAT_E2E_PIDS="$pids" swift -e 'import CoreGraphics
+import Foundation
+let pids = Set((ProcessInfo.processInfo.environment["PURICAT_E2E_PIDS"] ?? "").split(separator: " ").compactMap { Int($0) })
 let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String: Any]]
 var best = (id: 0, area: 0.0)
-for w in list where (w[kCGWindowOwnerName as String] as? String)?.lowercased() == "puricat" {
+for w in list where pids.contains(w[kCGWindowOwnerPID as String] as? Int ?? -1) {
   let b = w[kCGWindowBounds as String] as? [String: Double] ?? [:]
   let area = (b["Width"] ?? 0) * (b["Height"] ?? 0)
   if area > best.area { best = (w[kCGWindowNumber as String] as! Int, area) }
@@ -186,6 +200,14 @@ PY
   left=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -c 'SELECT COUNT(*) FROM shop.orders')
   [ "$left" = 1250 ] || { echo "✗ tools check failed: $left orders left, expected 1250"; exit 1; }
   echo "  · database tools: MCP hand-over, refusals and the data verified"
+fi
+if [ "$last" = done ] && [ -z "${SMOKE:-}" ]; then
+  # The databases the app said it created exist on the servers, as chosen in the form.
+  made=$("$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -Nse "SELECT DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'puricat_e2e_made'")
+  [ "$made" = utf8mb4_bin ] || { echo "✗ new database check failed: MySQL has '$made', expected utf8mb4_bin"; exit 1; }
+  made=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d postgres -c "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'puricat_e2e_made'")
+  [ "$made" = UTF8 ] || { echo "✗ new database check failed: PostgreSQL has '$made', expected UTF8"; exit 1; }
+  echo "  · new databases verified on both servers"
 fi
 if [ "$last" = done ]; then
   echo "✓ end-to-end smoke test passed — report: target/e2e-report.json"

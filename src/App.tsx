@@ -13,6 +13,7 @@ import { TitleBar } from "./components/layout/TitleBar";
 import { Workspace } from "./components/layout/Workspace";
 import { Button, StateMessage } from "./components/ui/primitives";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
+import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
 import i18n from "./i18n";
 import { errorMessage, ipc } from "./lib/ipc";
 import { useConnections } from "./stores/connections";
@@ -247,6 +248,7 @@ export default function App() {
 
       <ConnectionDialog />
       <DeleteConnectionDialog />
+      <NewDatabaseDialog />
       <CommandPalette />
       <Toaster
         theme={resolveTheme(theme)}

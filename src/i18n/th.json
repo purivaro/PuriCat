@@ -725,5 +725,31 @@
     "scriptDeleteAsk": "ลบ “{{name}}” ใช่ไหม ลบแล้วกู้คืนไม่ได้",
     "scriptDeleted": "ลบ “{{name}}” แล้ว",
     "scriptNameTaken": "การเชื่อมต่อนี้มีสคริปต์ชื่อ “{{name}}” อยู่แล้ว (ตัวพิมพ์เล็กหรือใหญ่ถือเป็นชื่อเดียวกัน)"
+  },
+  "schema": {
+    "newDatabase": "ฐานข้อมูลใหม่…",
+    "newDatabaseTitle": "ฐานข้อมูลใหม่บน {{name}}",
+    "name": "ชื่อ",
+    "namePlaceholder": "เช่น shop_2026",
+    "charset": "ชุดอักขระ (Character set)",
+    "collation": "Collation",
+    "serverDefault": "ค่าเริ่มต้นของเซิร์ฟเวอร์ ({{value}})",
+    "charsetDefault": "ค่าเริ่มต้นของชุดอักขระ ({{value}})",
+    "owner": "เจ้าของ (Owner)",
+    "ownerDefault": "คุณ ({{value}})",
+    "encoding": "Encoding",
+    "encodingDefault": "เหมือน template ({{value}})",
+    "template": "Template",
+    "templateDefault": "template1 (ค่าเริ่มต้น)",
+    "templateHint": "ถ้าใช้ encoding ที่ต่างจาก template ต้องเลือก template0",
+    "statement": "คำสั่งที่จะรัน",
+    "statementEmpty": "พิมพ์ชื่อเพื่อดูคำสั่ง",
+    "readOnly": "การเชื่อมต่อนี้เป็นแบบอ่านอย่างเดียว จึงสร้างฐานข้อมูลไม่ได้ ต้องปิดเซสชันอ่านอย่างเดียวในการตั้งค่าก่อน",
+    "prodWarning": "คุณกำลังจะสร้างฐานข้อมูลบนเซิร์ฟเวอร์ที่ใช้งานจริง (PRODUCTION)",
+    "create": "สร้างฐานข้อมูล",
+    "createProd": "สร้างบนระบบใช้งานจริง",
+    "creating": "กำลังสร้าง…",
+    "created": "สร้างฐานข้อมูล “{{name}}” แล้ว",
+    "optionsFailed": "อ่านตัวเลือกจากเซิร์ฟเวอร์ไม่ได้: {{message}}"
   }
 }

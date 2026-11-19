@@ -3,6 +3,7 @@ import {
   CircleAlert,
   Copy,
   Database,
+  DatabaseZap,
   Eye,
   FolderTree,
   Lock,
@@ -449,6 +450,12 @@ function ConnectionNode({ connection, query }: { connection: ConnectionView; que
               <ContextMenu.Item className={menuItemClass} onSelect={() => useWorkspace.getState().openSql(connection.id, null)}>
                 <TerminalSquare className="size-3.5" /> {t("sql.newQuery")}
                 <span className="ml-auto pl-4 text-xs text-fg-subtle">⌘T</span>
+              </ContextMenu.Item>
+            )}
+            {/* A SQLite connection is one file: there is no database to create inside it. */}
+            {connected && connection.engine !== "sqlite" && (
+              <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewDatabase(connection)}>
+                <DatabaseZap className="size-3.5" /> {t("schema.newDatabase")}
               </ContextMenu.Item>
             )}
             {connected && (

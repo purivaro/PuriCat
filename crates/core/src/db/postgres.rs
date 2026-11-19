@@ -388,6 +388,21 @@ impl PgSession {
     }
 
     /// Run a read-only query whose columns are all text.
+    /// The database this session was opened on.
+    pub fn home(&self) -> &str {
+        &self.home
+    }
+
+    /// Run one statement that is not a query and has no parameters (DDL from a form), on
+    /// the session's own database and outside any transaction.
+    pub async fn execute_statement(&self, sql: &str) -> Result<()> {
+        sqlx::raw_sql(sql)
+            .execute(&self.pool(&self.home).await?)
+            .await
+            .map_err(Error::database)?;
+        Ok(())
+    }
+
     pub async fn query_text(
         &self,
         database: &str,

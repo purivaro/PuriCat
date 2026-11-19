@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use puricat_core::db::console::{RunOptions, RunOutcome, Status};
+use puricat_core::db::ddl::{DatabaseOptions, NewDatabase};
 use puricat_core::db::export::{self, Format};
 use puricat_core::db::filter::Filter;
 use puricat_core::db::script;
@@ -310,6 +311,40 @@ pub async fn plan_changes(
         .await?
         .plan_changes(&table, &changes)
         .await
+}
+
+// ---- schema changes through a form ------------------------------------------------------
+
+/// What the server offers for a new database (character sets, owners, encodings).
+#[tauri::command]
+pub async fn database_options(state: State<'_, AppState>, id: String) -> Result<DatabaseOptions> {
+    state.session(&id).await?.database_options().await
+}
+
+/// The exact `CREATE DATABASE` statement the form would run. Runs nothing.
+#[tauri::command]
+pub async fn plan_create_database(
+    state: State<'_, AppState>,
+    id: String,
+    spec: NewDatabase,
+) -> Result<String> {
+    state.session(&id).await?.create_database_sql(&spec)
+}
+
+/// Create a database. Returns the statement that ran.
+#[tauri::command]
+pub async fn create_database(
+    state: State<'_, AppState>,
+    id: String,
+    spec: NewDatabase,
+) -> Result<String> {
+    // Refuse early with a clear message; the server would reject it anyway.
+    if state.store.get_connection(&id).await?.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to create a database.".into(),
+        ));
+    }
+    state.session(&id).await?.create_database(&spec).await
 }
 
 /// Save staged edits in one transaction.

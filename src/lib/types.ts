@@ -318,6 +318,28 @@ export interface TableColumns {
   primaryKey: string[];
 }
 
+/** A database to create. Only the fields of the connection's engine are sent. */
+export interface NewDatabase {
+  name: string;
+  charset?: string | null;
+  collation?: string | null;
+  owner?: string | null;
+  encoding?: string | null;
+  template?: string | null;
+}
+
+export interface DatabaseOptions {
+  charsets: { name: string; defaultCollation: string; description: string }[];
+  collations: { name: string; charset: string }[];
+  defaultCharset: string | null;
+  defaultCollation: string | null;
+  owners: string[];
+  currentUser: string | null;
+  templates: string[];
+  encodings: string[];
+  defaultEncoding: string | null;
+}
+
 export type AiProvider = "claude" | "codex";
 
 export interface CliStatus {

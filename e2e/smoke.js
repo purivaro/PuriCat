@@ -177,6 +177,67 @@
       status: document.querySelector("footer")?.textContent.trim(),
     });
 
+    // ---- a new database from the connection's menu ------------------------------------
+    // The form only chooses; the statement shown is the backend's, and it is what runs.
+    const ddl = () => document.querySelector("[data-new-database]");
+    const ddlButton = (label) => all("[data-new-database] button").find((b) => b.textContent.trim() === label);
+    const ddlPlan = () => ddl()?.querySelector("[data-ddl-preview]")?.textContent.trim();
+    const setChoice = async (select, value) => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(60);
+    };
+    const newDatabase = async (connectionName) => {
+      await rightClick(treeRow(connectionName));
+      await click(await waitFor(() => menuItem("New database…"), `new database item of ${connectionName}`), "new database");
+      await waitFor(ddl, "new database dialog");
+    };
+
+    await newDatabase("Demo MySQL");
+    const ddlEmpty = {
+      hint: ddl().querySelector("[data-ddl-preview-empty]")?.textContent.trim(),
+      createDisabled: ddlButton("Create database").disabled,
+      defaults: await waitFor(() => /\(utf8/.test(field("Character set").selectedOptions[0].textContent) && [field("Character set"), field("Collation")].map((el) => el.selectedOptions[0].textContent), "server defaults"),
+    };
+    await type(field("Name"), "puricat_e2e_made");
+    await waitFor(() => ddlPlan() === "CREATE DATABASE `puricat_e2e_made`", "plain statement");
+    await setChoice(field("Character set"), "utf8mb4");
+    const collationsOffered = [...field("Collation").options].map((o) => o.value);
+    if (!collationsOffered.includes("utf8mb4_bin") || collationsOffered.some((c) => c && !c.startsWith("utf8mb4"))) {
+      throw new Error(`collations offered for utf8mb4: ${collationsOffered.slice(0, 8)}`);
+    }
+    await setChoice(field("Collation"), "utf8mb4_bin");
+    const mysqlPlan = await waitFor(() => ddlPlan()?.endsWith("COLLATE utf8mb4_bin") && ddlPlan(), "statement with a collation");
+    await stage("new-database", { ddlEmpty, mysqlPlan });
+    await click(ddlButton("Create database"), "create database");
+    await waitFor(() => !ddl(), "dialog to close after creating", 15000);
+    await waitFor(() => treeRows("puricat_e2e_made").length === 1, "the new database in the explorer");
+
+    // the same name again: the server's own refusal, shown in the dialog, which stays open
+    await newDatabase("Demo MySQL");
+    await type(field("Name"), "puricat_e2e_made");
+    await waitFor(() => ddlPlan() === "CREATE DATABASE `puricat_e2e_made`", "statement again");
+    await click(ddlButton("Create database"), "create again");
+    const ddlRefused = (await waitFor(() => ddl()?.querySelector("[data-ddl-error]"), "the server's refusal")).textContent.trim();
+    await click(ddlButton("Cancel"), "cancel new database");
+    await waitFor(() => !ddl(), "dialog closed");
+
+    // PostgreSQL has other choices: owner, template, encoding
+    await newDatabase("Demo PostgreSQL");
+    const pgChoices = {
+      owner: field("Owner").selectedOptions[0].textContent,
+      templates: [...field("Template").options].map((o) => o.textContent),
+      encodings: [...field("Encoding").options].map((o) => o.value).filter((v) => ["UTF8", "LATIN1", "SJIS"].includes(v)),
+    };
+    await type(field("Name"), "puricat_e2e_made");
+    await setChoice(field("Template"), "template0");
+    await setChoice(field("Encoding"), "UTF8");
+    const pgPlan = await waitFor(() => ddlPlan()?.endsWith("ENCODING 'UTF8'") && ddlPlan(), "postgres statement");
+    await click(ddlButton("Create database"), "create postgres database");
+    await waitFor(() => !ddl(), "dialog to close after creating", 15000);
+    await waitFor(() => treeRows("puricat_e2e_made").length === 2, "the new database under both servers");
+    log.push({ stage: "new-database-made", ddlRefused, pgChoices, pgPlan });
+
 
     // ---- editing: type, paste from a spreadsheet, undo, review, save ------------------
     const gridEl = () => document.querySelector(`${panelSel} [role="grid"]`);
