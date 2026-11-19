@@ -69,7 +69,10 @@ SQLite has its own section, "SQLite — a database file", further down: what app
 | Choose another database for a query tab | Implemented: the selector makes the next run open a new connection on that database (no automated test); `USE` inside a script is verified (live test) | Not available: a tab stays on the database it was opened on. Planned (Phase 4) | Planned (Phase 4) |
 | Export a result to CSV, JSON, XLSX | Implemented & verified (unit tests; CSV in the live test; all three in E2E) | Implemented & verified (unit tests; CSV in the live test); not through the UI | Planned (Phase 4) |
 | Create a database from a form that shows the exact statement (see "New database") | Implemented & verified (unit and live tests; through the UI in the E2E stage `new-database`, with a character set and a collation, and the same name refused) | Implemented & verified (unit and live tests; through the UI in the E2E stage `new-database`, with a template and an encoding) | Planned (Phase 4) |
-| Rename, alter or drop a database; create, alter or drop tables, indexes and views through a form | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
+| Edit a database from a form that shows the exact statements (see "Database menu") | Default character set and collation. Implemented & verified (unit and live tests; a collation change through the UI in the E2E stage `database-edit`). A database cannot be renamed on MySQL | Name and owner. Implemented & verified (unit and live tests; a rename through the UI in the end-to-end test, after the stage `database-edit`). The owner change is not verified through the UI; the encoding cannot be changed | Planned (Phase 4) |
+| Drop a database after typing its name (see "Database menu") | Implemented & verified (unit and live tests); not through the UI on this engine | Implemented & verified (unit and live tests; through the UI in the E2E stage `database-drop`) | Planned (Phase 4) |
+| Open a SQL file in a new query tab; `FLUSH` from the connection's menu (see "Database menu") | Open SQL file: implemented & verified through the UI for a small file (E2E). Flush: implemented & verified for Privileges, Tables and Status (live test), Status through the UI (E2E); `FLUSH LOGS` accepted once by hand | Open SQL file: implemented, not yet verified on this engine. Flush: not available, it is a MySQL statement | Planned (Phase 4) |
+| Create, alter or drop tables, indexes and views through a form | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Import from CSV / XLSX, SQL dump export, EXPLAIN view | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Schema context for the agent chat (engine and version, database, tables and views with column names, types, key / NOT NULL / generated flags, row estimates; no rows) | Implemented, not yet verified on this engine (the same code reads the catalogue as for the structure view; no test reads the text of a MySQL context. The E2E stage `agent-mysql` sends one turn with a MySQL context and asserts only the context button's label) | Implemented & verified (unit test of the text; E2E: the context inspector and the prompt handed to the stand-in CLI, for a table tab in a non-`public` schema) | Planned |
 | Database tools for the AI, off by default: catalogue lookups (`list_tables`, `describe_table`; `list_schemas` where the engine has schemas) | Implemented & verified (live test; E2E through the UI at the "Structure" level, on a stand-in CLI: `list_tables` and `describe_table`, whose step opens to the structure the model was given) | Implemented & verified (live test; E2E through the UI at "Structure and rows", on a stand-in CLI; `list_schemas` is not called there) | Planned |
@@ -340,7 +343,7 @@ Limits:
 
 | Limitation | Detail |
 |---|---|
-| Creation only | No drop, rename or alter of a database, and no form for tables, indexes or views. Planned (Phase 4); the SQL can be typed in a query tab |
+| Databases only | No form for tables, indexes or views. Planned (Phase 4); the SQL can be typed in a query tab. Editing and dropping a database are in "Database menu" below |
 | PostgreSQL options left out | Everything but owner, template and encoding: among them `LC_COLLATE`, `LC_CTYPE`, the locale provider and ICU locale, tablespace, connection limit and `IS_TEMPLATE`. A database gets the locale of its template |
 | MySQL options left out | `ENCRYPTION` and `READ ONLY` |
 | PostgreSQL templates | Only databases marked as templates are offered, although PostgreSQL lets a superuser or the owner copy any database |
@@ -350,6 +353,56 @@ Limits:
 | Privileges | Tested with accounts that may create databases. The refusal for an account that may not has not been seen |
 | No record | The statement is not written to the SQL history or to any log |
 | Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. MariaDB and other versions are untested; the form relies on `information_schema.CHARACTER_SETS` / `COLLATIONS` and on the `pg_encoding_to_char` function |
+
+## Database menu
+
+Added on 2026-11-19, on the rule of "New database" ([ADR 0019](docs/adr/0019-schema-changes-through-forms.md), section 7): a form only chooses, the backend builds every statement (`db::ddl`), the form shows it as "Statement that will run", and the same builder is called again when it is run.
+
+Right-click a database in the explorer: New query, Open SQL file…, New database…, Edit database…, Copy name, Refresh, Drop database…. Right-click a connection: besides what was there, New connection, Open SQL file… (while connected) and, on a connected MySQL connection, a Flush submenu.
+
+| Aspect | MySQL | PostgreSQL |
+|---|---|---|
+| What "Edit database…" can change | The default character set and the default collation. They are the defaults for tables created from then on; existing tables keep their own, and the form says so | The name and the owner |
+| What it shows and cannot change | The name: MySQL has no statement that renames a database, and the form says so under the disabled field. A request to rename is refused by the builder too | The encoding: it is set when a database is created. Shown in a disabled field with that explanation |
+| Where the form's values come from | `information_schema.SCHEMATA` for the database as it is now; the lists of character sets and collations as in "New database". Choosing another character set empties the collation and offers "that character set's default" first | `pg_database` for the owner and the encoding; the owner list as in "New database", plus the current owner if that list leaves it out |
+| What is sent | Only what differs from the database as it is now. With nothing changed there is no statement and "Save changes" is disabled | The same. The same name again is not a change |
+| The statements | One: ``ALTER DATABASE `name` [CHARACTER SET cs] [COLLATE co]``. A collation alone sends only `COLLATE`; a character set alone leaves the collation to that character set's default (`latin1` gave `latin1_swedish_ci` in the live test) | Up to two, in this order: `ALTER DATABASE "name" OWNER TO "role"`, then `ALTER DATABASE "name" RENAME TO "new name"` — the owner first, while the database still has the name on screen |
+| How they run | One statement on a connection of the session's pool. MySQL commits DDL at once | Sent together as one simple query on a pooled connection to the database the session was opened on, which the server treats as one transaction: when the rename is refused, the owner is not changed either (verified: live test) |
+| "Drop database…" | ``DROP DATABASE `name` `` | `DROP DATABASE "name"` — without `WITH (FORCE)`: other clients are not disconnected |
+| What the drop form says the database holds | The number of rows in `information_schema.TABLES` for it: tables and views | The number of tables, partitioned tables, views and materialized views outside the catalogue schemas, counted on a connection to that database. Best effort on both engines: when the count cannot be made the form shows the statement without a number |
+| The server's own databases | `information_schema`, `mysql`, `performance_schema`, `sys`, in any letter case: refused by the builder for edit and drop. "Edit database…" and "Drop database…" are not in their menu | `postgres`, `template0`, `template1`: refused by the builder. The templates are not listed in the explorer. `postgres` is listed, and its menu **does** show both items: the refusal then appears in the form in place of the statement (read from the code; not tried through the UI) |
+| The database the connection is opened on | No such limit: a MySQL session is not tied to a database | A drop and a rename are refused before anything is sent, with a sentence that says to use a connection whose default database is another one: the server would refuse anyway, since PuriCat's own session is connected to it. An owner change is not refused |
+| PuriCat's own connections to the database | Query tabs opened on it give up their connection before a drop (the server does not require it) | The server refuses to drop or rename a database anyone is connected to. Before either, PuriCat closes the session's pooled connections to that database and the connections of query tabs opened on it. Another client's connection still makes the server refuse; its message is shown (not tried) |
+| Read-only connection | The forms say so and disable their button; the commands refuse a profile saved as read-only; the server refuses `ALTER DATABASE` and `DROP DATABASE` in a read-only session (the server's refusals are verified below the UI; the commands' and the forms' are not) | The same |
+| After a rename or a drop | — (no rename). After a drop: as on PostgreSQL | The database's table tabs close; its query tabs keep their text and move to the new name, or after a drop to the connection's default database; what the explorer had loaded under the old name is forgotten and the database list is read again |
+| Flush | A submenu of the connection: Privileges, Tables, Logs, Status. Four fixed statements — `FLUSH PRIVILEGES`, `FLUSH TABLES`, `FLUSH LOGS`, `FLUSH STATUS` — each shown with a sentence on what it does, then run on a pooled connection | Not offered; the backend refuses with "FLUSH is a MySQL statement" (verified) |
+
+Rules shared with "New database": names are quoted as one identifier, whatever they contain (verified with a name of spaces, Thai letters and the engine's quote character: altered and dropped on MySQL, renamed to and dropped on PostgreSQL); a character set or collation must be a plain word; an option of the other engine is refused, not ignored. A new PostgreSQL name longer than 63 bytes is refused before a statement exists, as at creation (read from the code: the rename has no test of its own for the length).
+
+**The name typed to confirm a drop** must equal the database's name exactly — case, spaces and all. The form enables its button only then, and the `drop_database` command compares the two again before it does anything.
+
+**Tabs with unsaved work.** The forms do not drop or rename a database while a table tab of it has unsaved edits or a query tab opened on it has an open transaction; they ask to save, discard or end them first. The check is the form's and goes by the database a tab was opened on.
+
+**Open SQL file…** shows the native Open dialog (filter: `.sql`) and opens the file's text in a new query tab — on the database whose menu was used, or on the connection's default database from the connection's menu. The file must be UTF-8 and at most 1 MB (the limit of a saved script); a byte-order mark at the start is removed. The tab is an ordinary query tab from then on: it is named "Query n", not after the file, has no link back to the file, and nothing runs until the user runs it. Offered on every engine, SQLite included.
+
+**Why SQLite has no Edit or Drop.** As for "New database": the file is the one database. The items are not in the menu of a SQLite database, and the backend refuses the details, the plans and `FLUSH` as "unsupported" (verified).
+
+Limits:
+
+| Limitation | Detail |
+|---|---|
+| MySQL: no rename | The server has no such statement. Not offered and not emulated (no dump and reload) |
+| MySQL: existing tables are not converted | `ALTER DATABASE` changes the defaults for new tables only |
+| PostgreSQL: what cannot be edited | Encoding, locale, tablespace, connection limit, `IS_TEMPLATE`, per-database settings. MySQL: `ENCRYPTION`, `READ ONLY` |
+| PostgreSQL: a database other clients use | Not forced. The server's refusal of a drop or a rename while someone else is connected has not been seen in a test |
+| PostgreSQL: `postgres` in the menu | Edit and Drop are offered and refused only in the form (see the table) |
+| MySQL `FLUSH` | `FLUSH HOSTS` is not offered: MySQL 8.4 removed it. `FLUSH PRIVILEGES` is deprecated in recent MySQL — 9.3.0 answers it with warning 1681 — and the form says so; PuriCat does not show the server's warnings. `FLUSH LOGS` starts a new binary log file where binary logging is on. Each needs a privilege on the server (`RELOAD`, in MySQL's manual); the refusal for an account without it has not been seen. Checked on 9.3.0 only; MariaDB untested |
+| SQL files | UTF-8 only: a file in another encoding is refused, not converted. More than 1 MB is refused. The text is copied into the tab; changes are not written back to the file |
+| Tabs the forms cannot see | On MySQL, a query tab opened on the connection's default database, or one that moved with `USE`, is not counted as a tab of the database: it neither holds a drop back nor moves afterwards |
+| Stop | None. A statement that waits (`FLUSH TABLES` behind a long query, a drop behind a lock) can only be waited for; the form cannot be closed meanwhile |
+| No record | Nothing done from this menu is written to the SQL history or to any log |
+| Through the UI | Verified there: a MySQL collation change, opening a SQL file, Flush → Status, a PostgreSQL rename and a PostgreSQL drop (E2E, dev mode). Not verified there: a MySQL drop, an owner change, the other Flush kinds, a read-only or Production-labelled connection, the refusals, Thai and the dark theme, the bundled app |
+| Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only |
 
 ## Object classification
 
@@ -413,7 +466,8 @@ Added on 2026-11-18 ([ADR 0018](docs/adr/0018-sqlite-files.md)). A connection is
 | Estimated row count | Not available: SQLite keeps none |
 | Exact row count, asked for and stoppable | Implemented & verified in the backend; not through the UI |
 | Tables without a primary key | Read-only in the grid (rows can be added), as on the other engines. The row id is not offered as a key |
-| "New database…" in the connection's menu | Not offered: the file is its one database, so there is nothing to create inside it; the backend refuses as well (verified). See "New database" |
+| "New database…", "Edit database…" and "Drop database…" in the menus | Not offered: the file is its one database, so there is nothing to create, rename or drop inside it; the backend refuses as well (verified). See "New database" and "Database menu" |
+| "Open SQL file…" in the menus | Offered, as on the other engines. Implemented, not yet verified on SQLite |
 | Create a database file; attached databases; encrypted databases | Not built |
 
 ### Types: a declared type is a suggestion

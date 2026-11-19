@@ -370,7 +370,7 @@ impl Session {
             }
             Session::Sqlite(_) => {
                 // Refuse with the same explanation the statement builder gives.
-                ddl::create_database(Engine::Sqlite, &ddl::NewDatabase::default()).map(|_| ())?;
+                ddl::supported(Engine::Sqlite)?;
             }
         }
         Ok(options)
@@ -388,6 +388,144 @@ impl Session {
             Session::MySql(s) => s.execute_statement(&sql).await?,
             Session::Postgres(s) => s.execute_statement(&sql).await?,
             Session::Sqlite(_) => unreachable!("refused by create_database_sql"),
+        }
+        Ok(sql)
+    }
+
+    /// What a database is set to now, to fill the edit form.
+    pub async fn database_details(&self, name: &str) -> Result<ddl::DatabaseDetails> {
+        let mut details = ddl::DatabaseDetails {
+            name: name.to_string(),
+            protected: ddl::is_protected(self.engine(), name),
+            ..Default::default()
+        };
+        let wanted = [Some(name.to_string())];
+        let rows = match self {
+            Session::MySql(s) => {
+                s.query_text(
+                    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
+                     FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+                    &wanted,
+                )
+                .await?
+            }
+            Session::Postgres(s) => {
+                s.query_text(
+                    s.home(),
+                    "SELECT pg_get_userbyid(datdba)::text, pg_encoding_to_char(encoding)::text
+                     FROM pg_database WHERE datname = $1",
+                    &wanted,
+                )
+                .await?
+            }
+            Session::Sqlite(_) => {
+                ddl::supported(Engine::Sqlite)?;
+                Vec::new()
+            }
+        };
+        let row = rows
+            .first()
+            .ok_or_else(|| Error::NotFound(format!("Database {name}")))?;
+        let cell = |i: usize| row.get(i).cloned().flatten();
+        match self {
+            Session::MySql(_) => (details.charset, details.collation) = (cell(0), cell(1)),
+            _ => (details.owner, details.encoding) = (cell(0), cell(1)),
+        }
+        // What a drop would take with it. Best effort: a database that cannot be looked
+        // into (PostgreSQL's `template0`, no privilege) is still shown, without the number.
+        let counted = match self {
+            Session::MySql(s) => {
+                s.query_text(
+                    "SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = ?",
+                    &wanted,
+                )
+                .await
+            }
+            Session::Postgres(s) => {
+                s.query_text(
+                    name,
+                    "SELECT count(*)::text FROM pg_class c
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE c.relkind IN ('r', 'p', 'v', 'm')
+                       AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'",
+                    &[],
+                )
+                .await
+            }
+            Session::Sqlite(_) => return Ok(details),
+        };
+        details.tables = counted
+            .ok()
+            .and_then(|rows| rows.first()?.first()?.as_deref()?.parse().ok());
+        Ok(details)
+    }
+
+    /// The database this session itself is connected through, which the server will not
+    /// drop or rename from here.
+    fn refuse_own_database(&self, name: &str, action: &str) -> Result<()> {
+        match self {
+            Session::Postgres(s) if s.home() == name => Err(Error::Invalid(format!(
+                "This connection is opened on “{name}”, so it cannot {action} it. Use a connection whose default database is another one."
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The exact statement `drop_database` would run.
+    pub fn drop_database_sql(&self, name: &str) -> Result<String> {
+        self.refuse_own_database(name, "drop")?;
+        ddl::drop_database(self.engine(), name)
+    }
+
+    /// Drop a database and everything in it. Returns the statement that ran.
+    pub async fn drop_database(&self, name: &str) -> Result<String> {
+        let sql = self.drop_database_sql(name)?;
+        match self {
+            Session::MySql(s) => s.execute_statement(&sql).await?,
+            Session::Postgres(s) => {
+                s.release(name).await;
+                s.execute_statement(&sql).await?
+            }
+            Session::Sqlite(_) => unreachable!("refused by drop_database_sql"),
+        }
+        Ok(sql)
+    }
+
+    /// The exact statements `alter_database` would run, in order.
+    pub fn alter_database_sql(&self, spec: &ddl::AlterDatabase) -> Result<Vec<String>> {
+        let statements = ddl::alter_database(self.engine(), spec)?;
+        if statements.iter().any(|s| s.contains(" RENAME TO ")) {
+            self.refuse_own_database(&spec.name, "rename")?;
+        }
+        Ok(statements)
+    }
+
+    /// Change a database. On PostgreSQL the statements run as one unit: all or none.
+    pub async fn alter_database(&self, spec: &ddl::AlterDatabase) -> Result<Vec<String>> {
+        let statements = self.alter_database_sql(spec)?;
+        match self {
+            Session::MySql(s) => {
+                for sql in &statements {
+                    s.execute_statement(sql).await?;
+                }
+            }
+            Session::Postgres(s) => {
+                s.release(&spec.name).await;
+                // Several statements sent as one simple query are one implicit transaction.
+                s.execute_statement(&statements.join("; ")).await?
+            }
+            Session::Sqlite(_) => unreachable!("refused by alter_database_sql"),
+        }
+        Ok(statements)
+    }
+
+    /// MySQL server maintenance from the connection's menu. Returns the statement that ran.
+    pub async fn flush(&self, what: ddl::Flush) -> Result<&'static str> {
+        let sql = ddl::flush(self.engine(), what)?;
+        match self {
+            Session::MySql(s) => s.execute_statement(sql).await?,
+            _ => unreachable!("refused by ddl::flush"),
         }
         Ok(sql)
     }

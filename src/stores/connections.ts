@@ -58,6 +58,8 @@ interface ConnectionsState {
   disconnect: (id: string) => Promise<void>;
 
   toggle: (key: string, open?: boolean) => void;
+  /** A database was dropped or renamed: nothing loaded under its name is kept. */
+  forgetDatabase: (id: string, database: string) => void;
   loadDatabases: (id: string) => Promise<void>;
   loadSchemas: (id: string, database: string) => Promise<void>;
   loadObjects: (id: string, database: string, schema: string | null) => Promise<void>;
@@ -155,6 +157,17 @@ export const useConnections = create<ConnectionsState>((set, get) => {
     },
 
     toggle: (key, open) => set((s) => ({ expanded: { ...s.expanded, [key]: open ?? !s.expanded[key] } })),
+
+    forgetDatabase: (id, database) => {
+      // Keys under a database are its own (`["id","db"]`, with `#group` suffixes) and its
+      // schemas' (`["id","db","schema"]`).
+      const prefix = nodeKey.database(id, database).slice(0, -1);
+      const keep = <T>(nodes: Record<string, T>) =>
+        Object.fromEntries(
+          Object.entries(nodes).filter(([key]) => !(key.startsWith(prefix) && ["]", ","].includes(key[prefix.length] ?? ""))),
+        );
+      set((s) => ({ schemas: keep(s.schemas), objects: keep(s.objects), expanded: keep(s.expanded) }));
+    },
 
     loadDatabases: async (id) => {
       const key = nodeKey.connection(id);

@@ -103,6 +103,27 @@ impl AppState {
         }
     }
 
+    /// Query tabs on `database` lose their consoles: the server will not drop or rename a
+    /// database someone is connected to. A statement they are running is interrupted and an
+    /// open transaction is rolled back; the tab's next run opens a new console.
+    pub async fn release_consoles(&self, connection_id: &str, database: &str) {
+        let dropped: Vec<_> = {
+            let mut consoles = self.consoles.lock().await;
+            let tabs: Vec<String> = consoles
+                .iter()
+                .filter(|(_, slot)| {
+                    slot.connection_id == connection_id
+                        && slot.database.as_deref() == Some(database)
+                })
+                .map(|(tab, _)| tab.clone())
+                .collect();
+            tabs.iter().filter_map(|tab| consoles.remove(tab)).collect()
+        };
+        for slot in dropped {
+            slot.abandon().await;
+        }
+    }
+
     /// Close and forget a session. Returns whether one was open.
     pub async fn remove_session(&self, connection_id: &str) -> bool {
         // Query tabs of this connection lose their consoles (and any open transaction).

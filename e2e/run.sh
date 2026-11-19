@@ -31,6 +31,7 @@ echo "› fixtures"
 drop_made() {
   "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e_made' 2>/dev/null || true
   "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_made WITH (FORCE)' >/dev/null 2>&1 || true
+  "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_renamed WITH (FORCE)' >/dev/null 2>&1 || true
 }
 drop_made
 
@@ -70,12 +71,14 @@ fi
 cd "$ROOT"
 export PATH="$ROOT/e2e/fixtures/bin:$PATH"
 export PURICAT_STAND_IN_DIR="$WORK"
-# Files for "Open a file…" in Smart Paste. A native Open dialog cannot be driven, so a debug
-# build answers each request with the next of these instead: the CSV and the workbook the test
-# exports itself, a Thai CSV that is not UTF-8, and a CSV with more rows than one run takes.
+# Files for the native Open dialogs. A native dialog cannot be driven, so a debug build answers
+# each request with the next of these instead, in the order the stages ask: a SQL file for
+# "Open SQL file…", then for Smart Paste the CSV and the workbook the test exports itself, a
+# Thai CSV that is not UTF-8, and a CSV with more rows than one run takes.
+printf 'SELECT 42 AS answer; -- เปิดจากไฟล์\n' >"$WORK/open.sql"
 printf 'id,name,city\n9001,ทดสอบภาษาไทย,ลำปาง\n' | iconv -f UTF-8 -t CP874 >"$WORK/thai874.csv"
 { echo "id,name,city"; seq 1 10001 | sed 's/$/,x,y/'; } >"$WORK/big.csv"
-export PURICAT_E2E_PICK="$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
+export PURICAT_E2E_PICK="$WORK/open.sql:$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
 if [ -n "${APP:-}" ]; then
   echo "› launching $APP"
   PURICAT_DATA_DIR="$WORK/data" PURICAT_SECRET_STORE=memory \
@@ -207,12 +210,13 @@ PY
   echo "  · database tools: MCP hand-over, refusals and the data verified"
 fi
 if [ "$last" = done ]; then
-  # The databases the app said it created exist on the servers, as chosen in the form.
-  made=$("$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -Nse "SELECT DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'puricat_e2e_made'")
-  [ "$made" = utf8mb4_bin ] || { echo "✗ new database check failed: MySQL has '$made', expected utf8mb4_bin"; exit 1; }
-  made=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d postgres -c "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'puricat_e2e_made'")
-  [ "$made" = UTF8 ] || { echo "✗ new database check failed: PostgreSQL has '$made', expected UTF8"; exit 1; }
-  echo "  · new databases verified on both servers"
+  # What the app said it did to databases is what the servers have: MySQL's was created and
+  # then given another collation; PostgreSQL's was created, renamed and dropped.
+  made=$("$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -Nse "SELECT CONCAT(DEFAULT_CHARACTER_SET_NAME, ' ', DEFAULT_COLLATION_NAME) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'puricat_e2e_made'")
+  [ "$made" = "utf8mb4 utf8mb4_unicode_ci" ] || { echo "✗ database check failed: MySQL has '$made', expected utf8mb4 utf8mb4_unicode_ci"; exit 1; }
+  made=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname IN ('puricat_e2e_made', 'puricat_e2e_renamed')")
+  [ "$made" = 0 ] || { echo "✗ database check failed: PostgreSQL still has $made of the created and renamed databases"; exit 1; }
+  echo "  · databases verified on both servers: created, altered, renamed, dropped"
 fi
 if [ "$last" = done ]; then
   echo "✓ end-to-end smoke test passed — report: target/e2e-report.json"

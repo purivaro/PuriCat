@@ -71,7 +71,8 @@
     "failed": "Connection failed",
     "tables": "Tables",
     "views": "Views",
-    "system": "system"
+    "system": "system",
+    "openSqlFile": "Open SQL file…"
   },
   "deleteConnection": {
     "title": "Delete “{{name}}”?",
@@ -780,6 +781,50 @@
     "createProd": "Create on production",
     "creating": "Creating…",
     "created": "Database “{{name}}” created",
-    "optionsFailed": "The server's options could not be read: {{message}}"
+    "optionsFailed": "The server's options could not be read: {{message}}",
+    "editDatabase": "Edit database…",
+    "editDatabaseTitle": "Edit database “{{name}}”",
+    "dropDatabase": "Drop database…",
+    "dropDatabaseTitle": "Drop database “{{name}}”?",
+    "readOnlyChange": "This connection is read-only, so it cannot change the server. Turn off the read-only session in its settings first.",
+    "renameUnsupported": "MySQL cannot rename a database.",
+    "charsetScope": "These are the defaults for tables created from now on. Existing tables keep their own character set and collation.",
+    "encodingFixed": "Set when the database is created; it cannot be changed.",
+    "nothingChanged": "Change something to see the statement.",
+    "unsavedTabs": "Tabs of this database have unsaved changes or an open transaction. Save, discard or end them first.",
+    "prodChangeWarning": "You are about to change a database on a PRODUCTION server.",
+    "saveChanges": "Save changes",
+    "saving": "Saving…",
+    "altered": "Database “{{name}}” changed",
+    "dropWarning": "The database and everything in it — tables, views and data — is deleted from the server. This cannot be undone.",
+    "dropHoldsNothing": "It holds no tables or views.",
+    "dropHolds_one": "It holds {{count}} table or view.",
+    "dropHolds_other": "It holds {{count}} tables and views.",
+    "dropClosesTabs_one": "{{count}} open tab of it will be closed.",
+    "dropClosesTabs_other": "{{count}} open tabs of it will be closed.",
+    "dropType": "Type “{{name}}” to confirm",
+    "prodDropWarning": "This is a PRODUCTION server. The database is deleted for everyone who uses it.",
+    "drop": "Drop database",
+    "dropProd": "Drop on production",
+    "dropping": "Dropping…",
+    "dropped": "Database “{{name}}” dropped",
+    "flush": "Flush",
+    "flushKinds": {
+      "privileges": "Privileges",
+      "tables": "Tables",
+      "logs": "Logs",
+      "status": "Status"
+    },
+    "flushTitle": "Flush: {{what}}",
+    "flushAbout": {
+      "privileges": "Reloads accounts and privileges from the grant tables. Needed only after those tables were edited directly. Recent MySQL versions mark this statement as deprecated.",
+      "tables": "Closes every open table and empties the table cache. It waits for statements that are using those tables, so a busy server may pause for a moment.",
+      "logs": "Closes and reopens the server's log files, and starts a new binary log file when binary logging is on.",
+      "status": "Adds this session's status counters to the global ones and resets them to zero."
+    },
+    "prodFlushWarning": "This runs on a PRODUCTION server.",
+    "run": "Run",
+    "running": "Running…",
+    "flushed": "Ran {{statement}}"
   }
 }
