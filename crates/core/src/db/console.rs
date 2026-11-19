@@ -899,7 +899,7 @@ impl Console {
     }
 }
 
-fn preview(id: usize, set: &ResultSet, capped: bool) -> ResultPreview {
+pub(crate) fn preview(id: usize, set: &ResultSet, capped: bool) -> ResultPreview {
     let mut truncated = Vec::new();
     let rows = set
         .rows

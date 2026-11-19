@@ -416,6 +416,24 @@ impl PgSession {
         Ok(())
     }
 
+    /// The query of a plain view, as `pg_get_viewdef` prints it.
+    pub async fn view_select(&self, table: &TableRef) -> Result<String> {
+        let schema = super::require_schema(table.schema.as_deref())?;
+        self.query_text(
+            &table.database,
+            "SELECT pg_get_viewdef(c.oid, true)
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'v'",
+            &[Some(schema.to_string()), Some(table.name.clone())],
+        )
+        .await?
+        .into_iter()
+        .next()
+        .and_then(|row| row.into_iter().next().flatten())
+        .map(|query| query.trim().trim_end_matches(';').trim_end().to_string())
+        .ok_or_else(|| Error::NotFound(format!("View {}", table.name)))
+    }
+
     /// The statements that would create a table or a view as it is now. PostgreSQL has no
     /// statement that prints them: a view's is its stored query under a `CREATE VIEW` line,
     /// and a table's is put together from the catalogue with the server's own `pg_get_…`

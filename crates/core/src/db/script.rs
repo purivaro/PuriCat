@@ -361,6 +361,25 @@ pub fn single_read(engine: Engine, sql: &str) -> std::result::Result<Statement, 
     Ok(statement)
 }
 
+/// The query of a stored `CREATE VIEW … AS <query>` statement: what follows the first `AS`
+/// that stands outside parentheses, strings and comments (a column list has its own
+/// parentheses, and a quoted name is not a word). `None` when there is no such `AS`.
+pub fn view_query(engine: Engine, statement: &str) -> Option<&str> {
+    let mut after = None;
+    scan(
+        engine,
+        statement,
+        |word, depth, start| {
+            if after.is_none() && depth == 0 && word.eq_ignore_ascii_case("AS") {
+                after = Some(start + word.len());
+            }
+        },
+        |_| {},
+    );
+    let query = statement[after?..].trim().trim_end_matches(';').trim_end();
+    (!query.is_empty()).then_some(query)
+}
+
 /// Is this `CREATE TEMPORARY …` / `DROP TEMPORARY …`? Judged by position, so a table that
 /// happens to be called `temporary` is not mistaken for one.
 pub fn is_temporary_ddl(engine: Engine, statement: &str) -> bool {
@@ -749,5 +768,22 @@ mod tests {
             Engine::Mysql,
             "CREATE TABLE temporary (a int) COMMENT 'temporary'"
         ));
+    }
+
+    #[test]
+    fn the_query_of_a_stored_view() {
+        let q = |sql| view_query(Engine::Sqlite, sql);
+        assert_eq!(q("CREATE VIEW v AS SELECT 1 AS n"), Some("SELECT 1 AS n"));
+        assert_eq!(
+            q("create view if not exists \"a as b\" (x, y) as\n  select a, b from t;\n"),
+            Some("select a, b from t")
+        );
+        // An `AS` inside the column list, a string or a comment is not the one.
+        assert_eq!(
+            q("CREATE VIEW v /* as it was */ AS WITH w AS (SELECT 'x AS y') SELECT * FROM w"),
+            Some("WITH w AS (SELECT 'x AS y') SELECT * FROM w")
+        );
+        assert_eq!(q("CREATE TABLE t (a int)"), None);
+        assert_eq!(q("CREATE VIEW v AS ;"), None);
     }
 }

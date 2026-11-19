@@ -13,7 +13,7 @@ use std::sync::Arc;
 use puricat_core::db::console::{RunOptions, RunOutcome, Status};
 use puricat_core::db::ddl::{
     self, AlterDatabase, DatabaseDetails, DatabaseOptions, Definition, Flush, NewDatabase,
-    TableChange,
+    TableChange, ViewSpec,
 };
 use puricat_core::db::export::{self, Format};
 use puricat_core::db::filter::Filter;
@@ -21,8 +21,8 @@ use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
 use puricat_core::db::write::{ApplyResult, CellValue, ChangeSet, Statement};
 use puricat_core::db::{
-    CellContent, DbObject, Namespace, ObjectKind, PageRequest, RowCount, RowPage, ServerInfo,
-    Session, TableMeta, TableRef,
+    CellContent, DbObject, Namespace, ObjectKind, PageRequest, QueryPreview, RowCount, RowPage,
+    ServerInfo, Session, TableMeta, TableRef,
 };
 use puricat_core::model::{ConnectionProfile, Engine};
 use puricat_core::secrets::password_key;
@@ -480,6 +480,56 @@ pub async fn apply_table_change(
         ));
     }
     state.session(&id).await?.table_change(&change).await
+}
+
+/// The query of a view as it is kept now, for the edit form.
+#[tauri::command]
+pub async fn view_select(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+) -> Result<String> {
+    state.session(&id).await?.view_select(&table).await
+}
+
+/// The exact statements the view form would run, in order. Runs nothing.
+#[tauri::command]
+pub async fn plan_view(
+    state: State<'_, AppState>,
+    id: String,
+    spec: ViewSpec,
+) -> Result<Vec<String>> {
+    state.session(&id).await?.view_statements_sql(&spec)
+}
+
+/// Create a view, or give an existing one another query. Returns the statements that ran.
+#[tauri::command]
+pub async fn save_view(
+    state: State<'_, AppState>,
+    id: String,
+    spec: ViewSpec,
+) -> Result<Vec<String>> {
+    refuse_read_only(&state, &id, "save a view").await?;
+    state.session(&id).await?.save_view(&spec).await
+}
+
+/// How many rows the view form shows of the query it tries.
+const VIEW_PREVIEW_ROWS: u32 = 100;
+
+/// The first rows of the query in the view form. Read-only: it runs on a connection of its
+/// own, in a read-only transaction that is rolled back.
+#[tauri::command]
+pub async fn preview_view_select(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    select: String,
+) -> Result<QueryPreview> {
+    state
+        .session(&id)
+        .await?
+        .preview_select(&database, &select, VIEW_PREVIEW_ROWS)
+        .await
 }
 
 /// The exact `FLUSH` statement of a MySQL connection's menu. Runs nothing.

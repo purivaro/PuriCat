@@ -441,6 +441,93 @@
     await waitFor(() => !dbRowOf("Demo MySQL", "e2e_scratch2") && !all('[role="tab"]').some((x) => x.title.startsWith("e2e_scratch2")), "the table gone from the explorer and its tab closed");
     log.push({ stage: "table-menu", pgDefinition, pgDefinitionSource, renameBefore, tableRenamePlan, emptyPlan });
 
+    // ---- views through a form: a new view, tried and created; its query changed; dropped --
+    const viewDialog = (kind) => document.querySelector(kind ? `[data-view-dialog="${kind}"]` : "[data-view-dialog]");
+    const viewButton = (label) => all("[data-view-dialog] button").find((b) => b.textContent.replace(/\s+/g, " ").trim().startsWith(label));
+    const viewPlan = () => viewDialog()?.querySelector("[data-ddl-preview]")?.textContent.trim();
+    const viewEditor = () => viewDialog()?.querySelector("form")?.__editor;
+    const scratchCount = async (sql) => Number((await scratchSql(sql)).statements[0].results[0].rows[0][0]);
+
+    // New view…: the form holds the SELECT only; the statement around it is the backend's
+    await dbMenu("Demo MySQL", "puricat_e2e", "New view…");
+    await waitFor(() => viewDialog("new") && viewEditor(), "the view form with its editor", 30000);
+    const viewBefore = {
+      title: viewDialog().querySelector("h2")?.textContent.trim(),
+      createDisabled: viewButton("Create view").disabled,
+      empty: viewDialog().querySelector("[data-ddl-preview-empty]")?.textContent.trim(),
+    };
+    if (!viewBefore.createDisabled) throw new Error("create view was enabled with nothing typed");
+    await type(field("Name"), "e2e_view");
+    const viewQuery = "SELECT id, order_no, total_amount FROM orders WHERE status = 'Cancelled' AND id <= 40";
+    viewEditor().setValue(viewQuery);
+    const viewCreatePlan = await waitFor(() => viewPlan()?.includes("Cancelled") && viewPlan(), "create view statement");
+    if (viewCreatePlan !== `CREATE VIEW \`puricat_e2e\`.\`e2e_view\` AS\n${viewQuery};`) throw new Error(`create view statement: ${viewCreatePlan}`);
+
+    // a statement that is not one reading query is refused before anything exists
+    viewEditor().setValue(`${viewQuery}; DROP TABLE orders`);
+    const viewRefusal = await waitFor(() => !viewPlan() && viewDialog().querySelector("[data-ddl-preview-empty] .text-danger")?.textContent.trim(), "the refusal of two statements");
+    if (!viewButton("Create view").disabled) throw new Error("create view was enabled for two statements");
+    viewEditor().setValue(viewQuery);
+    await waitFor(() => viewPlan() === viewCreatePlan && !viewButton("Create view").disabled, "the statement again");
+
+    // Preview rows: read-only, and what it shows is what the server counts
+    const cancelled = await scratchCount("SELECT COUNT(*) FROM orders WHERE status = 'Cancelled' AND id <= 40");
+    if (!(cancelled > 1 && cancelled < 100)) throw new Error(`the fixture gives ${cancelled} rows for the view's query`);
+    await click(viewButton("Preview rows"), "preview rows");
+    const viewRows = () => all("[data-view-dialog] [data-view-rows] tbody tr");
+    await waitFor(() => viewRows().length > 0, "the previewed rows", 20000);
+    const viewTried = {
+      rows: viewRows().length,
+      columns: all("[data-view-dialog] [data-view-rows] th").map((th) => th.textContent.trim()),
+      first: [...viewRows()[0].querySelectorAll("td")].map((td) => td.textContent.trim()),
+      summary: viewDialog().querySelector("[data-view-tried]").textContent.trim(),
+    };
+    if (viewTried.rows !== cancelled || viewTried.columns.join() !== "id,order_no,total_amount" || !viewTried.summary.startsWith(`${cancelled} rows · `)) {
+      throw new Error(`preview: ${JSON.stringify(viewTried)}, the server counts ${cancelled}`);
+    }
+    await stage("view-new", { viewBefore, viewCreatePlan, viewRefusal, viewTried });
+    await click(viewButton("Create view"), "create view");
+    await waitFor(() => !viewDialog(), "view form to close", 15000);
+    await waitFor(() => dbRowOf("Demo MySQL", "e2e_view"), "the new view in the explorer, under Views");
+    if ((await scratchCount("SELECT COUNT(*) FROM e2e_view")) !== cancelled) throw new Error("the created view does not give the previewed rows");
+
+    // Edit view…: MySQL gives back its own rewriting of the query; another query replaces it
+    await rightClick(dbRowOf("Demo MySQL", "e2e_view"));
+    const viewMenuItems = (await waitFor(() => menuItem("Edit view…") && all(`[role="menu"]${OPEN} [role="menuitem"]`), "view menu")).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    await click(menuItem("Edit view…"), "edit view");
+    const viewKept = await waitFor(() => viewDialog("edit") && viewEditor()?.getValue(), "the view's query as the server keeps it", 30000);
+    if (!/^select /i.test(viewKept) || !viewKept.includes("`puricat_e2e`.`orders`") || !field("Name").disabled) throw new Error(`edit view opened with ${viewKept}`);
+    const viewQuery2 = "SELECT id, order_no, total_amount, status FROM orders WHERE status = 'Completed' AND id <= 40";
+    viewEditor().setValue(viewQuery2);
+    const viewReplacePlan = await waitFor(() => viewPlan()?.includes("Completed") && viewPlan(), "replace view statement");
+    if (viewReplacePlan !== `CREATE OR REPLACE VIEW \`puricat_e2e\`.\`e2e_view\` AS\n${viewQuery2};`) throw new Error(`replace view statement: ${viewReplacePlan}`);
+    await waitFor(() => !viewButton("Save view").disabled, "save view button");
+    await click(viewButton("Save view"), "save view");
+    await waitFor(() => !viewDialog(), "view form to close after saving", 15000);
+    const completed = await scratchCount("SELECT COUNT(*) FROM orders WHERE status = 'Completed' AND id <= 40");
+    const viewAfter = {
+      rows: await scratchCount("SELECT COUNT(*) FROM e2e_view"),
+      columns: await scratchCount("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'puricat_e2e' AND TABLE_NAME = 'e2e_view'"),
+    };
+    if (viewAfter.rows !== completed || viewAfter.columns !== 4) throw new Error(`after the edit the view gives ${JSON.stringify(viewAfter)}, expected ${completed} rows and 4 columns`);
+
+    // ...and it goes the way any view goes: the Drop view… form
+    await tableMenu("Demo MySQL", "e2e_view", "Drop view…");
+    const viewDropPlan = await waitFor(() => tableDialog("drop") && tablePlan(), "drop view statement");
+    if (viewDropPlan !== "DROP VIEW `puricat_e2e`.`e2e_view`") throw new Error(`drop view statement: ${viewDropPlan}`);
+    await type(confirmName(), "e2e_view");
+    await waitFor(() => !tableButton("Drop view").disabled, "drop view button once the name is typed");
+    await click(tableButton("Drop view"), "drop view");
+    await waitFor(() => !tableDialog(), "drop view dialog to close", 15000);
+    await waitFor(() => !dbRowOf("Demo MySQL", "e2e_view"), "the view gone from the explorer");
+    // The form opened "Views" to show the new view; the stages that follow find it closed, as it was.
+    const viewsGroup = () => all("[data-tree-row]").find((r) => rowLabel(r).startsWith("Views ("));
+    const viewsWereOpened = viewsGroup().getAttribute("aria-expanded") === "true";
+    if (!viewsWereOpened) throw new Error("creating a view did not open the Views group");
+    await click(viewsGroup(), "close the views group again");
+    await waitFor(() => viewsGroup().getAttribute("aria-expanded") === "false", "the views group closed");
+    log.push({ stage: "view-form", viewMenuItems, viewKept, viewReplacePlan, viewAfter });
+
     // ---- backups: a database's menu, a folder of the user's choice, the history, a schedule
     const backupDialog = () => document.querySelector("[data-backup-dialog]");
     const inBackup = (sel) => backupDialog()?.querySelector(sel);

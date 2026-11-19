@@ -27,6 +27,8 @@ pub const MAX_CELL_CHARS: usize = 1000;
 /// Longest binary prefix (bytes) sent to the grid for one cell, shown as hex.
 pub const MAX_BINARY_BYTES: usize = 24;
 pub const MAX_PAGE_SIZE: u32 = 1000;
+/// How long the query of a view may run when the view form tries it.
+pub const PREVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Longest text sent for one cell when its whole value is asked for.
 pub const MAX_FULL_CHARS: usize = 1_000_000;
 /// Longest binary prefix (bytes) sent for one cell when its whole value is asked for.
@@ -213,6 +215,15 @@ pub enum Session {
     MySql(mysql::MySqlSession),
     Postgres(Box<postgres::PgSession>),
     Sqlite(Box<sqlite::SqliteSession>),
+}
+
+/// The first rows of a query that was only tried, with how long that took.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryPreview {
+    #[serde(flatten)]
+    pub result: console::ResultPreview,
+    pub elapsed_ms: u64,
 }
 
 impl Session {
@@ -565,6 +576,79 @@ impl Session {
             Session::Sqlite(s) => s.execute_statement(database, &sql).await?,
         }
         Ok(sql)
+    }
+
+    /// The query of a view as it is kept now, to fill the edit form.
+    pub async fn view_select(&self, table: &TableRef) -> Result<String> {
+        match self {
+            Session::MySql(s) => s.view_select(table).await,
+            Session::Postgres(s) => s.view_select(table).await,
+            Session::Sqlite(s) => s.view_select(table).await,
+        }
+    }
+
+    /// The exact statements `save_view` would run, in order, for the form's preview.
+    pub fn view_statements_sql(&self, spec: &ddl::ViewSpec) -> Result<Vec<String>> {
+        ddl::view_statements(self.engine(), spec)
+    }
+
+    /// Create a view, or give an existing one another query. Returns the statements that ran.
+    pub async fn save_view(&self, spec: &ddl::ViewSpec) -> Result<Vec<String>> {
+        let statements = self.view_statements_sql(spec)?;
+        let database = &spec.table.database;
+        match self {
+            // With the view's database as the default one: that is where MySQL looks for
+            // the tables the query names without a database.
+            Session::MySql(s) => s.execute_in(database, &statements[0]).await?,
+            Session::Postgres(s) => s.execute_on(database, &statements[0]).await?,
+            // No `OR REPLACE` there: drop and create, both or neither.
+            Session::Sqlite(s) => s.execute_all(database, &statements).await?,
+        }
+        Ok(statements)
+    }
+
+    /// Try the query of a view: its first rows, read on a connection of its own through the
+    /// read-only path ([`console::Console::read_only`]), so a preview can never write. The
+    /// text is checked as the view form checks it, and the query is cancelled on the server
+    /// when it takes longer than [`PREVIEW_TIMEOUT`].
+    pub async fn preview_select(
+        &self,
+        database: &str,
+        select: &str,
+        max_rows: u32,
+    ) -> Result<QueryPreview> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let query = ddl::view_query(self.engine(), select)?;
+        let mut console = self.open_reader(Some(database)).await?;
+        let canceller = console.canceller();
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        let running = console.read_only(&query, max_rows, &cancel);
+        tokio::pin!(running);
+        let result = loop {
+            tokio::select! {
+                result = &mut running => break result,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {
+                    if !cancel.load(Ordering::Relaxed) && started.elapsed() >= PREVIEW_TIMEOUT {
+                        cancel.store(true, Ordering::Relaxed);
+                        let _ = canceller.cancel().await;
+                    }
+                }
+            }
+        };
+        match result {
+            Ok((set, capped)) => Ok(QueryPreview {
+                result: console::preview(0, &set, capped),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            }),
+            Err(Error::Conflict(_)) if cancel.load(Ordering::Relaxed) => {
+                Err(Error::Unsupported(format!(
+                    "The query did not finish within {} seconds and was cancelled",
+                    PREVIEW_TIMEOUT.as_secs()
+                )))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn list_schemas(&self, database: &str) -> Result<Vec<Namespace>> {
