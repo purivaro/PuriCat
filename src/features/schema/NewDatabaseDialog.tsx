@@ -61,7 +61,9 @@ function Form({ connection, onBusy, onDone }: FormProps) {
   const [owner, setOwner] = useState("");
   const [template, setTemplate] = useState("");
   const [encoding, setEncoding] = useState("");
-  const [plan, setPlan] = useState<{ sql: string } | { problem: string } | null>(null);
+  // The backend's answer, with the choices it answers for: a statement may only be run
+  // while it is the one on screen.
+  const [plan, setPlan] = useState<({ sql: string } | { problem: string }) & { spec: NewDatabase } | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -92,8 +94,8 @@ function Form({ connection, onBusy, onDone }: FormProps) {
     const timer = window.setTimeout(() => {
       ipc
         .planCreateDatabase(connection.id, spec)
-        .then((sql) => !stale && setPlan({ sql }))
-        .catch((e: unknown) => !stale && setPlan({ problem: errorMessage(e) }));
+        .then((sql) => !stale && setPlan({ spec, sql }))
+        .catch((e: unknown) => !stale && setPlan({ spec, problem: errorMessage(e) }));
     }, 120);
     return () => {
       stale = true;
@@ -107,7 +109,10 @@ function Form({ connection, onBusy, onDone }: FormProps) {
   }, [options, charset]);
   const charsetDefault = options?.charsets.find((c) => c.name === charset)?.defaultCollation;
 
-  const ready = !!plan && "sql" in plan && !connection.readOnly && !creating;
+  // Between a change and the backend's answer the statement shown is the previous one:
+  // it is dimmed and cannot be run.
+  const current = plan?.spec === spec;
+  const ready = !!plan && current && "sql" in plan && !connection.readOnly && !creating;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -238,7 +243,7 @@ function Form({ connection, onBusy, onDone }: FormProps) {
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium text-fg-muted">{t("schema.statement")}</span>
           {plan && "sql" in plan ? (
-            <pre data-selectable data-ddl-preview className="rounded-lg border border-border bg-sunken px-3 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
+            <pre data-selectable data-ddl-preview aria-busy={!current} className={`${current ? "" : "opacity-50 "}rounded-lg border border-border bg-sunken px-3 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap transition-opacity`}>
               {plan.sql}
             </pre>
           ) : (

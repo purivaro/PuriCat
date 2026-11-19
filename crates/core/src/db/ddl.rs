@@ -66,8 +66,21 @@ pub struct DatabaseOptions {
     pub default_encoding: Option<String>,
 }
 
-/// MySQL allows 64 characters, PostgreSQL 63 bytes; the server has the last word.
-const MAX_NAME_CHARS: usize = 64;
+/// How long a database name may be. MySQL counts characters. PostgreSQL counts bytes, and
+/// silently shortens a longer name: the database would get another name than the statement
+/// shows, so the limit is enforced here and not left to the server.
+fn check_length(engine: Engine, name: &str) -> Result<()> {
+    let (length, most, unit) = match engine {
+        Engine::Postgres => (name.len(), 63, "bytes"),
+        _ => (name.chars().count(), 64, "characters"),
+    };
+    if length > most {
+        return Err(Error::Invalid(format!(
+            "A database name can be at most {most} {unit} long; this one is {length}"
+        )));
+    }
+    Ok(())
+}
 
 fn clean(value: &Option<String>) -> Option<&str> {
     value.as_deref().map(str::trim).filter(|v| !v.is_empty())
@@ -102,11 +115,7 @@ pub fn create_database(engine: Engine, spec: &NewDatabase) -> Result<String> {
     if name.is_empty() {
         return Err(Error::Invalid("The database needs a name".into()));
     }
-    if name.chars().count() > MAX_NAME_CHARS {
-        return Err(Error::Invalid(format!(
-            "A database name can be at most {MAX_NAME_CHARS} characters long"
-        )));
-    }
+    check_length(engine, name)?;
     match engine {
         Engine::Mysql => {
             refuse(&spec.owner, "An owner", "MySQL")?;
@@ -253,10 +262,17 @@ mod tests {
                 create_database(engine, &named("   ")),
                 Err(Error::Invalid(_))
             ));
-            assert!(create_database(engine, &named(&"n".repeat(65))).is_err());
-            assert!(create_database(engine, &named(&"ก".repeat(64))).is_ok());
             assert!(create_database(engine, &named("a\0b")).is_err());
         }
+        // MySQL counts characters: 64 of any script.
+        assert!(create_database(Engine::Mysql, &named(&"n".repeat(65))).is_err());
+        assert!(create_database(Engine::Mysql, &named(&"ก".repeat(64))).is_ok());
+        // PostgreSQL counts bytes and would shorten a longer name without saying so:
+        // 63 bytes is 63 ASCII letters or 21 Thai ones.
+        assert!(create_database(Engine::Postgres, &named(&"n".repeat(63))).is_ok());
+        assert!(create_database(Engine::Postgres, &named(&"n".repeat(64))).is_err());
+        assert!(create_database(Engine::Postgres, &named(&"ก".repeat(21))).is_ok());
+        assert!(create_database(Engine::Postgres, &named(&"ก".repeat(22))).is_err());
         // An option of the other engine is a mistake, not something to drop silently.
         let owner = NewDatabase {
             owner: Some("app".into()),

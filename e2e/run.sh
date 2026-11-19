@@ -138,6 +138,11 @@ if [ "${SHOTS:-0}" = 1 ] && ! ls "$ROOT"/screenshots/e2e/*.png >/dev/null 2>&1; 
 fi
 
 cp "$REPORT" "$ROOT/target/e2e-report.json" 2>/dev/null || true
+if [ "$last" = done ] && [ -n "${SMOKE:-}" ]; then
+  # A part of the script does not export the files or make the changes checked below.
+  echo "✓ partial script passed (the checks of a full run were not made) — report: target/e2e-report.json"
+  exit 0
+fi
 if [ "$last" = done ]; then
   # The files the app exported must hold exactly what the grid showed.
   check() { grep -q "$2" "$1" || { echo "✗ export check failed: $1 lacks $2"; exit 1; }; }
@@ -201,7 +206,7 @@ PY
   [ "$left" = 1250 ] || { echo "✗ tools check failed: $left orders left, expected 1250"; exit 1; }
   echo "  · database tools: MCP hand-over, refusals and the data verified"
 fi
-if [ "$last" = done ] && [ -z "${SMOKE:-}" ]; then
+if [ "$last" = done ]; then
   # The databases the app said it created exist on the servers, as chosen in the form.
   made=$("$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -Nse "SELECT DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'puricat_e2e_made'")
   [ "$made" = utf8mb4_bin ] || { echo "✗ new database check failed: MySQL has '$made', expected utf8mb4_bin"; exit 1; }
