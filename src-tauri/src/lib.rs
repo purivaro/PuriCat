@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+mod updates;
 
 use tauri::Manager;
 
@@ -7,6 +8,9 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        // No updater permission is in the capability file: the web view reaches the plugin
+        // only through the commands of `updates`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             // Tests point debug builds at a throwaway directory instead of the real settings.
@@ -77,8 +81,21 @@ pub fn run() {
             commands::agent_proposal_reject,
             commands::agent_audit,
             commands::clear_agent_audit,
+            updates::check_update,
+            updates::install_update,
+            updates::restart_app,
             commands::e2e_report,
         ]);
+
+    #[cfg(target_os = "macos")]
+    let builder = {
+        use tauri::Emitter;
+        builder.menu(updates::menu).on_menu_event(|app, event| {
+            if event.id() == updates::MENU_CHECK {
+                let _ = app.emit(updates::MENU_EVENT, ());
+            }
+        })
+    };
 
     #[cfg(debug_assertions)]
     let builder = e2e::install(builder);

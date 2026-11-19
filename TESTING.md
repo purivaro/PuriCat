@@ -13,6 +13,7 @@
 | Real AI CLI test | `agent::tests::real_claude_cli_answers` (ignored by default) | The real Claude Code CLI, installed and signed in; sends one small prompt on that account | No | No |
 | Real AI CLI test with the database tools | `real_claude_cli_uses_the_tools` in `crates/core/tests/live_agent_tools.rs` (ignored by default) | The real Claude Code CLI, installed and signed in, and a disposable PostgreSQL server (`PURICAT_TEST_POSTGRES`); one turn with several tool calls on that account | No | No |
 | End-to-end smoke test | `e2e/run.sh`, `e2e/smoke.js`, stand-in AI CLIs in `e2e/fixtures/bin` | macOS desktop session, local MySQL and PostgreSQL, `python3` (the stand-in for a turn with tools). No AI account, network or quota | No | No |
+| Updater test | `e2e/update.sh`, `e2e/update.js`, the stand-in release server `e2e/fixtures/update-server.py` | macOS desktop session, the Rust and Node toolchains (it builds the app twice as a bundled debug build), `python3`. No database server and no network | No | No |
 | Manual run of the real Claude Code CLI through the window | **Not in the repository and not a test**: the end-to-end runner with a throwaway variant of the script and without the stand-in `claude` on `PATH`, done once by hand (see "Results") | The bundled debug app, the installed and signed-in Claude Code CLI, the end-to-end PostgreSQL database; one turn with tools on that account | No | No |
 
 The CI workflow (`.github/workflows/ci.yml`, macOS runner) ran for the first time on 2026-11-16, on the first push to the public repository, and passed. The live-database and end-to-end suites are not part of it.
@@ -41,6 +42,12 @@ PURICAT_TEST_POSTGRES=you@127.0.0.1:5432 PURICAT_TEST_BRIDGE=$PWD/target/debug/p
 ```
 
 There is no equivalent for Codex. `PURICAT_TEST_BRIDGE` must name a `puricat` executable that has already been built.
+
+The updater against real packages, in a copy of the app in a temporary directory (about four minutes; the screen must be on and unlocked):
+
+```sh
+e2e/update.sh
+```
 
 ### Live database tests
 
@@ -358,7 +365,7 @@ Not covered by `live_ddl`: the IPC commands themselves — so the read-only refu
 
 Not covered by the live tests: a wrong password on PostgreSQL, a wrong password (as opposed to an unknown user) on MySQL, reading rows through a PostgreSQL materialized view, any TLS mode other than the default, the 10,000-change limit, two PuriCat sessions editing the same row, a foreign-key or unique-constraint failure (the end-to-end test covers one foreign-key refusal), the PostgreSQL `TimeZone=UTC` behaviour (documented in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), not asserted), and the types listed there as not verified on the write path.
 
-### Frontend unit tests (81 cases in 12 files)
+### Frontend unit tests (87 cases in 13 files)
 
 | File | Cases | Covers |
 |---|---|---|
@@ -373,11 +380,38 @@ Not covered by the live tests: a wrong password on PostgreSQL, a wrong password 
 | `src/stores/workspace.test.ts` | 9 | Tab closing and neighbour activation, tab id uniqueness across connection / database / schema. Four cases added with the database menu, for `databaseGoneIn`: the table tabs of a dropped database close and its query tabs move to the default database, with the right neighbour of a closed active tab taking over; other databases and other connections are left alone; after a rename the query tabs carry the new name; with nothing else open the welcome tab comes back |
 | `src/features/table/sort.test.ts` | 2 | The sort cycle of a header click |
 | `src/features/agent/markdown.test.ts` | 5 | The Markdown reader for AI answers: paragraphs, fenced code with its language, headings and lists in one answer; a code block still streaming (no closing fence) and the text inside a fence kept verbatim; simple tables, and a line with a pipe character that is not a table; markup-looking text (`<img … onerror=…>`) stays text and single asterisks are not emphasis; which code blocks count as runnable SQL (by tag, or untagged by first keyword; `bash` and `json` blocks do not) |
+| `src/stores/updates.test.ts` | 6 (new) | The updates store with the IPC layer mocked: a check that was asked for opens the dialog and shows what it found, or that nothing is newer; the check at start-up opens nothing and shows no failure, and a later quiet failure keeps an update that was found on offer; a failed check that was asked for says why and can be repeated; an install reports progress, ends in "ready", and a check then shows that state instead of asking again; a failed install keeps the update so it can be tried again; nothing is installed when nothing was found |
 | `src/stores/agent.test.ts` | 8 | The chat store with the IPC layer mocked: an answer streams into its turn and the request carries the context, the conversation and no tools; an error keeps the CLI's message and "Try again" asks the same question with the model chosen since; Stop cancels the job and keeps the text that had arrived; Stop or "New chat" while the context is still being read sends nothing, and a second send while a turn is claimed is ignored; answers that failed are left out of what is resent. Three cases added with the database tools. **Scope**: no tools at "Off"; at "Structure" the scope of the question's tab without rows; at "Structure and rows" the scope with its schema and with rows; no tools when the question has no tab. **Steps and notes**: tool events become steps at the position in the text where they happened, with the exact output; a call that never got an answer ends as failed; an accepted proposal is pending; the next turn's transcript carries "[Tools used: …]" and "[Proposed SQL: … — waiting for the user's decision; it has not been run]" under the answer. **Deciding**: a rejected proposal calls the reject command and cannot be approved afterwards; "run without the limit" is ignored before anything was held back; an approval that the row limit holds back leaves the proposal blocked, and running what was held back keeps the statement that ran before it on record and replaces the held one; a final proposal cannot be approved again; a server error is final; a run that could not start (the mocked command rejects) leaves the proposal pending with the message; the transcript notes for rejected, run, failed and waiting proposals; "New chat" withdraws only what was never decided |
 
 There are no component tests: `DataGrid`, `TableTab`, `ReviewDialog`, `SmartPasteDialog`, `NewDatabaseDialog`, `DatabaseDialogs`, the query tab (`SqlTab`, `monaco.ts`) and the agent chat (`AgentChat`, `AiPanel`, `AgentActivity`, `ActivityLog`) are exercised only by the end-to-end test. The workspace store's handling of query tabs (`openSql` with or without seed text, the numbering of "Query n", releasing a closed tab's console and saved text, and for saved scripts `openScript`, `bindScript`, `renameScript`, `unbindScript` and the `edited` marks) has no unit test; the saved-script part is exercised by the end-to-end test. Nor have `hasUnsavedInDatabase` and, in the connections store, `forgetDatabase`. In the agent store, loading and saving the preferences (the access level among them) have no test.
 
 ### End-to-end smoke test
+
+In-app updates (stages `update-available`, `update-refused`, right after the empty welcome state). The runner starts a stand-in release server on `127.0.0.1` that announces a version 99.0.0 whose package does not exist, and names it in `PURICAT_UPDATE_ENDPOINT`; the app never asks GitHub.
+
+1. The check at start-up finds it: the status bar must say "Update available · v99.0.0", and no dialog may have opened by itself.
+2. A click opens the dialog, which must name the version, the running version, the date and the notes of the manifest, and hold the switch "Check when PuriCat starts", on.
+3. The switch is turned off and on again; after each click the saved setting is read back (`autoUpdate` false, then true).
+4. "Download and install" must end in "The update was not installed" with the reason: a development build is no app bundle (in the bundled build: the package is not on the server). After "Close" the status bar must still offer the update.
+
+After a full run the runner reads the server's log: every request must be a `GET` of `/latest.json` (or of the package, in the bundled build), with no header besides `Accept`, `Accept-Encoding`, `Host` and `User-Agent`, a `User-Agent` of the updater plugin, and nothing in it that names the user, a connection or a database of the test. Installing for real is not in this test; `e2e/update.sh` does that (below).
+
+### Updater test: `e2e/update.sh`
+
+Real packages, a real install and a real restart, in a copy of the app in a temporary directory; `/Applications/PuriCat.app` and the user's settings are not touched. It builds the app twice as a bundled debug build (the installed version, and version 99.0.0 with its signed update package) and runs four cases, each in a fresh copy of the installed version against a stand-in server, driven by `e2e/update.js` in the window:
+
+| Case | Package | Must |
+|---|---|---|
+| `tampered` | One byte changed after signing; the genuine signature | Be refused for its signature; the app on disk identical to the copy made before (`diff -r`) |
+| `relabelled` | The genuine package and signature, announced as 99.5.0 | Be refused: the signature names 99.0.0 (`requireSignedVersion`); the app identical |
+| `otherkey` | The genuine package, signed with a key the app does not know | Be refused; the app identical |
+| `good` | The genuine package and signature | Install with a progress bar that was seen to move; the app on disk is 99.0.0 while the old version still runs; after "Restart now" the app that answers is 99.0.0, its check at start-up finds nothing newer, and a check on request says "PuriCat is up to date" |
+
+Each case also reads the server's log: nothing but `GET /latest.json` and `GET /PuriCat.app.tar.gz`, with no unexpected header.
+
+With `TAURI_SIGNING_PRIVATE_KEY` and its password in the environment the packages are signed with that key and both builds keep the public key of `src-tauri/tauri.conf.json`: this is how the release key was shown to belong to the public key in the app. Without them the test makes a key for the run and gives both builds its public half.
+
+It does **not** cover: a release build (only a debug build accepts a stand-in server, plain HTTP and the test's script), so HTTPS-only for the manifest, GitHub's redirect of `releases/latest` and a notarized package are untested; an app in `/Applications`; an app the user cannot write to; a download that breaks off; the warning about unsaved tabs before a restart; the menu item.
 
 Empty welcome state; create and test a MySQL and a PostgreSQL connection through the dialog and save them; a clear error for an unreachable server and the production read-only hint; browse MySQL (tree groups, grid rows, footer); sort ascending and descending; next page; structure view; browse PostgreSQL at the same time in a second tab; the AI panel, the agent chat and the AI's database tools on stand-in CLIs (below); duplicate and delete through the context menu and confirmation dialog; dark theme and Thai through the command palette; finally the stored connections, UI settings and tab list are read back over IPC.
 
@@ -519,6 +553,37 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The end-to-end test starts no real AI CLI and sends nothing to an AI provider: `e2e/fixtures/bin` is put first on `PATH` for the app it launches, and the stand-ins only print canned lines and write what they were given into the runner's temporary work directory. In the database-tool stages the stand-in also starts the app's own executable as a relay and calls PuriCat's tools on `puricat_e2e`; what the tools return goes to the stand-in and into that work directory, nowhere else. `PURICAT_STAND_IN_DIR` is read by the stand-in scripts, not by PuriCat.
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
+
+## Results — 2026-11-19 (in-app updates)
+
+macOS on Apple Silicon. No database server is involved except in the full end-to-end run (local MySQL 9.3.0 and PostgreSQL 16.13). Only what was run for this change is listed. Design: [ADR 0020](docs/adr/0020-in-app-updates.md).
+
+| Check | Result |
+|---|---|
+| `pnpm check` (typecheck, Vitest, the Rust unit tests, the SQLite tests, `cargo fmt --check`, `cargo clippy -D warnings`) | Pass on the final code: 87 Vitest cases in 13 files (6 new, in `src/stores/updates.test.ts`); 97 Rust unit tests of the core, 2 ignored; 1 new unit test in the app crate (`updates::tests`: only a path inside `…/Name.app/Contents/MacOS/` counts as an app that may replace itself) |
+| `e2e/update.sh` with the release key in the environment, so that the packages are signed with it and both builds keep the public key of `src-tauri/tauri.conf.json` | **Pass, once**: `tampered`, `relabelled` and `otherkey` refused for their signature with the app on disk identical to the copy made before; `good` installed, the app on disk was 99.0.0 while 0.3.0 still ran, and after "Restart now" the app that answered was 99.0.0, found nothing newer at start-up, and said "PuriCat is up to date" on request |
+| The same test with a key made for the run | Not run |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the stages `update-available` and `update-refused` | Pass, once, with an empty `problems` list. The server's log held 3 requests, each `GET /latest.json` with the headers `Accept`, `Host` and `User-Agent: tauri-plugin-updater/2.14.1` and nothing else |
+| The two stages as a partial script | Pass, once, before the full run |
+| Screenshots (`SHOTS=1`) | Looked at by hand: the dialog that offers the update (English, light), the refusal, and the pill in the status bar in Thai and the dark theme. Not an automated check |
+| `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Not run with these stages. The bundled debug build was run by `e2e/update.sh` only |
+| The release workflow's new steps (the signed package, `latest.json`, the check of the unpacked app, the upload) | **Not run.** They need the update key in the repository's secrets, which is not set at the time of writing. The YAML parses; the script that writes the manifest is the one `e2e/update.sh` uses for its stand-in server |
+
+Four runs of `e2e/update.sh` failed before the one above, from two causes, neither in the app's code:
+
+1. The first release key had been generated without a password: `tauri signer generate` does not read the password from `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and only warns. It was replaced before anything was signed with it or published; the key in use refuses a wrong and an empty password (checked by signing a file).
+2. The app in the temporary directory found no update at all. The check at start-up hides its failures by design, so the test was changed to ask again and report the backend's answer: Tauri refuses to locate an app that was started through a symbolic link, and `mktemp -d` on macOS answers with a path behind `/var`. The test now uses the real path. This is a limit of the updater too (ADR 0020, Limitations).
+
+Not verified (details under "Gaps"):
+
+- **an update of a released build through GitHub.** The first release with the updater has nothing newer to find. HTTPS-only for the manifest, the redirect of `releases/latest/download`, and a notarized package replacing a notarized app are first exercised by the release after it;
+- the release workflow's new steps;
+- the application menu's "Check for Updates…" (a native menu cannot be driven by the test) and the palette's "Check for updates…";
+- the warning about tabs with unsaved work before a restart, and the restart with such tabs;
+- an app in `/Applications`, an app the user cannot write to, an app run from the disk image;
+- a download that breaks off or times out; a check while offline through the UI (unit-tested in the store only);
+- the dialog in Thai and in the dark theme (the pill was looked at; the dialog was not);
+- the Intel half of the universal app.
 
 ## Results — 2026-11-19 ("New query" button)
 
@@ -869,6 +934,8 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Export through the Save dialog and the Export menu | The end-to-end test calls `export_result` directly; the menu being disabled during a run and a failing Save dialog are not exercised. XLSX cell types are not read back by any test (the unit test checks which texts convert; the runner checks that the Thai name is in the workbook). A JSON file from a result with two columns of one name is not written by a test (the key naming is unit-tested) |
 | History: masking on the `run_sql` path, loading an entry, "Clear history", deletion with the connection | The masking function and the store are unit-tested; the end-to-end test only lists the entries. `delete_connection` clearing the history is not asserted (the end-to-end test deletes a connection that has none). A literal after a double-quoted `"password"` identifier is not tested ([SECURITY.md](SECURITY.md)) |
 | Completion and formatting in the SQL editor | No automated test |
+| In-app updates: a released build | Everything was tested with debug builds and stand-in servers on `127.0.0.1` (`e2e/update.sh`, two stages of the smoke test). No release build has asked GitHub, followed its redirect, required HTTPS or replaced a notarized app. The release workflow's steps that build, check and publish the package and `latest.json` have not run |
+| In-app updates: around the install | The warning about unsaved tabs and the restart with such tabs; a download that breaks off; an app the user cannot write to or that runs from the disk image; the menu item and the palette command; the dialog in Thai and dark: no test |
 | The "New query" button beyond two cases | The end-to-end test clicks it with a MySQL table tab in front and with the welcome tab in front while two connections are open (where it also sends ⌘T, for its message). With a query tab in front, with a single connection, with none connected, the menu in Thai or dark or with a SQLite connection in it, and the keyboard: no test |
 | ⌘T, the palette's "New query", running a selection; ⌘↵, ⇧⌘↵ and ⌘S as real keystrokes | No automated test for the first three; the end-to-end test uses the explorer menu and the Run button. The three shortcuts are exercised only as synthetic key events sent to the editor: that they arrive from the operating system (and are not taken by a menu or the web view) is not tested |
 | Saved scripts on PostgreSQL, after a relaunch, and with many scripts | The end-to-end stages use one MySQL connection, one script and one run of the app. The store is unit-tested; nothing in it depends on the engine |

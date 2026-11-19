@@ -90,6 +90,44 @@
     await waitFor(() => exact("h1", "Welcome to PuriCat"), "welcome tab");
     await stage("welcome-empty", { emptyState: !!withText("div", "No connections yet") });
 
+    // ---- updates: found by the check at start-up, shown, and harmless when it cannot install
+    // The runner's stand-in server announces 99.0.0, whose package does not exist.
+    const updatePill = () => document.querySelector("[data-update-status]");
+    const updateDialog = () => document.querySelector("[data-update-dialog]");
+    await waitFor(() => updatePill()?.dataset.updateStatus === "available", "the update found at start-up");
+    const updateText = updatePill().textContent.trim();
+    if (updateText !== "Update available · v99.0.0") throw new Error(`the status bar says “${updateText}”`);
+    if (updateDialog()) throw new Error("the check at start-up opened a dialog by itself");
+    await click(updatePill(), "the update in the status bar");
+    await waitFor(() => updateDialog()?.dataset.updateDialog === "available", "the update dialog");
+    const updateOffered = updateDialog().textContent.replace(/\s+/g, " ").trim();
+    for (const text of ["PuriCat 99.0.0 is available", "You have version ", "Released December 1, 2026.", "A release that exists only in the test.", "Check when PuriCat starts"]) {
+      if (!updateOffered.includes(text)) throw new Error(`the update dialog lacks “${text}”: ${updateOffered}`);
+    }
+    // The switch for the check at start-up is on until the user turns it off, and is remembered.
+    const autoSwitch = () => updateDialog().querySelector('[role="switch"]');
+    const savedAuto = async () => JSON.parse((await invoke("get_settings")).ui).autoUpdate;
+    if (autoSwitch().getAttribute("aria-checked") !== "true") throw new Error("the check at start-up is not on by default");
+    await click(autoSwitch(), "turn the check at start-up off");
+    await sleep(150);
+    const autoOff = await savedAuto();
+    await click(autoSwitch(), "and on again");
+    await sleep(150);
+    const autoOn = await savedAuto();
+    if (autoOff !== false || autoOn !== true) throw new Error(`the switch saved ${autoOff}, then ${autoOn}`);
+    await stage("update-available", { updateText, updateOffered, autoOff, autoOn });
+    // Installing cannot work here (a development build is no app bundle; a bundle finds no
+    // package on the stand-in server). It must say so and leave the update on offer.
+    await click(updateDialog().querySelector("[data-update-install]"), "download and install");
+    await waitFor(() => updateDialog()?.dataset.updateDialog === "failed", "the refusal to install", 30000);
+    const updateRefused = updateDialog().querySelector("[data-update-error]").textContent.trim();
+    if (!/does not run from an app bundle|The download failed/.test(updateRefused)) throw new Error(`installing failed with “${updateRefused}”`);
+    if (!updateDialog().textContent.includes("The update was not installed")) throw new Error("the failure has the wrong title");
+    await stage("update-refused", { updateRefused });
+    await click(exact("[data-update-dialog] button", "Close"), "close the update dialog");
+    await waitFor(() => !updateDialog(), "the update dialog to close");
+    if (updatePill().textContent.trim() !== updateText) throw new Error(`after the failure the status bar says “${updatePill().textContent.trim()}”`);
+
     // ---- create connections through the dialog --------------------------------------
     const create = async ({ name, engine, host, port, user, environment }) => {
       await click(document.querySelector('button[aria-label="New connection"]'), "new connection");

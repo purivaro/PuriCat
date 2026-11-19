@@ -41,6 +41,8 @@ import type {
   TableColumns,
   TableRef,
   UniqueKey,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
 
 /** Backend errors arrive as `{ kind, message }`; anything else is normalised to that shape. */
@@ -155,4 +157,13 @@ export const ipc = {
   agentProposalReject: (id: string) => invoke<void>("agent_proposal_reject", { id }),
   agentAudit: (limit: number) => invoke<AuditEntry[]>("agent_audit", { limit }),
   clearAgentAudit: () => invoke<void>("clear_agent_audit"),
+  /** Asks the release manifest for a newer version. `null`: this is the latest. */
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  /** Downloads, verifies and installs what the last check found. The app keeps running. */
+  installUpdate: (onProgress: (progress: UpdateProgress) => void) => {
+    const channel = new Channel<UpdateProgress>();
+    channel.onmessage = onProgress;
+    return invoke<void>("install_update", { onProgress: channel });
+  },
+  restartApp: () => invoke<void>("restart_app"),
 };

@@ -1,5 +1,7 @@
 # Build the download and attach it to the GitHub Release for the tag.
-# The asset name must stay stable: README links to releases/latest/download/PuriCat-mac.dmg.
+# The asset names must stay stable: README links to releases/latest/download/PuriCat-mac.dmg,
+# and installed apps ask releases/latest/download/latest.json for the next version
+# (docs/adr/0020-in-app-updates.md).
 # Run by hand (workflow_dispatch), or open a PR that changes this file, to build
 # without publishing; the file is then only kept as a workflow artifact.
 #
@@ -72,14 +74,55 @@ jobs:
           else
             echo "::warning::No notarization secrets; the app is signed but not notarized."
           fi
+      # The package an installed app updates itself from is signed with a key of its own
+      # (not Apple's): the app installs nothing that this key did not sign. Without the key
+      # (fork PRs) the build has no such package; a release must have one, or the apps
+      # already installed would never be offered it.
       - name: Build universal app
-        run: pnpm tauri build --target universal-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::The tag is $GITHUB_REF_NAME but the app's version is $version."
+            exit 1
+          fi
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.updater.conf.json
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "::error::No update signing key (TAURI_SIGNING_PRIVATE_KEY): a release needs the update package."
+            exit 1
+          else
+            echo "::warning::No update signing key; building without the update package."
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            pnpm tauri build --target universal-apple-darwin
+          fi
       - name: Collect
         run: |
           mkdir -p out
-          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg out/PuriCat-mac.dmg
-          codesign --verify --deep --strict --verbose=2 target/universal-apple-darwin/release/bundle/macos/PuriCat.app
-          lipo -archs target/universal-apple-darwin/release/bundle/macos/PuriCat.app/Contents/MacOS/puricat
+          bundle=target/universal-apple-darwin/release/bundle
+          cp $bundle/dmg/*.dmg out/PuriCat-mac.dmg
+          codesign --verify --deep --strict --verbose=2 $bundle/macos/PuriCat.app
+          lipo -archs $bundle/macos/PuriCat.app/Contents/MacOS/puricat
+          # The update package, its signature, and the manifest that names them. One
+          # package serves both architectures: the app is universal.
+          if [ -f $bundle/macos/PuriCat.app.tar.gz.sig ]; then
+            cp $bundle/macos/PuriCat.app.tar.gz out/PuriCat-mac.app.tar.gz
+            cp $bundle/macos/PuriCat.app.tar.gz.sig out/PuriCat-mac.app.tar.gz.sig
+            version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+            node -e '
+              const fs = require("fs");
+              const [version, repository] = process.argv.slice(1);
+              const entry = {
+                signature: fs.readFileSync("out/PuriCat-mac.app.tar.gz.sig", "utf8"),
+                url: `https://github.com/${repository}/releases/download/v${version}/PuriCat-mac.app.tar.gz`,
+              };
+              const manifest = { version, pub_date: new Date().toISOString(), platforms: { "darwin-aarch64": entry, "darwin-x86_64": entry } };
+              fs.writeFileSync("out/latest.json", JSON.stringify(manifest, null, 2) + "\n");
+            ' "$version" "$GITHUB_REPOSITORY"
+            cat out/latest.json
+          fi
       # Tauri notarizes and staples the .app; the DMG around it gets its own
       # signature and ticket so Gatekeeper accepts the download itself.
       - name: Sign, notarize and check DMG
@@ -95,6 +138,19 @@ jobs:
           xcrun stapler staple "$dmg"
           xcrun stapler validate "$dmg"
           spctl -a -vv -t install "$dmg"
+      # What an update puts in place of the installed app must be the same signed and
+      # notarized app as the one in the DMG, not a copy made before those steps.
+      - name: Check the update package
+        if: hashFiles('out/PuriCat-mac.app.tar.gz') != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/update" && tar -xzf out/PuriCat-mac.app.tar.gz -C "$RUNNER_TEMP/update"
+          app="$RUNNER_TEMP/update/PuriCat.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          lipo -archs "$app/Contents/MacOS/puricat"
+          if [ "$DEVELOPER_ID_SIGNED" = 1 ] && [ -n "$APPLE_ID" ]; then
+            xcrun stapler validate "$app"
+            spctl -a -vv "$app"
+          fi
       - name: Remove signing keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
@@ -118,6 +174,7 @@ jobs:
       - name: Checksums
         working-directory: release
         run: sha256sum PuriCat-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # The manifest goes up last: an app that reads it must find the package already there.
       - name: Create or update release
         working-directory: release
         env:
@@ -127,9 +184,11 @@ jobs:
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" PuriCat-* SHA256SUMS.txt --clobber
+            gh release upload "$TAG" latest.json --clobber
           else
             # A tag with a suffix (v0.2.0-rc1) becomes a pre-release, so it
             # never takes over the releases/latest download link.
             pre=""; [[ "$TAG" == *-* ]] && pre="--prerelease"
             gh release create "$TAG" PuriCat-* SHA256SUMS.txt --title "PuriCat ${TAG#v}" --generate-notes $pre
+            gh release upload "$TAG" latest.json
           fi

@@ -39,6 +39,8 @@ All versions and checksums are on the [Releases](https://github.com/purivaro/Pur
 2. Open PuriCat. The app is **signed with a Developer ID and notarized by Apple**, so it opens like any other downloaded app: macOS asks once whether to open an app downloaded from the internet.
 3. Passwords you save are kept in the **macOS Keychain**, never in a file.
 
+**Updates.** From the first version after 0.3.0, PuriCat looks for a newer version when it starts and shows it in the status bar; you choose when to download it and when to restart. The check is one request to github.com that says nothing about you or your databases, the download is installed only if it carries PuriCat's release signature, and the check can be switched off in the same dialog. You can also ask at any time: click the version number in the status bar, or choose **Check for Updates…** in the PuriCat menu. Version 0.3.0 and older are updated by downloading the file above again.
+
 ## What it does
 
 ### Edit tables like a spreadsheet, and read the SQL before it runs
@@ -115,7 +117,7 @@ pnpm check          # type-check, unit tests, cargo fmt, clippy, cargo test
 
 Tests against real MySQL and PostgreSQL servers and real SQLite files, and the end-to-end test that drives the real window, are described in [TESTING.md](TESTING.md).
 
-A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them (in a fork, for example) it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain; v0.1.0 was published that way, before the secrets were set.
+A release is made by pushing a tag such as `v0.2.0`: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the universal macOS app and attaches it to the release. It also publishes the package and the manifest that installed apps update from, signed with the key in the `TAURI_SIGNING_PRIVATE_KEY` secret ([ADR 0020](docs/adr/0020-in-app-updates.md)); a tagged build fails without it. If the Apple signing secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the repository, the app is signed and notarized; without them (in a fork, for example) it is only ad-hoc signed. [`scripts/release-mac.sh`](scripts/release-mac.sh) makes the same download by hand on a Mac that has the Developer ID in its keychain; v0.1.0 was published that way, before the secrets were set.
 
 ```
 crates/core/   puricat-core: database adapters, the write planner, Smart Paste, the file reader, the SQL console,

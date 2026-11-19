@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { Eye, Home, Languages, Moon, PanelLeft, Plug, Plus, Search, Sparkles, Sun, Table2, TerminalSquare, X } from "lucide-react";
+import { Download, Eye, Home, Languages, Moon, PanelLeft, Plug, Plus, Search, Sparkles, Sun, Table2, TerminalSquare, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,6 +9,7 @@ import type { ObjectKind, TableRef } from "../../lib/types";
 import { nodeKey, sessionOf, useConnections } from "../../stores/connections";
 import { resolveTheme, useSettings } from "../../stores/settings";
 import { useUi } from "../../stores/ui";
+import { useUpdates } from "../../stores/updates";
 import { useWorkspace } from "../../stores/workspace";
 import { EngineTag, EnvBadge } from "../Brand";
 
@@ -120,6 +121,9 @@ export function CommandPalette() {
           </Item>
           <Item icon={<X className="size-4" />} shortcut="⌘W" onSelect={run(() => useWorkspace.getState().close(activeId))}>
             {t("palette.closeTab")}
+          </Item>
+          <Item icon={<Download className="size-4" />} onSelect={run(() => void useUpdates.getState().check())}>
+            {t("updates.check")}
           </Item>
         </Command.Group>
 

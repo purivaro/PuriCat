@@ -89,7 +89,7 @@ The backend also writes export files (CSV, JSON, XLSX) to paths the user picks i
 
 ## IPC surface
 
-All commands are registered in `src-tauri/src/lib.rs` and implemented in `commands.rs`. Errors arrive as `{ kind, message }`.
+All commands are registered in `src-tauri/src/lib.rs` and implemented in `commands.rs`; the three of the updater are in `updates.rs`. Errors arrive as `{ kind, message }`.
 
 | Command | Arguments | Returns |
 |---|---|---|
@@ -150,6 +150,9 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `agent_proposal_reject` | `id` | — (removes the stored proposal and logs `rejected`; unknown ids are ignored; a running proposal is refused with `conflict`) |
 | `agent_audit` | `limit` (capped at 1,000) | Entries of the AI activity log, newest first |
 | `clear_agent_audit` | — | — (deletes every entry of the activity log) |
+| `check_update` | — | A newer version (`version`, `currentVersion`, `date`, `notes`) or `null`; what was found is kept in `AppState.update` |
+| `install_update` | `onProgress` (channel) | — (downloads, verifies and installs what the last check found; refused outside an app bundle). Progress as `{ downloaded, total }` |
+| `restart_app` | — | — (the app starts again) |
 | `e2e_report` | `text` | Debug builds with `PURICAT_E2E_REPORT` set: writes the report file. Otherwise returns an `unsupported` error |
 
 That is 58 commands, the number registered in `lib.rs`. No command returns a stored password. A saved session is closed when the password or any connection-affecting field changes; cosmetic fields (name, environment, favorite, tags, review threshold) leave it open. Closing a session also drops the consoles of its query tabs, interrupting whatever they are running.
@@ -272,6 +275,16 @@ An approved proposal:
 5. "Reject", "Don't run it" and "New chat" call `agent_proposal_reject`, which removes the proposal and logs `rejected`. Stop on a running proposal calls `cancel_sql` with `proposal:<id>`.
 6. The history icon in the AI panel opens `ActivityLog.tsx`, which calls `agent_audit` with a limit of 500; "Clear log" calls `clear_agent_audit`.
 
+## Data flow: an update
+
+Design: [ADR 0020](docs/adr/0020-in-app-updates.md).
+
+1. Once the settings are loaded, `App.tsx` calls the `updates` store's `check(true)` if `autoUpdate` is on. The version in the status bar, the palette's "Check for updates…" and the application menu's "Check for Updates…" (a menu event, `menu:check-updates`) call `check()`, which also opens `UpdateDialog.tsx`.
+2. `check_update` builds the plugin's updater (in a debug build only with the address in `PURICAT_UPDATE_ENDPOINT`), asks the manifest, and stores the `Update` it found in `AppState.update`. The web view gets the version, the date and the notes.
+3. A version that was found replaces the version number in the status bar. Nothing else happens until the user chooses "Download and install".
+4. `install_update` takes the stored `Update`, refuses unless the process runs from an app bundle, and calls the plugin's `download_and_install`: the package is downloaded into memory (progress goes to the web view every 256 KB), its signature and signed version are verified, and the bundle on disk is replaced, with the old one moved aside until the new one is in place.
+5. The dialog then offers "Restart now" (`restart_app`). With tabs that hold staged edits, an open transaction or an unsaved script it says how many first.
+
 ## Sessions and pools
 
 | Engine | Pooling |
@@ -291,7 +304,8 @@ Session settings: every MySQL connection adds `STRICT_ALL_TABLES` to its session
 |---|---|---|
 | `connections` | Profiles, session state per connection, lazily loaded explorer levels, expanded nodes; `forgetDatabase` drops what was loaded under a database that was dropped or renamed | Profiles only, in the backend store |
 | `workspace` | Tabs (welcome, table, query) and the active tab; `dirty` (table tabs with unsaved edits, query tabs with an open transaction) and `closing` (a dirty tab waiting for the user's confirmation). `hasUnsavedInDatabase` answers for the tabs of one database, and `databaseGone` (the pure `databaseGoneIn`) closes the table tabs of a dropped or renamed database and moves its query tabs. Beside the store, two module-level maps: the text a query tab was opened with (`sqlSeed`, until the tab closes) and a getter for each mounted query tab's editor text (`sqlEditors`, read for the agent's context) | Tabs and active tab only, in setting `workspace` |
-| `settings` | Theme, language, panel visibility and widths | Setting `ui` |
+| `settings` | Theme, language, panel visibility and widths, and whether to look for an update at start-up (`autoUpdate`) | Setting `ui` |
+| `updates` | What the last update check found, the state of the dialog, the download's progress and the last failure | No |
 | `ui` | Dialog and palette open state; the connection the "New database" form was opened on (`newDatabaseOn`); the edit, drop or flush a menu asked for (`databaseTask`) | No |
 | `agent` | Chat preferences (provider, model per provider, "Share context", the access level of the database tools); the conversation's turns, each user turn with the context sent and the tab scope it was asked about, each assistant turn with its tool steps and its proposals (state and outcome); the job id of the running turn | Preferences only, in setting `agent` |
 
