@@ -388,6 +388,15 @@ impl PgSession {
     }
 
     /// Run a read-only query whose columns are all text.
+    /// Close this session's own connections to `database`: the server refuses to drop or
+    /// rename a database that anyone, PuriCat included, is still connected to.
+    pub async fn release(&self, database: &str) {
+        let pool = self.pools.lock().await.remove(database);
+        if let Some(pool) = pool {
+            pool.close().await;
+        }
+    }
+
     /// The database this session was opened on.
     pub fn home(&self) -> &str {
         &self.home

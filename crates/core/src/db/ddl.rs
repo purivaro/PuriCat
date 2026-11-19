@@ -109,8 +109,29 @@ fn refuse(given: &Option<String>, option: &str, engine: &str) -> Result<()> {
     }
 }
 
+fn unsupported(engine: Engine) -> Error {
+    Error::Unsupported(
+        match engine {
+            Engine::Sqlite => {
+                "A SQLite connection is one database file; there are no databases to manage inside it"
+            }
+            _ => "SQL Server connections are not implemented yet",
+        }
+        .into(),
+    )
+}
+
+/// Database forms exist for servers that hold several databases.
+pub fn supported(engine: Engine) -> Result<()> {
+    match engine {
+        Engine::Mysql | Engine::Postgres => Ok(()),
+        _ => Err(unsupported(engine)),
+    }
+}
+
 /// The `CREATE DATABASE` statement for `spec`.
 pub fn create_database(engine: Engine, spec: &NewDatabase) -> Result<String> {
+    supported(engine)?;
     let name = spec.name.trim();
     if name.is_empty() {
         return Err(Error::Invalid("The database needs a name".into()));
@@ -148,14 +169,151 @@ pub fn create_database(engine: Engine, spec: &NewDatabase) -> Result<String> {
             }
             Ok(sql)
         }
-        Engine::Sqlite => Err(Error::Unsupported(
-            "A SQLite connection is one database file; there is no database to create inside it"
-                .into(),
-        )),
-        Engine::Sqlserver => Err(Error::Unsupported(
-            "SQL Server connections are not implemented yet".into(),
-        )),
+        Engine::Sqlite | Engine::Sqlserver => Err(unsupported(engine)),
     }
+}
+
+/// Databases the server itself needs. PuriCat's forms do not drop or alter them.
+pub fn is_protected(engine: Engine, name: &str) -> bool {
+    match engine {
+        Engine::Mysql => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "information_schema" | "mysql" | "performance_schema" | "sys"
+        ),
+        Engine::Postgres => matches!(name, "postgres" | "template0" | "template1"),
+        _ => false,
+    }
+}
+
+fn existing(engine: Engine, name: &str) -> Result<&str> {
+    if name.is_empty() {
+        return Err(Error::Invalid("Which database?".into()));
+    }
+    if is_protected(engine, name) {
+        return Err(Error::Invalid(format!(
+            "“{name}” belongs to the server itself; PuriCat does not drop or alter it"
+        )));
+    }
+    Ok(name)
+}
+
+/// The `DROP DATABASE` statement for `name`. The name is taken exactly as the server lists it.
+pub fn drop_database(engine: Engine, name: &str) -> Result<String> {
+    supported(engine)?;
+    let name = existing(engine, name)?;
+    match engine {
+        Engine::Mysql => Ok(format!("DROP DATABASE {}", ident::mysql(name)?)),
+        Engine::Postgres => Ok(format!("DROP DATABASE {}", ident::postgres(name)?)),
+        _ => Err(unsupported(engine)),
+    }
+}
+
+/// Changes to an existing database. Only what the engine can change is accepted.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AlterDatabase {
+    /// The database as the server lists it now.
+    pub name: String,
+    /// MySQL: the default character set and collation of new tables.
+    #[serde(default)]
+    pub charset: Option<String>,
+    #[serde(default)]
+    pub collation: Option<String>,
+    /// PostgreSQL: a new name, a new owner.
+    #[serde(default)]
+    pub new_name: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// The `ALTER DATABASE` statements for `spec`, in the order they run.
+pub fn alter_database(engine: Engine, spec: &AlterDatabase) -> Result<Vec<String>> {
+    supported(engine)?;
+    let name = existing(engine, &spec.name)?;
+    let nothing = || Error::Invalid("Nothing was changed".into());
+    match engine {
+        Engine::Mysql => {
+            refuse(&spec.new_name, "A new name", "MySQL")?;
+            refuse(&spec.owner, "An owner", "MySQL")?;
+            let mut sql = format!("ALTER DATABASE {}", ident::mysql(name)?);
+            let before = sql.len();
+            if let Some(charset) = clean(&spec.charset) {
+                sql.push_str(&format!(
+                    " CHARACTER SET {}",
+                    keyword("character set", charset)?
+                ));
+            }
+            if let Some(collation) = clean(&spec.collation) {
+                sql.push_str(&format!(" COLLATE {}", keyword("collation", collation)?));
+            }
+            if sql.len() == before {
+                return Err(nothing());
+            }
+            Ok(vec![sql])
+        }
+        Engine::Postgres => {
+            refuse(&spec.charset, "A character set", "PostgreSQL")?;
+            refuse(&spec.collation, "A collation", "PostgreSQL")?;
+            let mut statements = Vec::new();
+            // Owner first, while the database still has the name the user is looking at.
+            if let Some(owner) = clean(&spec.owner) {
+                statements.push(format!(
+                    "ALTER DATABASE {} OWNER TO {}",
+                    ident::postgres(name)?,
+                    ident::postgres(owner)?
+                ));
+            }
+            if let Some(new_name) = clean(&spec.new_name).filter(|n| *n != name) {
+                check_length(engine, new_name)?;
+                statements.push(format!(
+                    "ALTER DATABASE {} RENAME TO {}",
+                    ident::postgres(name)?,
+                    ident::postgres(new_name)?
+                ));
+            }
+            if statements.is_empty() {
+                return Err(nothing());
+            }
+            Ok(statements)
+        }
+        _ => Err(unsupported(engine)),
+    }
+}
+
+/// What a database is set to now, to fill the edit form.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseDetails {
+    pub name: String,
+    pub charset: Option<String>,
+    pub collation: Option<String>,
+    pub owner: Option<String>,
+    pub encoding: Option<String>,
+    /// The server's own database: shown, not changed.
+    pub protected: bool,
+}
+
+/// Server maintenance a MySQL connection's menu offers. Fixed statements, nothing typed.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Flush {
+    Privileges,
+    Tables,
+    Logs,
+    Status,
+}
+
+/// The `FLUSH` statement. (`FLUSH HOSTS` is not offered: MySQL 8.4 removed it.)
+pub fn flush(engine: Engine, what: Flush) -> Result<&'static str> {
+    if engine != Engine::Mysql {
+        return Err(Error::Unsupported("FLUSH is a MySQL statement".into()));
+    }
+    Ok(match what {
+        Flush::Privileges => "FLUSH PRIVILEGES",
+        Flush::Tables => "FLUSH TABLES",
+        Flush::Logs => "FLUSH LOGS",
+        Flush::Status => "FLUSH STATUS",
+    })
 }
 
 #[cfg(test)]
@@ -288,5 +446,106 @@ mod tests {
             create_database(Engine::Sqlite, &named("a")),
             Err(Error::Unsupported(_))
         ));
+    }
+    #[test]
+    fn drop_statement_and_the_servers_own_databases() {
+        assert_eq!(
+            drop_database(Engine::Mysql, "shop `old`").unwrap(),
+            "DROP DATABASE `shop ``old```"
+        );
+        assert_eq!(
+            drop_database(Engine::Postgres, "Shop \"old\"").unwrap(),
+            "DROP DATABASE \"Shop \"\"old\"\"\""
+        );
+        for (engine, name) in [
+            (Engine::Mysql, "mysql"),
+            (Engine::Mysql, "INFORMATION_SCHEMA"),
+            (Engine::Mysql, "sys"),
+            (Engine::Postgres, "postgres"),
+            (Engine::Postgres, "template1"),
+        ] {
+            assert!(is_protected(engine, name), "{name}");
+            assert!(drop_database(engine, name).is_err(), "{name}");
+            let spec = AlterDatabase {
+                name: name.into(),
+                charset: Some("utf8mb4".into()),
+                owner: Some("x".into()),
+                ..Default::default()
+            };
+            assert!(alter_database(engine, &spec).is_err(), "{name}");
+        }
+        // "postgres" is an ordinary name on MySQL, "mysql" on PostgreSQL.
+        assert!(drop_database(Engine::Mysql, "postgres").is_ok());
+        assert!(drop_database(Engine::Postgres, "mysql").is_ok());
+        assert!(drop_database(Engine::Mysql, "").is_err());
+        assert!(matches!(
+            drop_database(Engine::Sqlite, "main"),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn alter_statements() {
+        let mysql = |charset: Option<&str>, collation: Option<&str>| AlterDatabase {
+            name: "shop".into(),
+            charset: charset.map(Into::into),
+            collation: collation.map(Into::into),
+            ..Default::default()
+        };
+        assert_eq!(
+            alter_database(Engine::Mysql, &mysql(Some("utf8mb4"), Some("utf8mb4_bin"))).unwrap(),
+            vec!["ALTER DATABASE `shop` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"]
+        );
+        assert_eq!(
+            alter_database(Engine::Mysql, &mysql(None, Some("utf8mb4_bin"))).unwrap(),
+            vec!["ALTER DATABASE `shop` COLLATE utf8mb4_bin"]
+        );
+        assert!(alter_database(Engine::Mysql, &mysql(None, None)).is_err());
+        assert!(alter_database(Engine::Mysql, &mysql(Some("utf8; DROP"), None)).is_err());
+        // MySQL cannot rename a database, and has no owner.
+        let rename = AlterDatabase {
+            name: "shop".into(),
+            new_name: Some("store".into()),
+            ..Default::default()
+        };
+        assert!(alter_database(Engine::Mysql, &rename).is_err());
+
+        let both = AlterDatabase {
+            name: "shop".into(),
+            new_name: Some("ร้าน \"ใหม่\"".into()),
+            owner: Some("app".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            alter_database(Engine::Postgres, &both).unwrap(),
+            vec![
+                "ALTER DATABASE \"shop\" OWNER TO \"app\"",
+                "ALTER DATABASE \"shop\" RENAME TO \"ร้าน \"\"ใหม่\"\"\"",
+            ]
+        );
+        assert_eq!(
+            alter_database(Engine::Postgres, &rename).unwrap(),
+            vec!["ALTER DATABASE \"shop\" RENAME TO \"store\""]
+        );
+        // The same name again is not a change.
+        let same = AlterDatabase {
+            name: "shop".into(),
+            new_name: Some("shop".into()),
+            ..Default::default()
+        };
+        assert!(alter_database(Engine::Postgres, &same).is_err());
+    }
+
+    #[test]
+    fn flush_is_a_fixed_mysql_statement() {
+        assert_eq!(
+            flush(Engine::Mysql, Flush::Privileges).unwrap(),
+            "FLUSH PRIVILEGES"
+        );
+        assert_eq!(flush(Engine::Mysql, Flush::Tables).unwrap(), "FLUSH TABLES");
+        assert!(flush(Engine::Postgres, Flush::Logs).is_err());
+        let parsed: Flush = serde_json::from_str("\"status\"").unwrap();
+        assert_eq!(parsed, Flush::Status);
+        assert!(serde_json::from_str::<Flush>("\"hosts; DROP DATABASE x\"").is_err());
     }
 }
