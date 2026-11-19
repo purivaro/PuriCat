@@ -80,11 +80,11 @@ export const ipc = {
   listSchemas: (id: string, database: string) => invoke<Namespace[]>("list_schemas", { id, database }),
   listObjects: (id: string, database: string, schema: string | null) =>
     invoke<DbObject[]>("list_objects", { id, database, schema }),
-  fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null; filters: RowFilter[] }) =>
+  fetchRows: (id: string, table: TableRef, page: { offset: number; limit: number; sort: SortSpec | null; filters: RowFilter[]; matchAny: boolean }) =>
     invoke<RowPage>("fetch_rows", { id, table, page }),
   /** Counts on the server; `cancelJob(job)` interrupts it (the call then fails with `conflict`). */
-  countRows: (id: string, table: TableRef, filters: RowFilter[], job: string) =>
-    invoke<RowCount>("count_rows", { id, table, filters, job }),
+  countRows: (id: string, table: TableRef, filters: RowFilter[], matchAny: boolean, job: string) =>
+    invoke<RowCount>("count_rows", { id, table, filters, matchAny, job }),
   fetchCell: (id: string, table: TableRef, key: { column: string; value: string }[], column: string) =>
     invoke<CellContent>("fetch_cell", { id, table, key, column }),
   planChanges: (id: string, table: TableRef, changes: ChangeSet) =>

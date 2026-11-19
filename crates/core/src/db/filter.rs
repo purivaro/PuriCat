@@ -15,8 +15,14 @@
 //! SQLite compares by the column's affinity: text sent for an INTEGER, REAL or NUMERIC
 //! column meets it as a number when it is one. Dates there are text, and compare as text.
 //!
-//! "Is not" and "does not contain" keep the rows whose value is NULL: to a person reading the
-//! grid an empty cell is "not X", whatever three-valued logic says.
+//! "Is not", "is not in the list" and "does not contain" keep the rows whose value is NULL: to
+//! a person reading the grid an empty cell is "not X", whatever three-valued logic says.
+//!
+//! A list ("is one of") is so many equality tests: each value is checked and bound exactly as
+//! "is" would bind it. "Is between" is two ordered comparisons, both ends included. "Is empty"
+//! is about the empty text of a text column, which is not NULL.
+//!
+//! The conditions of a request must all hold, or — when the request says so — any one of them.
 
 use serde::Deserialize;
 
@@ -26,6 +32,11 @@ use crate::{Error, Result};
 
 /// More conditions than anyone builds by hand; a bound on the size of the statement.
 pub const MAX_FILTERS: usize = 20;
+/// The longest list one condition takes: a column pasted from a spreadsheet, not a table.
+pub const MAX_VALUES: usize = 200;
+/// Values bound in one statement, over all its conditions. Servers take more; a filter that
+/// needs more is a join, and belongs in a query tab.
+pub const MAX_PARAMS: usize = 1000;
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -42,17 +53,28 @@ pub enum FilterOp {
     LessOrEqual,
     IsNull,
     IsNotNull,
+    /// The value is one of `values`.
+    In,
+    NotIn,
+    /// Between the two `values`, both included.
+    Between,
+    /// The empty text. NULL is not empty text: `IsNotEmpty` leaves NULL rows out too.
+    IsEmpty,
+    IsNotEmpty,
 }
 
-/// One condition. All conditions of a request must hold (AND).
+/// One condition. The conditions of a request must all hold, or any one of them.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Filter {
     pub column: String,
     pub op: FilterOp,
-    /// Ignored by `IsNull` and `IsNotNull`; required by every other operator.
+    /// What the operators that compare with one value compare with.
     #[serde(default)]
     pub value: Option<String>,
+    /// The list of `In` / `NotIn` (1 to [`MAX_VALUES`]) and the two ends of `Between`.
+    #[serde(default)]
+    pub values: Vec<String>,
 }
 
 /// A WHERE clause (with its leading space, or empty) and its bind parameters, in order.
@@ -63,7 +85,13 @@ pub struct Where {
     pub params: Vec<String>,
 }
 
-pub(crate) fn where_clause(engine: Engine, meta: &TableMeta, filters: &[Filter]) -> Result<Where> {
+/// `match_any`: a row passes when any one condition holds, instead of all of them.
+pub(crate) fn where_clause(
+    engine: Engine,
+    meta: &TableMeta,
+    filters: &[Filter],
+    match_any: bool,
+) -> Result<Where> {
     if filters.len() > MAX_FILTERS {
         return Err(Error::Invalid(format!(
             "{} filter conditions exceeds the limit of {MAX_FILTERS}",
@@ -76,85 +104,44 @@ pub(crate) fn where_clause(engine: Engine, meta: &TableMeta, filters: &[Filter])
         let col = write::column(meta, &filter.column)?;
         parts.push(condition(engine, col, filter, &mut params)?);
     }
+    if params.len() > MAX_PARAMS {
+        return Err(Error::Invalid(format!(
+            "These conditions hold {} values in all; one filter takes at most {MAX_PARAMS}",
+            params.len()
+        )));
+    }
     let sql = if parts.is_empty() {
         String::new()
+    } else if match_any && parts.len() > 1 {
+        // Each condition in its own parentheses: what "or" joins never depends on what a
+        // condition happens to contain.
+        let each: Vec<String> = parts.iter().map(|p| format!("({p})")).collect();
+        format!(" WHERE {}", each.join(" OR "))
     } else {
         format!(" WHERE {}", parts.join(" AND "))
     };
     Ok(Where { sql, params })
 }
 
-fn condition(
+fn bind(engine: Engine, params: &mut Vec<String>, value: String) -> String {
+    params.push(value);
+    match engine {
+        Engine::Postgres => format!("${}", params.len()),
+        _ => "?".to_string(),
+    }
+}
+
+/// The two sides of a comparison of `col` with one value: the column, or the text the grid
+/// shows of it, and the bound value. `equality`: the comparison is "is" (or a list of them),
+/// which every column that can be compared at all allows.
+fn sides(
     engine: Engine,
     col: &ColumnMeta,
-    filter: &Filter,
+    quoted: &str,
+    value: &str,
+    equality: bool,
     params: &mut Vec<String>,
-) -> Result<String> {
-    use FilterOp::*;
-    let quoted = write::quote(engine, &col.name)?;
-    match filter.op {
-        IsNull => return Ok(format!("{quoted} IS NULL")),
-        IsNotNull => return Ok(format!("{quoted} IS NOT NULL")),
-        _ => {}
-    }
-    if col.kind == ValueKind::Binary {
-        return Err(Error::Invalid(format!(
-            "Column {} holds binary data: it can only be filtered on NULL",
-            col.name
-        )));
-    }
-    // The grid shows a MySQL spatial value as its WKT text; the column itself is binary.
-    if engine == Engine::Mysql && col.kind == ValueKind::Other {
-        return Err(Error::Invalid(format!(
-            "Column {} ({}) can only be filtered on NULL",
-            col.name, col.data_type
-        )));
-    }
-    let Some(value) = &filter.value else {
-        return Err(Error::Invalid(format!(
-            "The filter on {} needs a value",
-            col.name
-        )));
-    };
-    let mut bind = |value: String| {
-        params.push(value);
-        match engine {
-            Engine::Postgres => format!("${}", params.len()),
-            _ => "?".to_string(),
-        }
-    };
-
-    if matches!(filter.op, Contains | NotContains | StartsWith | EndsWith) {
-        // A text column is matched as itself, under its own collation; anything else as
-        // the text the grid shows.
-        let target = if col.kind == ValueKind::Text {
-            quoted.clone()
-        } else {
-            write::rendered(engine, col, &quoted)
-        };
-        let escaped = like_escape(value);
-        let pattern = match filter.op {
-            StartsWith => format!("{escaped}%"),
-            EndsWith => format!("%{escaped}"),
-            _ => format!("%{escaped}%"),
-        };
-        let placeholder = bind(pattern);
-        // PostgreSQL's LIKE is case-sensitive; MySQL's follows the collation, which is
-        // case-insensitive unless the column says otherwise. ILIKE brings the two together.
-        let like = if engine == Engine::Postgres {
-            "ILIKE"
-        } else {
-            "LIKE"
-        };
-        // An explicit escape character: the default (a backslash) depends on server settings.
-        return Ok(if filter.op == NotContains {
-            format!("({target} NOT {like} {placeholder} ESCAPE '!' OR {quoted} IS NULL)")
-        } else {
-            format!("{target} {like} {placeholder} ESCAPE '!'")
-        });
-    }
-
-    let equality = matches!(filter.op, Equals | NotEquals);
+) -> Result<(String, String)> {
     let typed = match col.kind {
         ValueKind::Number | ValueKind::Bool | ValueKind::Temporal | ValueKind::Text => {
             // A MySQL FLOAT widened to double never equals the double parsed from the same
@@ -192,12 +179,142 @@ fn condition(
             col.base_type, col.name
         )));
     }
-    let placeholder = bind(value.clone());
-    let (left, right) = if typed {
-        (quoted, write::key_expr(engine, col, &placeholder))
+    let placeholder = bind(engine, params, value.to_string());
+    Ok(if typed {
+        (
+            quoted.to_string(),
+            write::key_expr(engine, col, &placeholder),
+        )
     } else {
-        (write::rendered(engine, col, &quoted), placeholder)
+        (write::rendered(engine, col, quoted), placeholder)
+    })
+}
+
+fn condition(
+    engine: Engine,
+    col: &ColumnMeta,
+    filter: &Filter,
+    params: &mut Vec<String>,
+) -> Result<String> {
+    use FilterOp::*;
+    let quoted = write::quote(engine, &col.name)?;
+    match filter.op {
+        IsNull => return Ok(format!("{quoted} IS NULL")),
+        IsNotNull => return Ok(format!("{quoted} IS NOT NULL")),
+        IsEmpty | IsNotEmpty => {
+            if col.kind != ValueKind::Text {
+                return Err(Error::Invalid(format!(
+                    "Column {} ({}) does not hold text, so it has no empty text to look for",
+                    col.name, col.data_type
+                )));
+            }
+            let test = if filter.op == IsEmpty { "=" } else { "<>" };
+            return Ok(format!("{quoted} {test} ''"));
+        }
+        _ => {}
+    }
+    if col.kind == ValueKind::Binary {
+        return Err(Error::Invalid(format!(
+            "Column {} holds binary data: it can only be filtered on NULL",
+            col.name
+        )));
+    }
+    // The grid shows a MySQL spatial value as its WKT text; the column itself is binary.
+    if engine == Engine::Mysql && col.kind == ValueKind::Other {
+        return Err(Error::Invalid(format!(
+            "Column {} ({}) can only be filtered on NULL",
+            col.name, col.data_type
+        )));
+    }
+
+    if matches!(filter.op, In | NotIn) {
+        if filter.values.is_empty() {
+            return Err(Error::Invalid(format!(
+                "The list of values for {} is empty",
+                col.name
+            )));
+        }
+        if filter.values.len() > MAX_VALUES {
+            return Err(Error::Invalid(format!(
+                "The list for {} holds {} values; a list takes at most {MAX_VALUES}",
+                col.name,
+                filter.values.len()
+            )));
+        }
+        let mut left = String::new();
+        let mut list = Vec::with_capacity(filter.values.len());
+        for value in &filter.values {
+            let (column, bound) = sides(engine, col, &quoted, value, true, params)?;
+            left = column;
+            list.push(bound);
+        }
+        let list = list.join(", ");
+        return Ok(if filter.op == In {
+            format!("{left} IN ({list})")
+        } else {
+            format!("({left} NOT IN ({list}) OR {quoted} IS NULL)")
+        });
+    }
+    if filter.op == Between {
+        if !matches!(
+            col.kind,
+            ValueKind::Number | ValueKind::Temporal | ValueKind::Text
+        ) {
+            return Err(Error::Invalid(format!(
+                "Column {} ({}) has no order for a value to be between two others",
+                col.name, col.data_type
+            )));
+        }
+        let [from, to] = filter.values.as_slice() else {
+            return Err(Error::Invalid(format!(
+                "“is between” on {} needs two values, a first and a last",
+                col.name
+            )));
+        };
+        let (left, from) = sides(engine, col, &quoted, from, false, params)?;
+        let (_, to) = sides(engine, col, &quoted, to, false, params)?;
+        return Ok(format!("{left} BETWEEN {from} AND {to}"));
+    }
+
+    let Some(value) = &filter.value else {
+        return Err(Error::Invalid(format!(
+            "The filter on {} needs a value",
+            col.name
+        )));
     };
+
+    if matches!(filter.op, Contains | NotContains | StartsWith | EndsWith) {
+        // A text column is matched as itself, under its own collation; anything else as
+        // the text the grid shows.
+        let target = if col.kind == ValueKind::Text {
+            quoted.clone()
+        } else {
+            write::rendered(engine, col, &quoted)
+        };
+        let escaped = like_escape(value);
+        let pattern = match filter.op {
+            StartsWith => format!("{escaped}%"),
+            EndsWith => format!("%{escaped}"),
+            _ => format!("%{escaped}%"),
+        };
+        let placeholder = bind(engine, params, pattern);
+        // PostgreSQL's LIKE is case-sensitive; MySQL's follows the collation, which is
+        // case-insensitive unless the column says otherwise. ILIKE brings the two together.
+        let like = if engine == Engine::Postgres {
+            "ILIKE"
+        } else {
+            "LIKE"
+        };
+        // An explicit escape character: the default (a backslash) depends on server settings.
+        return Ok(if filter.op == NotContains {
+            format!("({target} NOT {like} {placeholder} ESCAPE '!' OR {quoted} IS NULL)")
+        } else {
+            format!("{target} {like} {placeholder} ESCAPE '!'")
+        });
+    }
+
+    let equality = matches!(filter.op, Equals | NotEquals);
+    let (left, right) = sides(engine, col, &quoted, value, equality, params)?;
     Ok(match filter.op {
         Equals => format!("{left} = {right}"),
         NotEquals if engine == Engine::Postgres => format!("{left} IS DISTINCT FROM {right}"),
@@ -309,21 +426,31 @@ mod tests {
             column: column.into(),
             op,
             value: value.map(str::to_string),
+            values: Vec::new(),
+        }
+    }
+
+    fn list(column: &str, op: FilterOp, values: &[&str]) -> Filter {
+        Filter {
+            column: column.into(),
+            op,
+            value: None,
+            values: values.iter().map(|v| v.to_string()).collect(),
         }
     }
 
     fn mysql(filters: &[Filter]) -> Result<Where> {
-        where_clause(Engine::Mysql, &meta(), filters)
+        where_clause(Engine::Mysql, &meta(), filters, false)
     }
 
     fn postgres(filters: &[Filter]) -> Result<Where> {
-        where_clause(Engine::Postgres, &meta(), filters)
+        where_clause(Engine::Postgres, &meta(), filters, false)
     }
 
     #[test]
     fn sqlite_compares_by_affinity() {
         use FilterOp::*;
-        let sqlite = |filters: &[Filter]| where_clause(Engine::Sqlite, &meta(), filters);
+        let sqlite = |filters: &[Filter]| where_clause(Engine::Sqlite, &meta(), filters, false);
         let w = sqlite(&[
             filter("id", Greater, Some("5")),
             filter("na`me", NotEquals, Some("x")),
@@ -345,6 +472,172 @@ mod tests {
         assert!(sqlite(&[filter("id", Equals, Some("five"))]).is_err());
         assert!(sqlite(&[filter("spot", Greater, Some("1"))]).is_err());
         assert!(sqlite(&[filter("photo", Equals, Some("0x00"))]).is_err());
+    }
+
+    #[test]
+    fn lists_are_so_many_equality_tests() {
+        use FilterOp::*;
+        let w = mysql(&[
+            list("id", In, &["1", " 2 "]),
+            list("na`me", NotIn, &["a", "x' OR 1=1 --"]),
+            // Equality on a FLOAT, and on JSON, compares the text the grid shows.
+            list("ratio", In, &["1.1", "2"]),
+            list("doc", NotIn, &["{}"]),
+        ])
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE `id` IN (CAST(? AS UNSIGNED), CAST(? AS UNSIGNED)) \
+             AND (`na``me` NOT IN (?, ?) OR `na``me` IS NULL) \
+             AND CAST(`ratio` AS CHAR) IN (?, ?) \
+             AND (CAST(`doc` AS CHAR) NOT IN (?) OR `doc` IS NULL)"
+        );
+        assert_eq!(
+            w.params,
+            ["1", " 2 ", "a", "x' OR 1=1 --", "1.1", "2", "{}"]
+        );
+
+        // PostgreSQL numbers its placeholders through every condition and list.
+        let w = postgres(&[
+            filter("price", Greater, Some("1")),
+            list("id", In, &["7", "8", "9"]),
+            list("doc", In, &["{}"]),
+            list("na`me", NotIn, &["a"]),
+        ])
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE \"price\" > $1::decimal AND \"id\" IN ($2::bigint, $3::bigint, $4::bigint) \
+             AND \"doc\"::text IN ($5) \
+             AND (\"na`me\" NOT IN ($6::varchar) OR \"na`me\" IS NULL)"
+        );
+        assert_eq!(w.params, ["1", "7", "8", "9", "{}", "a"]);
+
+        let w = where_clause(
+            Engine::Sqlite,
+            &meta(),
+            &[list("id", In, &["1", "2"])],
+            false,
+        )
+        .unwrap();
+        assert_eq!(w.sql, " WHERE \"id\" IN (?, ?)");
+    }
+
+    #[test]
+    fn between_and_the_empty_text() {
+        use FilterOp::*;
+        let w = mysql(&[
+            list("price", Between, &["0.5", "10"]),
+            list("made", Between, &["2026-01-01", "2026-01-31"]),
+            list("na`me", Between, &["a", "m"]),
+            filter("na`me", IsEmpty, None),
+            filter("na`me", IsNotEmpty, Some("ignored")),
+        ])
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE `price` BETWEEN CAST(? AS DECIMAL(65,30)) AND CAST(? AS DECIMAL(65,30)) \
+             AND `made` BETWEEN ? AND ? AND `na``me` BETWEEN ? AND ? \
+             AND `na``me` = '' AND `na``me` <> ''"
+        );
+        assert_eq!(
+            w.params,
+            ["0.5", "10", "2026-01-01", "2026-01-31", "a", "m"]
+        );
+
+        let w = postgres(&[
+            list("made", Between, &["2026-01-01", "2026-01-31"]),
+            filter("na`me", IsEmpty, None),
+        ])
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE \"made\" BETWEEN $1::date AND $2::date AND \"na`me\" = ''"
+        );
+    }
+
+    #[test]
+    fn any_joins_with_or_each_condition_in_parentheses() {
+        use FilterOp::*;
+        let conditions = [
+            list("id", In, &["1", "2"]),
+            filter("doc", NotContains, Some("x")),
+            filter("na`me", IsNull, None),
+        ];
+        let w = where_clause(Engine::Postgres, &meta(), &conditions, true).unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE (\"id\" IN ($1::bigint, $2::bigint)) \
+             OR ((\"doc\"::text NOT ILIKE $3 ESCAPE '!' OR \"doc\" IS NULL)) \
+             OR (\"na`me\" IS NULL)"
+        );
+        assert_eq!(w.params, ["1", "2", "%x%"]);
+        let w = where_clause(Engine::Mysql, &meta(), &conditions[..2], true).unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE (`id` IN (CAST(? AS UNSIGNED), CAST(? AS UNSIGNED))) \
+             OR ((CAST(`doc` AS CHAR) NOT LIKE ? ESCAPE '!' OR `doc` IS NULL))"
+        );
+        // One condition is the same either way.
+        let one = where_clause(Engine::Mysql, &meta(), &conditions[2..], true).unwrap();
+        assert_eq!(one.sql, " WHERE `na``me` IS NULL");
+    }
+
+    #[test]
+    fn refusals_of_lists_and_ranges() {
+        use FilterOp::*;
+        let refused = |f: Filter| match mysql(&[f]) {
+            Err(Error::Invalid(message)) => message,
+            other => panic!("not refused: {other:?}"),
+        };
+        refused(list("id", In, &[]));
+        refused(list("id", NotIn, &[]));
+        let many: Vec<String> = (0..=MAX_VALUES).map(|n| n.to_string()).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(mysql(&[list("id", In, &many[..MAX_VALUES])]).is_ok());
+        assert!(refused(list("id", In, &many)).contains("201 values"));
+        // The value that is not a number, or not a date, is named.
+        assert!(refused(list("id", In, &["1", "two", "3"])).contains("“two”"));
+        assert!(refused(list("made", NotIn, &["2026-01-02", "2026"])).contains("“2026”"));
+        assert!(refused(list("id", Between, &["1", "x"])).contains("“x”"));
+        // A list is of the values a column can be compared with at all.
+        refused(list("photo", In, &["00"]));
+        refused(list("spot", In, &["POINT(1 2)"]));
+        // Between takes two values, of a column that has an order.
+        for values in [&[][..], &["1"], &["1", "2", "3"]] {
+            refused(list("id", Between, values));
+        }
+        let mut flags = meta();
+        flags.columns.push(col("on", "tinyint(1)", ValueKind::Bool));
+        assert!(matches!(
+            where_clause(
+                Engine::Mysql,
+                &flags,
+                &[list("on", Between, &["0", "1"])],
+                false
+            ),
+            Err(Error::Invalid(_))
+        ));
+        refused(list("doc", Between, &["a", "b"]));
+        refused(list("photo", Between, &["a", "b"]));
+        // The empty text is a matter for text columns.
+        refused(filter("id", IsEmpty, None));
+        refused(filter("made", IsNotEmpty, None));
+        refused(filter("photo", IsEmpty, None));
+
+        // All the values of a filter, over its conditions, are bounded too.
+        let full = vec![list("id", In, &many[..MAX_VALUES]); 5];
+        assert_eq!(mysql(&full).unwrap().params.len(), MAX_PARAMS);
+        let mut over = full.clone();
+        over.push(filter("id", Equals, Some("1")));
+        assert!(refused_all(&over).contains("1001 values"));
+    }
+
+    fn refused_all(filters: &[Filter]) -> String {
+        match mysql(filters) {
+            Err(Error::Invalid(message)) => message,
+            other => panic!("not refused: {other:?}"),
+        }
     }
 
     #[test]

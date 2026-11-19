@@ -152,6 +152,9 @@ pub struct PageRequest {
     /// Conditions a row must meet, all of them. Empty shows every row.
     #[serde(default)]
     pub filters: Vec<filter::Filter>,
+    /// A row passes when any one condition holds, instead of all of them.
+    #[serde(default)]
+    pub match_any: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -609,7 +612,7 @@ impl Session {
             return Err(Error::NotFound(format!("Table {}", table.name)));
         }
         let order = resolve_order(&meta, req.sort.as_ref())?;
-        let filter = filter::where_clause(self.engine(), &meta, &req.filters)?;
+        let filter = filter::where_clause(self.engine(), &meta, &req.filters, req.match_any)?;
         let raw = match self {
             Session::MySql(s) => s.select_page(table, &meta, &filter, &order, req).await?,
             Session::Postgres(s) => s.select_page(table, &meta, &filter, &order, req).await?,
@@ -618,13 +621,15 @@ impl Session {
         Ok(finish_page(meta, raw, order, req, started))
     }
 
-    /// Count the rows of a table that pass `filters` (all of them, without filters). Asked
+    /// Count the rows of a table that pass `filters` (every row, without filters; with
+    /// `match_any`, the rows that pass any one of them). Asked
     /// for, never automatic: on a large table the server reads every row or a whole index.
     /// It runs on a connection of its own, so setting `stop` interrupts it on the server.
     pub async fn count_rows(
         &self,
         table: &TableRef,
         filters: &[filter::Filter],
+        match_any: bool,
         stop: &std::sync::atomic::AtomicBool,
     ) -> Result<RowCount> {
         use std::sync::atomic::Ordering;
@@ -634,7 +639,7 @@ impl Session {
             return Err(Error::NotFound(format!("Table {}", table.name)));
         }
         let engine = self.engine();
-        let filter = filter::where_clause(engine, &meta, filters)?;
+        let filter = filter::where_clause(engine, &meta, filters, match_any)?;
         let sql = count_sql(engine, table, &filter)?;
         let mut console = self.open_reader(Some(&table.database)).await?;
         let canceller = console.canceller();
@@ -1093,6 +1098,7 @@ mod tests {
             limit: 2,
             sort: None,
             filters: Vec::new(),
+            match_any: false,
         };
         let page = finish_page(
             meta(),

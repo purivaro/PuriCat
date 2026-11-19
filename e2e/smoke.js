@@ -689,6 +689,100 @@
     await stage("table-filter-cell", { barReset, filterRefusal, fromCell });
     await click(panelButton("Clear filter"), "clear filter");
     await waitFor(() => filterCount() === "0" && new Set(columnCells(STATUS)).size > 1, "every row again");
+
+    // 6. Any of the conditions instead of all, a list pasted as lines, a range, a condition
+    //    switched off. The numbers follow from the fixture: 16 orders of 9,000 or more
+    //    (SO-10113 is one), 18 between 100 and 250 (SO-10001 is one, SO-10002 is not).
+    const matchChoice = (label) => all(`${panelSel} [data-filter-match] [role="radio"]`).find((b) => b.textContent.trim() === label);
+    const rowsShown = (n) => new RegExp(`Rows 1–${n}(?!\\d)`).test(footer() ?? "");
+    const orderNos = () => columnCells(1);
+    await choose(filterRows()[0].querySelectorAll("select")[0], "order_no");
+    await choose(filterRows()[0].querySelectorAll("select")[1], "in");
+    const pastedLines = new DataTransfer();
+    pastedLines.setData("text/plain", "SO-10113\r\nSO-10001\r\nSO-10002\r\n");
+    filterRows()[0].querySelector("input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: pastedLines, bubbles: true, cancelable: true }));
+    const listBox = await waitFor(() => filterRows()[0].querySelector("[data-filter-values]") && filterRows()[0].querySelector("input").value, "the pasted list in the box");
+    const listHint = filterRows()[0].querySelector("[data-filter-values]").textContent.trim();
+    if (listBox !== "SO-10113, SO-10001, SO-10002" || listHint !== "3 values") throw new Error(`pasted lines became “${listBox}” (${listHint})`);
+    if (matchChoice("any")) throw new Error("all / any is offered with one condition");
+    await click(panelButton("Add condition"), "add condition");
+    await condition(1, "total_amount", "greaterOrEqual", "9000");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "2" && dataRows().length === 1 && orderNos()[0] === "SO-10113", "both conditions: one order");
+    const allOf = { footer: footer(), label: filterRows()[1].querySelector(":scope > span").textContent.trim() };
+    await click(matchChoice("any"), "match any");
+    const anyNote = document.querySelector(`${panelSel} [data-filter-note]`).textContent.trim();
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => rowsShown(18) && footer().includes("any of 2 conditions applied"), "either condition: 18 orders");
+    const anyOf = { note: anyNote, footer: footer(), label: filterRows()[1].querySelector(":scope > span").textContent.trim() };
+    const eitherTruth = await truth("SELECT count(*) FROM shop.orders WHERE order_no IN ('SO-10113', 'SO-10001', 'SO-10002') OR total_amount >= 9000");
+    if (eitherTruth !== 18 || allOf.label !== "and" || anyOf.label !== "or") throw new Error(`any of the conditions: ${JSON.stringify({ eitherTruth, allOf, anyOf })}`);
+
+    // a range, both ends included
+    await choose(filterRows()[1].querySelectorAll("select")[1], "between");
+    await type(filterRows()[1].querySelectorAll("input")[0], "100");
+    await type(filterRows()[1].querySelectorAll("input")[1], "250");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => rowsShown(20), "the list or the range: 20 orders");
+    const rangeTruth = await truth("SELECT count(*) FROM shop.orders WHERE order_no IN ('SO-10113', 'SO-10001', 'SO-10002') OR total_amount BETWEEN 100 AND 250");
+    const outside = columnCells(TOTAL).map(Number).filter((v) => v < 100 || v > 250).length; // SO-10113 and SO-10002, from the list
+    if (rangeTruth !== 20 || outside !== 2) throw new Error(`the range: the database says ${rangeTruth}, and ${outside} rows are outside it`);
+
+    // a third condition, then switched off: it stays in the bar and is not sent
+    await click(panelButton("Add condition"), "add condition");
+    await condition(2, "status", "equals", "Cancelled");
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "3" && rowsShown(200), "three conditions, any of them");
+    await click(filterRows()[2].querySelector('[role="checkbox"]'), "switch the third condition off");
+    const offNote = document.querySelector(`${panelSel} [data-filter-note]`).textContent.trim();
+    await click(panelButton("Apply"), "apply");
+    await waitFor(() => filterCount() === "2" && rowsShown(20), "the condition switched off");
+    const switchedOff = {
+      note: offNote,
+      rows: filterRows().length,
+      off: filterRows().map((r) => r.querySelector('[role="checkbox"]').getAttribute("aria-checked")),
+      footer: footer(),
+    };
+    if (switchedOff.rows !== 3 || switchedOff.off.join() !== "true,true,false") throw new Error(`switching a condition off: ${JSON.stringify(switchedOff)}`);
+    await stage("table-filter-any", { listBox, listHint, allOf, anyOf, switchedOff });
+    await click(panelButton("Clear filter"), "clear filter");
+    await waitFor(() => filterCount() === "0" && filterRows().length === 1 && rowsShown(200), "every row again");
+
+    // 7. From the grid: hide the rows that hold a cell's value; show those that hold any of several.
+    const hidden = cellText(0, STATUS).trim();
+    await selectCell(0, STATUS);
+    await rightClick(cellAt(0, STATUS));
+    const cellMenu = (await waitFor(() => menuItem("Hide rows with this value") && all(`[role="menu"]${OPEN} [role="menuitem"]`), "cell menu")).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    await click(menuItem("Hide rows with this value"), "hide rows with this value");
+    await waitFor(() => filterCount() === "1" && !columnCells(STATUS).includes(hidden), "rows with the value hidden");
+    const hideValue = {
+      hidden,
+      op: filterRows()[0].querySelectorAll("select")[1].value,
+      value: filterRows()[0].querySelector("input").value,
+      statuses: [...new Set(columnCells(STATUS))].sort(),
+    };
+    if (hideValue.op !== "notEquals" || hideValue.value !== hidden || hideValue.statuses.length !== 3) throw new Error(`hide rows with this value: ${JSON.stringify(hideValue)}`);
+    await click(panelButton("Clear filter"), "clear filter");
+    await waitFor(() => filterCount() === "0" && rowsShown(200), "every row again");
+    await selectCell(0, STATUS);
+    await gridKey("ArrowDown", { shiftKey: true });
+    await gridKey("ArrowDown", { shiftKey: true });
+    const picked = [0, 1, 2].map((r) => cellText(r, STATUS).trim());
+    await rightClick(cellAt(1, STATUS));
+    await click(await waitFor(() => menuItem(`Show rows with these ${new Set(picked).size} values`), "show rows with these values"), "show rows with these values");
+    await waitFor(() => filterCount() === "1" && new Set(columnCells(STATUS)).size === new Set(picked).size, "rows with any of the values");
+    const theseValues = {
+      picked,
+      op: filterRows()[0].querySelectorAll("select")[1].value,
+      list: filterRows()[0].querySelector("input").value,
+      statuses: [...new Set(columnCells(STATUS))].sort(),
+    };
+    if (theseValues.op !== "in" || theseValues.list !== picked.join(", ") || theseValues.statuses.join() !== [...new Set(picked)].sort().join()) {
+      throw new Error(`show rows with these values: ${JSON.stringify(theseValues)}`);
+    }
+    log.push({ stage: "table-filter-grid", cellMenu, hideValue, theseValues, rangeTruth });
+    await click(panelButton("Clear filter"), "clear filter");
+    await waitFor(() => filterCount() === "0" && new Set(columnCells(STATUS)).size > 3, "every row again");
     await click(document.querySelector(`${panelSel} [aria-label="Hide the filter bar"]`), "hide the filter bar");
     await waitFor(() => !filterBar(), "filter bar hidden");
 
