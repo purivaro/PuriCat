@@ -597,6 +597,33 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-19 (release v0.4.0: an installed release updates itself)
+
+The first release after the one that brought the updater, and so the first time an installed release could find something newer. macOS on Apple Silicon; the app was the notarized 0.3.1 in `/Applications`, installed from the published disk image earlier the same day and in use since (two saved connections, one backup in its history). It was driven through the macOS accessibility API (buttons pressed by their labels), with screenshots of its own window; nothing was injected into the app.
+
+| Check | Result |
+|---|---|
+| Before the release: "Check for Updates" from the version in the status bar of the installed 0.3.1 | "PuriCat is up to date · 0.3.1 is the latest version". The request went to GitHub: this build has no other endpoint |
+| The release workflow for the tag `v0.4.0` | Pass, in about 17 minutes: `status: Accepted`, `source=Notarized Developer ID`, `x86_64 arm64`. The release has the disk image, the update package, its signature, `latest.json` and `SHA256SUMS.txt`; `releases/latest/download/latest.json`, asked with the updater's `User-Agent`, answers 0.4.0 for both architectures. No rehearsal run was made this time |
+| **The installed 0.3.1 finds the release** | Pass. The same click, a minute after the release was published: "PuriCat 0.4.0 is available · You have 0.3.1 · Released 19 November". The app had been running since before the release; the check at start-up was not what found it |
+| **"Download and install"** | Pass. The dialog went through "Downloading PuriCat 0.4.0…" to "PuriCat 0.4.0 is installed", within about a minute (not timed). `/Applications/PuriCat.app` was then 0.4.0 on disk while the window still ran 0.3.1, as the dialog says |
+| **"Restart now"** | Pass. The 0.3.1 process ended and a new one started from the same path by itself. No tab had unsaved work, so the warning about unsaved tabs was not seen |
+| The app on disk afterwards | Version 0.4.0; `codesign --verify --deep --strict` passes; the code directory hash is another than 0.3.1's and the team the same; `spctl` accepts it as `Notarized Developer ID`; `stapler validate` passes |
+| The app after the restart | The status bar says v0.4.0; "Check for Updates" answers "0.4.0 is the latest version". The settings database has what it had: both connections, the backup job and the run in the history. No crash report |
+| **The new feature in the installed release** | With the updated 0.4.0, in Thai and the dark theme: "Restore…" on the backup that 0.3.1 had made of a five-table database on the local MySQL 9.3.0. The name offered was the source's with the backup's time; the plan showed `CREATE DATABASE … CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci` and `mysql 9.3.0`; it ended in "Restored into …" after a second. Compared on the server: the same tables, the same checksum of every table, the same view totals and the same default character set as the source |
+
+Seen on the way, not investigated:
+
+- **Between the install and the restart the old process could not be read through the accessibility API** (error -25211 for its windows), although its window was drawn and answered a click. "Restart now" was therefore clicked with a mouse event. After the restart the new process answered as before. Whether a screen reader loses the dialog at that moment is not known.
+- After the restart the window opened on another display than the one it had been on.
+
+Not verified:
+
+- the check at start-up finding a release (here the running app was asked by hand), and the status bar's "Update available" pill;
+- an update on an Intel Mac, from a version older than 0.3.1 (which has no updater), with the app somewhere else than `/Applications`, or in a folder the user cannot write to;
+- the warning about unsaved tabs before a restart; "Later"; a download that is interrupted; a release whose signature does not fit, against GitHub rather than the stand-in server of `e2e/update.sh`;
+- the dialog in English and in the light theme, through a release.
+
 ## Results — 2026-11-19 (restore into a new database)
 
 macOS on Apple Silicon; local MySQL 9.3.0 with `mysqldump` and `mysql` 9.3.0, local PostgreSQL 16.13 with `pg_dump`, `pg_restore` and `psql` 16.13. Neither server asks for a password. Only what was run for this change is listed. Design: [ADR 0022](docs/adr/0022-restore-into-a-new-database.md).
@@ -609,7 +636,7 @@ macOS on Apple Silicon; local MySQL 9.3.0 with `mysqldump` and `mysql` 9.3.0, lo
 | `e2e/run.sh` (dev-server mode), the whole smoke test with the stages `restore-plan` and `restore-done` | Pass, twice in a row: once before and once after the last change to the dialog (its opening focus). An empty `problems` list both times; the runner's check of the two restored databases passed. On both engines the name offered was `puricat_e2e_restored_<date>_<time>`, the source's name was refused with "already exists", and the restored database held 1,250 orders |
 | Screenshots (`SHOTS=1`) | Looked at by hand: the restore dialog with its plan and after the restore, on MySQL (English, light). The first look led to one change: the dialog opened with the focus on its close button, whose tooltip then covered the corner; the focus is now on the name |
 | **A backup made and restored with the installed release 0.3.1** | Not a test of this change, but of what it builds on: with the notarized 0.3.1 from `/Applications`, a database of five tables on the local MySQL was backed up from the dialog (22 KB, `mysqldump` 9.3.0), the file restored by hand with `mysql` into a second database, and tables, row checksums and the view compared: identical. The restore dialog itself was not in that build |
-| `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Not run with these stages |
+| `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Pass, once, on the final code (run after the pull request was opened, before the release): the whole smoke test with the restore stages on both engines, an empty `problems` list, the runner's check of the restored databases passed. It is also the first run of the bundle since the stages for a new database, the database menu and backups were added, so those ran under the production CSP for the first time |
 
 Not verified (details under "Gaps"):
 
@@ -617,7 +644,7 @@ Not verified (details under "Gaps"):
 - **a backup of real size**: every restore loaded a few hundred rows in about a second, so progress, Stop during a load and a load that runs for minutes were not seen;
 - **a restore that fails or is stopped, through the UI**, and what the dialog then says about the database that was created;
 - the checks of the command itself: another connection's backup, a file whose size changed, a read-only connection, a name taken between the plan and the run;
-- a Production-labelled connection, a SQL dump on PostgreSQL through the UI, the dialog in Thai and in the dark theme, the bundled app.
+- a Production-labelled connection, a SQL dump on PostgreSQL through the UI, the dialog in Thai and in the dark theme.
 
 ## Results — 2026-11-19 (release v0.3.1: the update package)
 
@@ -630,7 +657,7 @@ The first release with the updater and with backups. What the release workflow's
 | `https://github.com/purivaro/PuriCat/releases/latest/download/latest.json`, asked with the updater's `User-Agent` and `Accept` | HTTP 200 after 2 redirects; version 0.3.1; the package URL answers 200; the signature in it was made with the app's key, for version 0.3.1 |
 | A tag build without the update key, and a tag that is not the app's version | Not tried: both are meant to fail, and the checks are a few lines of shell that were only read |
 
-**Still not verified: an installed release updating itself.** 0.3.1 is the newest version, so an installed 0.3.1 finds nothing newer. That it finds the next release, downloads it over HTTPS from GitHub and replaces a notarized app in `/Applications` will be seen with the release after this one. What an installed 0.3.1 does when it checks today (it should say that it is up to date) was not looked at either.
+**Not verified at the time: an installed release updating itself** (done with the next release: "Results — 2026-11-19 (release v0.4.0: an installed release updates itself)"). 0.3.1 is the newest version, so an installed 0.3.1 finds nothing newer. That it finds the next release, downloads it over HTTPS from GitHub and replaces a notarized app in `/Applications` will be seen with the release after this one. What an installed 0.3.1 does when it checks today (it should say that it is up to date) was not looked at either.
 
 ## Results — 2026-11-19 (backups)
 
@@ -1041,7 +1068,7 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Backups: failure paths and the rest of the dialog | A dump that breaks off, a full disk, an unplugged disk, Stop and a failure through the UI, "Show in Finder", Thai and dark, a large database: no test |
 | Restore: other servers and clients | Everything was run with `mysql` 9.3.0 against MySQL 9.3.0 and `psql` / `pg_restore` 16.13 against PostgreSQL 16.13, on servers that ask for no password and no TLS. MariaDB and its client, other versions, a password (exercised only by a wrong one being refused), TLS, a backup of more than a few hundred rows, a `DEFINER` the restoring account may not set, an account that may not create a database: no restore of any of them has been made |
 | Restore: the command's own checks | `restore_backup` and `restore_plan` in the app crate have no test of their own: a run of another connection, a run that failed or whose file was removed, a file whose size changed, a read-only connection, the name taken between the plan and the run, the character set copied from a source that is gone. The end-to-end test covers the happy path and the name that is taken, on both engines; the character set copied on MySQL is checked by the runner |
-| Restore: failure paths and the rest of the dialog | A restore that fails or is stopped through the UI (the message, the database left behind), progress during a long load, a Production-labelled or read-only connection, a SQL dump on PostgreSQL through the UI, Thai and dark: no test. The bundled app was not run with the restore stages |
+| Restore: failure paths and the rest of the dialog | A restore that fails or is stopped through the UI (the message, the database left behind), progress during a long load, a Production-labelled or read-only connection, a SQL dump on PostgreSQL through the UI, Thai and dark: no test |
 | Backups and restores: what `pg_restore --list` proves | An archive cut in half still lists: the table of contents is at the front of the file. So "listed by `pg_restore`" does not show that an archive's data is whole — for a backup it follows a `pg_dump` that ended without error, which is the stronger sign. Found by `live_restore`; a load of such a file fails and loads nothing. No stronger check is built |
 | In-app updates: a released build | Everything was tested with debug builds and stand-in servers on `127.0.0.1` (`e2e/update.sh`, two stages of the smoke test). No release build has asked GitHub, followed its redirect, required HTTPS or replaced a notarized app. The release workflow's steps ran for v0.3.1 and the published manifest was fetched by hand; an installed release finding and installing the next one is still to be seen |
 | In-app updates: around the install | The warning about unsaved tabs and the restart with such tabs; a download that breaks off; an app the user cannot write to or that runs from the disk image; the menu item and the palette command; the dialog in Thai and dark: no test |
