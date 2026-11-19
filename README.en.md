@@ -39,7 +39,7 @@ All versions and checksums are on the [Releases](https://github.com/purivaro/Pur
 2. Open PuriCat. The app is **signed with a Developer ID and notarized by Apple**, so it opens like any other downloaded app: macOS asks once whether to open an app downloaded from the internet.
 3. Passwords you save are kept in the **macOS Keychain**, never in a file.
 
-**Updates.** From the first version after 0.3.0, PuriCat looks for a newer version when it starts and shows it in the status bar; you choose when to download it and when to restart. The check is one request to github.com that says nothing about you or your databases, the download is installed only if it carries PuriCat's release signature, and the check can be switched off in the same dialog. You can also ask at any time: click the version number in the status bar, or choose **Check for Updates…** in the PuriCat menu. Version 0.3.0 and older are updated by downloading the file above again.
+**Updates.** From version 0.3.1, PuriCat looks for a newer version when it starts and shows it in the status bar; you choose when to download it and when to restart. The check is one request to github.com that says nothing about you or your databases, the download is installed only if it carries PuriCat's release signature, and the check can be switched off in the same dialog. You can also ask at any time: click the version number in the status bar, or choose **Check for Updates…** in the PuriCat menu. Version 0.3.0 and older are updated by downloading the file above again.
 
 ## What it does
 
