@@ -432,7 +432,7 @@ Editing, in the real window against both engines:
 
 SQL console, in the real window on MySQL (between steps 9 and 10; stages `sql-console`, `sql-blocked`, `sql-transaction` and the `sql-more` log entry). The editor's text is set through the Monaco instance and scripts are started with the Run button.
 
-Before them, the "New query" button at the end of the tab strip (stage `new-query-menu` and the `new-query-button` log entry), with the MySQL and the PostgreSQL connection both open:
+Before them, the "New query" button, a plus after the last tab (stage `new-query-menu` and the `new-query-button` log entry), with the MySQL and the PostgreSQL connection both open:
 
 - with the MySQL `orders` table tab in front, a click opens `Query 1` on that connection and that database (the tab's title is compared), without asking; the tab is closed again;
 - with the welcome tab in front, the button opens a menu instead, which must offer exactly the two connections. ⌘T in the same state (a synthetic key event sent to the window, with the menu closed) must show the message that several connections are open, and open no query tab. Choosing PostgreSQL from the menu opens `Query 1` on it, on no particular database; that tab is closed and the table tab brought back in front.
@@ -527,7 +527,7 @@ macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Only what was run for this change
 | Check | Result |
 |---|---|
 | `pnpm check` (typecheck, Vitest, the Rust unit tests, the SQLite tests, `cargo fmt --check`, `cargo clippy -D warnings`) | Pass on the final code: 81 Vitest cases in 12 files (3 new, in `src/lib/newQuery.test.ts`); 97 Rust unit tests, 2 ignored |
-| `e2e/run.sh` (dev-server mode), the whole smoke test with the stage `new-query-menu` | Pass, three times, each with an empty `problems` list. Between the first and the second, one attribute was added (the menu keeps 12 px from the window's edge); between the second and the third, the message of ⌘T and its step in the test. The third run is on the final code |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the stage `new-query-menu` | Pass, four times, each with an empty `problems` list. Between the first and the second, one attribute was added (the menu keeps 12 px from the window's edge); between the second and the third, the message of ⌘T and its step in the test; before the fourth, the button lost its label and became a plus alone, as in a browser. The fourth run is on the final code |
 | Screenshots (`SHOTS=1`) | Looked at by hand: the button after the last tab of a strip that has scrolled, with the menu of the two connections open under it and clear of the window's edge; the button in English and in Thai, in the light and the dark theme. Not an automated check |
 | The live database tests | Not run: no backend code changed |
 | `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Not run |
