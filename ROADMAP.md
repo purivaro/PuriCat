@@ -110,7 +110,7 @@ Files now open in Smart Paste (CSV and workbooks, read by `table_file` with `csv
 
 Done (MySQL and PostgreSQL; evidence in [TESTING.md](TESTING.md), design in [ADR 0015](docs/adr/0015-sql-console.md)):
 
-- Query tabs with a Monaco editor ([ADR 0007](docs/adr/0007-sql-editor.md)), loaded as its own chunk and running under the unchanged production CSP; opened from the explorer, the command palette or ⌘T; text saved per tab and restored with the workspace.
+- Query tabs with a Monaco editor ([ADR 0007](docs/adr/0007-sql-editor.md)), loaded as its own chunk and running under the unchanged production CSP; opened from the explorer, the command palette, ⌘T or the "New query" button at the end of the tab strip (2026-11-19); text saved per tab and restored with the workspace.
 - Execution on one dedicated connection per tab over the simple/text protocol (the answer to the open question of [ADR 0004](docs/adr/0004-server-side-text-rendering.md)): run the selection or the whole script, statement by statement, several result sets, exact text values, a Messages list with status, kind, rows and time.
 - Dialect-aware statement splitting and classification in the backend.
 - Safeguards: confirmation before destructive statements (every non-read statement on Production), an impact guard that rolls back a row-changing statement above the connection's row threshold, a row cap per result, Stop, the first error stops the script.
