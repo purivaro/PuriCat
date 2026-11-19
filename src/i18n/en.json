@@ -674,7 +674,7 @@
     "newQuery": "New query",
     "newQueryHere": "New query on {{name}}",
     "needConnection": "Connect to a database first, then open a query tab.",
-    "chooseConnection": "Several connections are open. Choose one from the “New query” button at the end of the tabs.",
+    "chooseConnection": "Several connections are open. Choose one with the + button at the end of the tabs.",
     "run": "Run",
     "runHint": "Run the selection, or the whole script (⌘↵)",
     "stop": "Stop",

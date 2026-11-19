@@ -114,18 +114,20 @@ function QueryButton({ ref, ...rest }: ButtonHTMLAttributes<HTMLButtonElement> &
         ref={ref}
         type="button"
         data-new-query
+        aria-label={t("sql.newQuery")}
         {...rest}
-        className="mb-1 ml-1 inline-flex h-7 shrink-0 items-center gap-1 rounded-md pr-2.5 pl-1.5 text-xs font-medium whitespace-nowrap text-fg-muted transition-colors outline-none hover:bg-sunken hover:text-fg focus-visible:ring-2 focus-visible:ring-(--ring) data-[state=open]:bg-sunken data-[state=open]:text-fg"
+        className="mb-1 ml-1 inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors outline-none hover:bg-sunken hover:text-fg focus-visible:ring-2 focus-visible:ring-(--ring) data-[state=open]:bg-sunken data-[state=open]:text-fg"
       >
-        <Plus className="size-3.5" /> {t("sql.newQuery")}
+        <Plus className="size-4" />
       </button>
     </Tooltip>
   );
 }
 
 /**
- * "New query", always in view at the end of the tab strip. It opens on the connection of the
- * tab in front (as ⌘T does); with several connections open and none in front, it asks which.
+ * "New query": a plus after the last tab, as in a browser, always in view. It opens on the
+ * connection of the tab in front (as ⌘T does); with several connections open and none in
+ * front, it asks which.
  */
 function NewQueryButton() {
   const { t } = useTranslation();
