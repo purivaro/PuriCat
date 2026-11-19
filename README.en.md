@@ -22,7 +22,7 @@
 
 ![PuriCat: a PostgreSQL table next to the AI agent, which has read the data and proposed a change that waits for approval](docs/images/hero.png)
 
-> **Early development (v0.3).** PuriCat connects to **MySQL** and **PostgreSQL** servers and opens **SQLite** files, and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
+> **Early development (v0.4).** PuriCat connects to **MySQL** and **PostgreSQL** servers and opens **SQLite** files, and has been tested on **macOS on Apple Silicon** only. There is no Windows or Linux build yet. Until you trust it, use it on data you can afford to lose or with a read-only account. [STATUS.md](STATUS.md) lists every feature and how it was tested.
 
 ## Download
 
