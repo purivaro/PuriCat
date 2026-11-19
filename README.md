@@ -39,6 +39,8 @@
 2. เปิด PuriCat ได้เลย แอป **เซ็นด้วย Developer ID และผ่านการตรวจ (notarize) ของ Apple แล้ว** macOS จะถามครั้งเดียวว่าต้องการเปิดแอปที่ดาวน์โหลดจากอินเทอร์เน็ตหรือไม่ เหมือนแอปทั่วไป
 3. รหัสผ่านที่บันทึกไว้เก็บใน **Keychain ของ macOS** ไม่เขียนลงไฟล์
 
+**การอัปเดต** ตั้งแต่รุ่นถัดจาก 0.3.0 PuriCat จะตรวจหารุ่นใหม่เมื่อเปิดแอป และแสดงไว้ที่แถบสถานะด้านล่าง คุณเป็นคนเลือกว่าจะดาวน์โหลดเมื่อไรและเปิดแอปใหม่เมื่อไร การตรวจคือคำขอหนึ่งครั้งไปที่ github.com ซึ่งไม่ส่งข้อมูลของคุณหรือฐานข้อมูลของคุณ ไฟล์ที่ดาวน์โหลดจะถูกติดตั้งก็ต่อเมื่อมีลายเซ็นของ PuriCat และปิดการตรวจได้ในหน้าต่างเดียวกัน จะสั่งตรวจเองเมื่อไรก็ได้ โดยคลิกเลขรุ่นที่แถบสถานะ หรือเลือก **Check for Updates…** ในเมนู PuriCat ส่วนรุ่น 0.3.0 และเก่ากว่านั้นให้อัปเดตด้วยการดาวน์โหลดไฟล์ข้างบนอีกครั้ง
+
 ## ทำอะไรได้บ้าง
 
 ### แก้ไขตารางเหมือนตารางคำนวณ และอ่าน SQL ก่อนรัน
@@ -115,7 +117,7 @@ pnpm check          # ตรวจชนิดข้อมูล unit test, carg
 
 การทดสอบกับเซิร์ฟเวอร์ MySQL และ PostgreSQL จริง กับไฟล์ SQLite จริง และการทดสอบแบบ end-to-end ที่ขับหน้าต่างจริง อธิบายไว้ใน [TESTING.md](TESTING.md)
 
-การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มี (เช่นใน fork) จะเซ็นแบบ ad-hoc เท่านั้น ส่วน [`scripts/release-mac.sh`](scripts/release-mac.sh) ใช้สร้างไฟล์แบบเดียวกันด้วยมือบน Mac ที่มี Developer ID ใน Keychain (v0.1.0 ออกด้วยวิธีนี้ ก่อนจะตั้ง secrets)
+การออก release ทำโดย push tag เช่น `v0.2.0` แล้ว [`.github/workflows/release.yml`](.github/workflows/release.yml) จะสร้างแอป macOS แบบ universal และแนบเข้า release ให้ workflow เดียวกันนี้เผยแพร่ไฟล์อัปเดตและ manifest ที่แอปซึ่งติดตั้งแล้วใช้อัปเดตตัวเอง โดยเซ็นด้วยกุญแจใน secret `TAURI_SIGNING_PRIVATE_KEY` ([ADR 0020](docs/adr/0020-in-app-updates.md)) ถ้าไม่มีกุญแจนี้ การ build จาก tag จะล้มเหลว ถ้าตั้ง secrets สำหรับเซ็นของ Apple ไว้ใน repo (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) แอปจะถูกเซ็นและ notarize ให้ ถ้าไม่มี (เช่นใน fork) จะเซ็นแบบ ad-hoc เท่านั้น ส่วน [`scripts/release-mac.sh`](scripts/release-mac.sh) ใช้สร้างไฟล์แบบเดียวกันด้วยมือบน Mac ที่มี Developer ID ใน Keychain (v0.1.0 ออกด้วยวิธีนี้ ก่อนจะตั้ง secrets)
 
 เอกสารทั้งหมด (ภาษาอังกฤษ) อยู่ในตารางท้าย [README.en.md](README.en.md#documentation)
 

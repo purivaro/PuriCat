@@ -206,7 +206,7 @@ Remaining:
 
 - Security hardening and an independent review; dependency audit in CI.
 - Accessibility and contrast audit; performance work on large tables.
-- macOS signing, notarization, hardened runtime; signed auto-update.
+- macOS signing and notarization: done (releases since v0.1.0). Signed in-app updates: built ([ADR 0020](docs/adr/0020-in-app-updates.md), 2026-11-19), verified against stand-in servers; the first update of a released build through GitHub is still to be seen. Remaining: a review of the hardened runtime, release notes in the update dialog, looking for an update again while the app stays open.
 - Onboarding, privacy policy, release notes, generated third-party notices.
 - Reproducible release process. Windows follows after macOS stabilises.
 
