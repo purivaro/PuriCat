@@ -435,7 +435,7 @@ SQL console, in the real window on MySQL (between steps 9 and 10; stages `sql-co
 Before them, the "New query" button at the end of the tab strip (stage `new-query-menu` and the `new-query-button` log entry), with the MySQL and the PostgreSQL connection both open:
 
 - with the MySQL `orders` table tab in front, a click opens `Query 1` on that connection and that database (the tab's title is compared), without asking; the tab is closed again;
-- with the welcome tab in front, the button opens a menu instead, which must offer exactly the two connections; choosing PostgreSQL opens `Query 1` on it, on no particular database; that tab is closed and the table tab brought back in front.
+- with the welcome tab in front, the button opens a menu instead, which must offer exactly the two connections. ⌘T in the same state (a synthetic key event sent to the window, with the menu closed) must show the message that several connections are open, and open no query tab. Choosing PostgreSQL from the menu opens `Query 1` on it, on no particular database; that tab is closed and the table tab brought back in front.
 
 Then:
 
@@ -499,7 +499,7 @@ For the agent chat it does **not** cover: the real CLIs in any way; a turn witho
 
 It uses synthetic DOM events and empty passwords, so it does **not** cover: saving a password through the UI, restoring tabs after a relaunch, native keyboard shortcuts other than the palette (the grid's shortcuts are dispatched as synthetic `keydown` events, so Cmd+V, Cmd+Z and Cmd+S arriving from the operating system are untested), IME composition, drag selection, Shift+arrow selection, copy, the grid's context menu, drag-resizing, the explorer filter or arrow-key navigation. It also does not exercise the review dialog on a Production-labelled connection, the bulk-threshold trigger, a concurrent-edit conflict, the locked paging / sorting controls, the bulk tab closes, or the refusal to disconnect with unsaved edits. For Smart Paste it covers UPSERT on a single-column unique key on MySQL only: not INSERT or UPDATE mode, a composite or generated key, changing the mapping, key or update columns by hand, the header and `NULL`-text switches, the key picked after switching mode, an empty cell of a NOT NULL column taking its default, the progress bar, "Stop and roll back", the blocked dismissal of the dialog during a run, a run-time conflict, a Production-labelled connection, or PostgreSQL. Leaving rows out is exercised in UPSERT mode from the clipboard only: not for an existing key in INSERT mode, a missing key, a file as the source, more rows with problems than the list shows, or a paste in which nothing but problems is left.
 
-For the SQL console it covers MySQL only, with the text set programmatically. Not covered: typing into Monaco, running a selection, ⌘T and the palette's "New query", the "New query" button with a query tab in front, with a single connection open or with none (the message), and with more tabs than the strip can show, the Stop button, a lost connection, the row-cap selector and a capped result, the database selector actually switching database, confirming the destructive-statement dialog ("Run anyway"), the confirmation on a Production-labelled connection, "Roll back and close", the refusal to disconnect with a transaction open, completion, formatting, loading a history entry into the editor, "Clear history", the Export menu and the native Save dialog (the export goes straight to the IPC command), a result with several long or binary cells, restoring a query tab and its text after a relaunch, and any of it on PostgreSQL (the agent-chat steps open a PostgreSQL query tab with text and check that nothing ran; they run nothing in it).
+For the SQL console it covers MySQL only, with the text set programmatically. Not covered: typing into Monaco, running a selection, ⌘T where it opens a tab and the palette's "New query", the "New query" button with a query tab in front, with a single connection open or with none (the message), and with more tabs than the strip can show, the Stop button, a lost connection, the row-cap selector and a capped result, the database selector actually switching database, confirming the destructive-statement dialog ("Run anyway"), the confirmation on a Production-labelled connection, "Roll back and close", the refusal to disconnect with a transaction open, completion, formatting, loading a history entry into the editor, "Clear history", the Export menu and the native Save dialog (the export goes straight to the IPC command), a result with several long or binary cells, restoring a query tab and its text after a relaunch, and any of it on PostgreSQL (the agent-chat steps open a PostgreSQL query tab with text and check that nothing ran; they run nothing in it).
 
 ## Safety guarantees
 
@@ -527,20 +527,21 @@ macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Only what was run for this change
 | Check | Result |
 |---|---|
 | `pnpm check` (typecheck, Vitest, the Rust unit tests, the SQLite tests, `cargo fmt --check`, `cargo clippy -D warnings`) | Pass on the final code: 81 Vitest cases in 12 files (3 new, in `src/lib/newQuery.test.ts`); 97 Rust unit tests, 2 ignored |
-| `e2e/run.sh` (dev-server mode), the whole smoke test with the stage `new-query-menu` | Pass, twice, each with an empty `problems` list. The second run is on the final code: between the two, one attribute was added (the menu keeps 12 px from the window's edge) |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the stage `new-query-menu` | Pass, three times, each with an empty `problems` list. Between the first and the second, one attribute was added (the menu keeps 12 px from the window's edge); between the second and the third, the message of ⌘T and its step in the test. The third run is on the final code |
 | Screenshots (`SHOTS=1`) | Looked at by hand: the button after the last tab of a strip that has scrolled, with the menu of the two connections open under it and clear of the window's edge; the button in English and in Thai, in the light and the dark theme. Not an automated check |
 | The live database tests | Not run: no backend code changed |
 | `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Not run |
 
 Not verified:
 
-- ⌘T: it shares the function that chooses the target, which is unit-tested, but the shortcut itself is not pressed by any test;
+- ⌘T where it opens a tab (a tab in front, or a single connection): it shares the function that chooses the target, which is unit-tested, but the test sends the shortcut only in the state where it must open nothing, and as a synthetic event, not a keystroke from the operating system;
+- the message of ⌘T in Thai;
 - the button with a query tab in front, with a single connection open, and with none connected (the message);
 - the menu in Thai and in the dark theme, and with a SQLite connection among those listed;
 - the keyboard: reaching the button with Tab and choosing from the menu with the arrow keys;
 - the bundled app under the production CSP.
 
-Seen and not changed: with several connections open and none in front, ⌘T says "Connect to a database first, then open a query tab", which is the message for no connection at all. The button asks which connection instead.
+Found while writing this up, and fixed: with several connections open and none in front, ⌘T said "Connect to a database first, then open a query tab", the message for no connection at all. It now says that several are open and points to the button, which asks.
 
 ## Results — 2026-11-19 (Database menu)
 
@@ -868,7 +869,7 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Export through the Save dialog and the Export menu | The end-to-end test calls `export_result` directly; the menu being disabled during a run and a failing Save dialog are not exercised. XLSX cell types are not read back by any test (the unit test checks which texts convert; the runner checks that the Thai name is in the workbook). A JSON file from a result with two columns of one name is not written by a test (the key naming is unit-tested) |
 | History: masking on the `run_sql` path, loading an entry, "Clear history", deletion with the connection | The masking function and the store are unit-tested; the end-to-end test only lists the entries. `delete_connection` clearing the history is not asserted (the end-to-end test deletes a connection that has none). A literal after a double-quoted `"password"` identifier is not tested ([SECURITY.md](SECURITY.md)) |
 | Completion and formatting in the SQL editor | No automated test |
-| The "New query" button beyond two cases | The end-to-end test clicks it with a MySQL table tab in front and with the welcome tab in front while two connections are open. With a query tab in front, with a single connection, with none connected, the menu in Thai or dark or with a SQLite connection in it, and the keyboard: no test |
+| The "New query" button beyond two cases | The end-to-end test clicks it with a MySQL table tab in front and with the welcome tab in front while two connections are open (where it also sends ⌘T, for its message). With a query tab in front, with a single connection, with none connected, the menu in Thai or dark or with a SQLite connection in it, and the keyboard: no test |
 | ⌘T, the palette's "New query", running a selection; ⌘↵, ⇧⌘↵ and ⌘S as real keystrokes | No automated test for the first three; the end-to-end test uses the explorer menu and the Run button. The three shortcuts are exercised only as synthetic key events sent to the editor: that they arrive from the operating system (and are not taken by a menu or the web view) is not tested |
 | Saved scripts on PostgreSQL, after a relaunch, and with many scripts | The end-to-end stages use one MySQL connection, one script and one run of the app. The store is unit-tested; nothing in it depends on the engine |
 | A query tab's saved text and its restoration after a relaunch | No automated test, including the pending save that is dropped when the tab closes |
