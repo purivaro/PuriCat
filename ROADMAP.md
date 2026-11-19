@@ -8,7 +8,7 @@ Status on 2026-11-17. Phases follow the delivery plan in the [product brief](doc
 | 1 | Runnable foundation | Done |
 | 2 | Real database connectivity | Partial (remainder tracked as Phase 2b) |
 | 3 | Flagship editing | Partial (grid editing, the row filter and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
-| 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; CSV and Excel files open in Smart Paste, up to 10,000 rows; object editing, batched import and the rest are listed below) |
+| 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; CSV and Excel files open in Smart Paste, up to 10,000 rows; a first slice of object editing, creating a database from a form, is done; the rest of object editing, batched import and the other items are listed below) |
 | 5 | AI agent | Partial (CLI detection, an agent chat, and — off by default — database tools for the model: catalogue lookups, a read-only query, proposals the user approves, an activity log. Verified for Claude Code; no Codex turn with tools has been observed. Redaction, version checks and the gaps listed below remain) |
 | 6 | Backups | Not started |
 | 7 | Public beta | Not started |
@@ -104,7 +104,7 @@ The model now has tools, off by default ([ADR 0017](docs/adr/0017-ai-database-to
 
 After that, the next step for the AI is per-column redaction — rows can now leave the machine, cut for length only — and a policy per connection for what the AI may do.
 
-Files now open in Smart Paste (CSV and workbooks, read by `table_file` with `csv` and `calamine`), within its limit of 10,000 rows in one transaction. Lifting that limit is the remaining part of the Phase 4 import: several batches, a report of the rows that failed, and a long job that can be stopped. It reuses what exists (`db::smart` for matching, the console's dedicated connection and cancellation). It is independent of the AI work and can be taken in parallel. Object editing with DDL preview is the larger remaining Phase 4 item and can follow. The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination — can be taken alongside.
+Files now open in Smart Paste (CSV and workbooks, read by `table_file` with `csv` and `calamine`), within its limit of 10,000 rows in one transaction. Lifting that limit is the remaining part of the Phase 4 import: several batches, a report of the rows that failed, and a long job that can be stopped. It reuses what exists (`db::smart` for matching, the console's dedicated connection and cancellation). It is independent of the AI work and can be taken in parallel. Object editing with DDL preview is the larger remaining Phase 4 item; its first slice, creating a database, is done (2026-11-19), and the forms for tables, indexes and views can follow on the same rule ([ADR 0019](docs/adr/0019-schema-changes-through-forms.md)). The largest Phase 2b items (SQL Server, SSH tunnels, TLS verification) still wait on test infrastructure that is not available (see the blockers below). Phase 2b items that need none of it — cancelling browse queries with the console's canceller, keyset pagination — can be taken alongside.
 
 ## Phase 4 — SQL and schema: partial
 
@@ -124,6 +124,10 @@ Done (MySQL and PostgreSQL; evidence in [TESTING.md](TESTING.md), design in [ADR
 
 Verified in the backend on both engines; through the UI on MySQL only.
 
+Done, the first slice of object editing (2026-11-19; design in [ADR 0019](docs/adr/0019-schema-changes-through-forms.md)):
+
+- New database: "New database…" in the menu of a connected MySQL or PostgreSQL connection. A form with the name and the engine's options (character set and collation; owner, template and encoding), its lists read from that server; the exact `CREATE DATABASE` statement shown before it runs, built by the one function that also runs it; a read-only connection refused; the server's own message shown when it refuses. Not offered for SQLite. Verified in the backend on both engines (unit and live tests); through the UI in the end-to-end stage `new-database`, in dev mode ([TESTING.md](TESTING.md), "Results — 2026-11-19").
+
 Remaining:
 
 | Item | Notes |
@@ -136,7 +140,8 @@ Remaining:
 | Switching database inside a PostgreSQL tab | A PostgreSQL tab is bound to the database it was opened on |
 | Query parameters | Not started |
 | EXPLAIN view | `EXPLAIN` can be typed; its output is shown as an ordinary result |
-| Object editing (table, index, view) with DDL preview | Not started. DDL can be typed in a query tab |
+| Object editing (table, index, view) with DDL preview | Started with one form: creating a database (above). Remaining: forms for tables, indexes and views (create, alter, drop); for a database, rename, alter and drop, and the options the form leaves out (PostgreSQL locale / `LC_COLLATE` / `LC_CTYPE` / ICU, tablespace, connection limit, `IS_TEMPLATE`; MySQL `ENCRYPTION` and `READ ONLY`). Until then that DDL can be typed in a query tab |
+| New database: follow-ups and gaps | A record of what was created (it is in neither the SQL history nor a log); a typed confirmation on a Production-labelled connection, which today gets a warning and a danger-styled button only. Not verified: the bundled app, a read-only or Production-labelled connection through the UI, an account without the privilege, Thai and the dark theme, MySQL other than 9.3.0, MariaDB, PostgreSQL other than 16.13 |
 | Import of more than 10,000 rows | Not started. Files up to 10,000 rows open in Smart Paste (Phase 3, done). Beyond that an import needs batches, an error report per row and a job that can be stopped; a file is read whole into memory today |
 | SQL dump export | Not started |
 | Translating backend messages | Danger reasons, the lost-connection note, "Cancelled" and the history summary are English only |

@@ -74,6 +74,10 @@ PuriCat talks to the **Claude Code** or **Codex** command-line tool that you hav
 
 To use the agent, install [Claude Code](https://claude.com/claude-code) and sign in (`claude auth login`); PuriCat finds it by itself. Codex is supported the same way, but its tool calls have not been verified yet. What you send to the AI goes to that provider under your own account: [AI_INTEGRATION.md](AI_INTEGRATION.md) says exactly what is sent.
 
+### A new database, with its SQL in view
+
+Right-click a MySQL or PostgreSQL connection and choose *New database…*: give it a name, pick the character set and collation (MySQL) or the owner, template and encoding (PostgreSQL) from what that server offers, and read the exact `CREATE DATABASE` statement before it runs.
+
 ### SQLite files, opened carefully
 
 Open a `.db`, `.sqlite` or `.sqlite3` file — an app's data, a project's database — without a server or an account. A new SQLite connection is **read-only**: the file is opened so that it cannot be written, until you decide to edit. PuriCat also makes the checks SQLite does not: text that is not a number is refused for a column of numbers, instead of being stored without a word. [What works for SQLite, and its limits](DATABASE_COMPATIBILITY.md#sqlite--a-database-file).

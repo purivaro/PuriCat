@@ -1,6 +1,6 @@
 # Database compatibility
 
-Status on 2026-11-18. Labels: **Implemented & verified** (a test against a real server passed), **Implemented, not yet verified**, **Planned (Phase N)**.
+Status on 2026-11-19. Labels: **Implemented & verified** (a test against a real server passed), **Implemented, not yet verified**, **Planned (Phase N)**.
 
 ## Tested versions
 
@@ -68,7 +68,9 @@ SQLite has its own section, "SQLite — a database file", further down: what app
 | A query tab's lost connection is reported; the next run opens a new one | Implemented & verified in the backend (`KILL <id>` from another connection) | Implemented & verified in the backend (`pg_terminate_backend`) | Planned (Phase 4) |
 | Choose another database for a query tab | Implemented: the selector makes the next run open a new connection on that database (no automated test); `USE` inside a script is verified (live test) | Not available: a tab stays on the database it was opened on. Planned (Phase 4) | Planned (Phase 4) |
 | Export a result to CSV, JSON, XLSX | Implemented & verified (unit tests; CSV in the live test; all three in E2E) | Implemented & verified (unit tests; CSV in the live test); not through the UI | Planned (Phase 4) |
-| Object editing with DDL preview, import from CSV / XLSX, SQL dump export, EXPLAIN view | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
+| Create a database from a form that shows the exact statement (see "New database") | Implemented & verified (unit and live tests; through the UI in the E2E stage `new-database`, with a character set and a collation, and the same name refused) | Implemented & verified (unit and live tests; through the UI in the E2E stage `new-database`, with a template and an encoding) | Planned (Phase 4) |
+| Rename, alter or drop a database; create, alter or drop tables, indexes and views through a form | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
+| Import from CSV / XLSX, SQL dump export, EXPLAIN view | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Schema context for the agent chat (engine and version, database, tables and views with column names, types, key / NOT NULL / generated flags, row estimates; no rows) | Implemented, not yet verified on this engine (the same code reads the catalogue as for the structure view; no test reads the text of a MySQL context. The E2E stage `agent-mysql` sends one turn with a MySQL context and asserts only the context button's label) | Implemented & verified (unit test of the text; E2E: the context inspector and the prompt handed to the stand-in CLI, for a table tab in a non-`public` schema) | Planned |
 | Database tools for the AI, off by default: catalogue lookups (`list_tables`, `describe_table`; `list_schemas` where the engine has schemas) | Implemented & verified (live test; E2E through the UI at the "Structure" level, on a stand-in CLI: `list_tables` and `describe_table`, whose step opens to the structure the model was given) | Implemented & verified (live test; E2E through the UI at "Structure and rows", on a stand-in CLI; `list_schemas` is not called there) | Planned |
 | The AI's read-only query: one statement by its text, prepared by the server, in a `READ ONLY` transaction that is rolled back | Implemented & verified (live test: 18 write attempts refused, the data unchanged — among them version comments `/*! … */`, `INTO OUTFILE`, `LOAD_FILE`, and a text that is two statements only under `NO_BACKSLASH_ESCAPES`, stopped by the server's prepare); not through the UI — the E2E stage on this engine runs at the "Structure" level, where the query tool is not offered, and shows that no query step is made. A query can name another database the account can read | Implemented & verified (live test: 20 write attempts refused, the data unchanged — among them a data-modifying `WITH`, `EXPLAIN (ANALYZE) DELETE`, a function that writes, `nextval`, `COPY … TO PROGRAM`; E2E: a `DELETE` through the tool refused; two queries by the real Claude Code CLI in one manual turn through the window). Unqualified names resolve through the session's `search_path`, not the schema of the tab in front; the instructions for a turn with tools ask the model to write the schema, and nothing enforces it | Planned |
@@ -310,6 +312,45 @@ SQL console limitations:
 | Messages | Messages produced by the backend (danger reasons, "Cancelled", the lost-connection note, the history summary) are English only |
 | Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. Through the UI the console has been run on MySQL only |
 
+## New database
+
+Added on 2026-11-19 ([ADR 0019](docs/adr/0019-schema-changes-through-forms.md)). "New database…" in the menu of a connected MySQL or PostgreSQL connection opens a form. The form only chooses; the backend builds the one `CREATE DATABASE` statement (`db::ddl`), the form shows it as "Statement that will run", and the same function builds it again when it is run. Each engine gets its own options, and an option of the other engine is refused, not ignored.
+
+| Aspect | MySQL | PostgreSQL |
+|---|---|---|
+| Options in the form | Character set, collation | Owner, template, encoding |
+| Where the lists come from, read when the form opens | `information_schema.CHARACTER_SETS` and `COLLATIONS`; the server's defaults from `@@character_set_server` and `@@collation_server` | Owners: `pg_roles` without the `pg_…` roles, and `current_user`. Templates: the databases marked as templates. Encodings: those a database can be stored in — encoding ids 0 to 34; the client-only ones (`SJIS`, `BIG5`, …) are left out — and the encoding of `template1` |
+| The first entry of each list | "Server default (…)" naming the server's value; for the collation, once a character set is chosen, that character set's default. Adds nothing to the statement | "You (…)" for the owner, "template1 (default)", "Same as the template (…)" for the encoding. Adds nothing to the statement |
+| How the lists depend on each other | Choosing a character set narrows the collations to that character set and clears the chosen collation. With no character set chosen, the collations of the server's default character set are listed | They do not. A hint under the encoding says that an encoding other than the template's needs `template0`; the server decides |
+| The statement | ``CREATE DATABASE `name` [CHARACTER SET cs] [COLLATE co]`` | `CREATE DATABASE "name" [OWNER "role"] [TEMPLATE "db"] [ENCODING 'enc']` |
+| How it is run | One statement on a connection of the session's pool | One statement on a pooled connection to the database the session was opened on, outside a transaction (`CREATE DATABASE` cannot run inside one) |
+| Read-only connection | The form says so and its button is disabled; the command refuses; and the server refuses on its own (verified below the UI) | The same (verified below the UI) |
+| Refusals by the server, shown in the form in the server's words | A name that exists, an unknown character set (both verified); a missing privilege (not tried) | A name that exists, a role that does not exist (both verified); an encoding the template's locale does not allow (the live test tries `LATIN1` with `template0` and accepts either answer: created, or refused in words that name the encoding, after which `UTF8` is created); a missing privilege (not tried) |
+| After creation | The connection's database list is read again and the new database is in it | The same |
+
+Rules of the statement, the same on both engines:
+
+- **The name** is trimmed and then quoted as one identifier (backticks or double quotes doubled). Spaces, Thai letters and the quote character itself are part of the name: a database named with all three is created and found again under exactly that name on both engines (live test). An empty name, a name with a NUL character and a name that is too long are refused before anything is sent: more than 64 characters on MySQL, more than 63 bytes on PostgreSQL (63 ASCII letters, 21 Thai ones).
+- **A character set, collation or encoding** is a keyword to the server, not an identifier, so the identifier quoting does not apply to it. It must consist of ASCII letters, digits, `_` and `-`, at most 64 of them; anything else is refused before anything is sent. The lists in the form only ever offer what the server named, so the rule matters for a request that does not come from the form.
+- **Owner and template** are quoted identifiers.
+
+**Why SQLite has no such form.** A SQLite connection is one file, and that file is its one database, `main`: there is nothing to create inside it. The menu item is not shown for a SQLite connection, and the backend refuses both the option lists and the creation (verified). Creating a new database *file* is a different feature and is not built (see "SQLite — a database file").
+
+Limits:
+
+| Limitation | Detail |
+|---|---|
+| Creation only | No drop, rename or alter of a database, and no form for tables, indexes or views. Planned (Phase 4); the SQL can be typed in a query tab |
+| PostgreSQL options left out | Everything but owner, template and encoding: among them `LC_COLLATE`, `LC_CTYPE`, the locale provider and ICU locale, tablespace, connection limit and `IS_TEMPLATE`. A database gets the locale of its template |
+| MySQL options left out | `ENCRYPTION` and `READ ONLY` |
+| PostgreSQL templates | Only databases marked as templates are offered, although PostgreSQL lets a superuser or the owner copy any database |
+| PostgreSQL encodings | The cut-off between encodings for databases and encodings for clients only (id 34) is a constant of PostgreSQL's source, written into PuriCat; it is not read from the server. Checked on 16.13 only. A value the server does not accept is refused by the server |
+| PostgreSQL names longer than 63 bytes | Refused by PuriCat before a statement exists (unit test). PostgreSQL itself would shorten such a name to 63 bytes and say so only in a notice, so the database would get another name than the statement shows. The limit assumes a server built with the usual `NAMEDATALEN` of 64; a name of exactly 63 bytes has not been sent to a server |
+| Owner | Any role that is not a `pg_…` role is offered, including roles the connected role may not hand a database to; the server refuses those |
+| Privileges | Tested with accounts that may create databases. The refusal for an account that may not has not been seen |
+| No record | The statement is not written to the SQL history or to any log |
+| Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only. MariaDB and other versions are untested; the form relies on `information_schema.CHARACTER_SETS` / `COLLATIONS` and on the `pg_encoding_to_char` function |
+
 ## Object classification
 
 | Engine | Shown under Tables | Shown under Views |
@@ -372,6 +413,7 @@ Added on 2026-11-18 ([ADR 0018](docs/adr/0018-sqlite-files.md)). A connection is
 | Estimated row count | Not available: SQLite keeps none |
 | Exact row count, asked for and stoppable | Implemented & verified in the backend; not through the UI |
 | Tables without a primary key | Read-only in the grid (rows can be added), as on the other engines. The row id is not offered as a key |
+| "New database…" in the connection's menu | Not offered: the file is its one database, so there is nothing to create inside it; the backend refuses as well (verified). See "New database" |
 | Create a database file; attached databases; encrypted databases | Not built |
 
 ### Types: a declared type is a suggestion
