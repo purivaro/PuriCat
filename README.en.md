@@ -78,6 +78,8 @@ To use the agent, install [Claude Code](https://claude.com/claude-code) and sign
 
 Right-click a MySQL or PostgreSQL connection and choose *New database…*: give it a name, pick the character set and collation (MySQL) or the owner, template and encoding (PostgreSQL) from what that server offers, and read the exact `CREATE DATABASE` statement before it runs.
 
+The same right-click menus look after a database later on. *Edit database…* changes the default character set and collation (MySQL) or the name and the owner (PostgreSQL). *Drop database…* tells you how many tables and views are inside and stays locked until you type the database's name. *Open SQL file…* puts a `.sql` file into a new query tab without running it, and a MySQL connection has *Flush* (Privileges, Tables, Logs, Status). In each case you read the exact statement before it runs.
+
 ### SQLite files, opened carefully
 
 Open a `.db`, `.sqlite` or `.sqlite3` file — an app's data, a project's database — without a server or an account. A new SQLite connection is **read-only**: the file is opened so that it cannot be written, until you decide to edit. PuriCat also makes the checks SQLite does not: text that is not a number is refused for a column of numbers, instead of being stored without a word. [What works for SQLite, and its limits](DATABASE_COMPATIBILITY.md#sqlite--a-database-file).
