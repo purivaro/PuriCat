@@ -351,6 +351,96 @@
     await waitFor(() => !dbRowOf("Demo PostgreSQL", "puricat_e2e_renamed"), "the database gone from the explorer");
     log.push({ stage: "database-menu", flushPlan, flushToast, renamePlan });
 
+    // ---- the table menu: definition, rename, empty, drop --------------------------------
+    const tableDialog = (kind) => document.querySelector(kind ? `[data-table-dialog="${kind}"]` : "[data-table-dialog]");
+    const tableButton = (label) => all("[data-table-dialog] button").find((b) => b.textContent.trim() === label);
+    const tablePlan = () => tableDialog()?.querySelector("[data-ddl-preview]")?.textContent.trim();
+    const tableMenu = async (connectionName, name, item) => {
+      await rightClick(await waitFor(() => dbRowOf(connectionName, name), `${name} in the explorer`));
+      await click(await waitFor(() => menuItem(item), `${item} of ${name}`), item);
+    };
+    // A table of the test's own, made behind the UI's back and found by refreshing.
+    const scratchId = (await invoke("list_connections")).find((c) => c.engine === "mysql").id;
+    const scratchSql = async (sql) => {
+      const outcome = await invoke("run_sql", { id: scratchId, tab: "e2e-scratch", database: "puricat_e2e", sql, options: { maxRows: 10, changeLimit: null } });
+      await invoke("close_console", { tab: "e2e-scratch" });
+      const failed = outcome.statements.find((s) => s.status !== "ok");
+      if (failed) throw new Error(`scratch statement ${failed.status}: ${JSON.stringify(failed).slice(0, 300)}`);
+      return outcome;
+    };
+    await scratchSql("CREATE TABLE e2e_scratch (id INT PRIMARY KEY AUTO_INCREMENT, note VARCHAR(40) NOT NULL); INSERT INTO e2e_scratch (note) VALUES ('หนึ่ง'), ('two')");
+    await dbMenu("Demo MySQL", "puricat_e2e", "Refresh");
+
+    // Definition: MySQL's own statement, which opens in a query tab without running
+    await rightClick(await waitFor(() => dbRowOf("Demo MySQL", "e2e_scratch"), "the scratch table in the explorer"));
+    const tableMenuItems = (await waitFor(() => menuItem("Definition…") && all(`[role="menu"]${OPEN} [role="menuitem"]`), "table menu")).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    await click(menuItem("Definition…"), "definition");
+    const definition = await waitFor(() => tableDialog("definition")?.querySelector("[data-definition]")?.textContent, "the table's definition", 15000);
+    if (!definition.startsWith("CREATE TABLE `e2e_scratch` (")) throw new Error(`definition: ${definition}`);
+    const definitionSource = tableDialog().querySelector("[data-definition-source]").textContent.trim();
+    await stage("table-definition", { tableMenuItems, definition, definitionSource });
+    await click(tableButton("Open in query tab"), "open the definition in a query tab");
+    await waitFor(() => !tableDialog(), "definition dialog to close");
+    const definitionTab = await waitFor(() => document.querySelector(`${panelSel} [data-sql-tab]`)?.__editor?.getValue(), "the definition in a query tab", 30000);
+    if (definitionTab !== definition) throw new Error(`the query tab holds ${JSON.stringify(definitionTab)}`);
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the definition's tab");
+
+    // PostgreSQL has no such statement: the text is put together from the catalogue, and says so
+    await tableMenu("Demo PostgreSQL", "orders", "Definition…");
+    const pgDefinition = await waitFor(() => tableDialog("definition")?.querySelector("[data-definition]")?.textContent, "the postgres definition", 15000);
+    if (!pgDefinition.startsWith('CREATE TABLE "shop"."orders" (') || !/CONSTRAINT \S+ PRIMARY KEY \(id\)/.test(pgDefinition)) throw new Error(`postgres definition: ${pgDefinition}`);
+    const pgDefinitionSource = tableDialog().querySelector("[data-definition-source]").textContent.trim();
+    if (!pgDefinitionSource.includes("pg_dump")) throw new Error(`postgres definition note: ${pgDefinitionSource}`);
+    await click(tableButton("Close"), "close the definition");
+    await waitFor(() => !tableDialog(), "definition dialog to close");
+
+    // Rename: nothing to run until the name differs, then the exact statement
+    await tableMenu("Demo MySQL", "e2e_scratch", "Rename…");
+    await waitFor(() => tableDialog("rename") && field("New name").value === "e2e_scratch", "the rename form");
+    const renameBefore = { disabled: tableButton("Rename").disabled, empty: tableDialog().querySelector("[data-ddl-preview-empty]")?.textContent.trim() };
+    if (!renameBefore.disabled) throw new Error("rename was enabled with the old name");
+    await type(field("New name"), "e2e_scratch2");
+    const tableRenamePlan = await waitFor(tablePlan, "rename statement");
+    if (tableRenamePlan !== "RENAME TABLE `puricat_e2e`.`e2e_scratch` TO `puricat_e2e`.`e2e_scratch2`") throw new Error(`rename statement: ${tableRenamePlan}`);
+    await waitFor(() => !tableButton("Rename").disabled, "rename button");
+    await click(tableButton("Rename"), "rename table");
+    await waitFor(() => !tableDialog(), "rename dialog to close", 15000);
+    await waitFor(() => dbRowOf("Demo MySQL", "e2e_scratch2") && !dbRowOf("Demo MySQL", "e2e_scratch"), "the new name in the explorer");
+
+    // Empty: only after the name was typed; the table's open tab then shows no rows
+    await click(dbRowOf("Demo MySQL", "e2e_scratch2"), "open the scratch table");
+    await waitFor(() => gridCells().includes("หนึ่ง"), "the scratch table's rows");
+    await tableMenu("Demo MySQL", "e2e_scratch2", "Empty table…");
+    const emptyPlan = await waitFor(() => tableDialog("empty") && tablePlan(), "empty statement");
+    if (emptyPlan !== "TRUNCATE TABLE `puricat_e2e`.`e2e_scratch2`") throw new Error(`empty statement: ${emptyPlan}`);
+    const confirmName = () => tableDialog().querySelector("input");
+    const emptyStates = [tableButton("Empty table").disabled];
+    await type(confirmName(), "e2e_scratch");
+    emptyStates.push(tableButton("Empty table").disabled);
+    await type(confirmName(), "e2e_scratch2");
+    await waitFor(() => !tableButton("Empty table").disabled, "empty button once the name is typed");
+    if (emptyStates.some((disabled) => !disabled)) throw new Error("the empty button was enabled before the name was typed");
+    await click(tableButton("Empty table"), "empty table");
+    await waitFor(() => !tableDialog(), "empty dialog to close", 15000);
+    await waitFor(() => !activePanel().textContent.includes("หนึ่ง"), "the open tab to read the emptied table again");
+    const leftRows = Number((await scratchSql("SELECT COUNT(*) FROM e2e_scratch2")).statements[0].results[0].rows[0][0]);
+    if (leftRows !== 0) throw new Error(`${leftRows} rows left after emptying`);
+
+    // Drop: the table goes from the explorer and its tab closes
+    await tableMenu("Demo MySQL", "e2e_scratch2", "Drop table…");
+    const tableDropPlan = await waitFor(() => tableDialog("drop") && tablePlan(), "drop table statement");
+    if (tableDropPlan !== "DROP TABLE `puricat_e2e`.`e2e_scratch2`") throw new Error(`drop table statement: ${tableDropPlan}`);
+    const tableDropContents = await waitFor(() => /closed/.test(tableDialog().querySelector("[data-table-contents]")?.textContent) && tableDialog().querySelector("[data-table-contents]").textContent.trim(), "what dropping takes with it");
+    const tableDropDisabled = tableButton("Drop table").disabled;
+    await type(confirmName(), "e2e_scratch2");
+    await waitFor(() => !tableButton("Drop table").disabled, "drop table button once the name is typed");
+    if (!tableDropDisabled) throw new Error("the drop table button was enabled before the name was typed");
+    await stage("table-drop", { tableDropPlan, tableDropContents });
+    await click(tableButton("Drop table"), "drop table");
+    await waitFor(() => !tableDialog(), "drop table dialog to close", 15000);
+    await waitFor(() => !dbRowOf("Demo MySQL", "e2e_scratch2") && !all('[role="tab"]').some((x) => x.title.startsWith("e2e_scratch2")), "the table gone from the explorer and its tab closed");
+    log.push({ stage: "table-menu", pgDefinition, pgDefinitionSource, renameBefore, tableRenamePlan, emptyPlan });
+
     // ---- backups: a database's menu, a folder of the user's choice, the history, a schedule
     const backupDialog = () => document.querySelector("[data-backup-dialog]");
     const inBackup = (sel) => backupDialog()?.querySelector(sel);

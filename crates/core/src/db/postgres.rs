@@ -387,7 +387,6 @@ impl PgSession {
         tx.commit().await.map_err(Error::database)
     }
 
-    /// Run a read-only query whose columns are all text.
     /// Close this session's own connections to `database`: the server refuses to drop or
     /// rename a database that anyone, PuriCat included, is still connected to.
     pub async fn release(&self, database: &str) {
@@ -405,13 +404,189 @@ impl PgSession {
     /// Run one statement that is not a query and has no parameters (DDL from a form), on
     /// the session's own database and outside any transaction.
     pub async fn execute_statement(&self, sql: &str) -> Result<()> {
+        self.execute_on(&self.home, sql).await
+    }
+
+    /// The same, on `database`: a table is changed from inside the database that holds it.
+    pub async fn execute_on(&self, database: &str, sql: &str) -> Result<()> {
         sqlx::raw_sql(sql)
-            .execute(&self.pool(&self.home).await?)
+            .execute(&self.pool(database).await?)
             .await
             .map_err(Error::database)?;
         Ok(())
     }
 
+    /// The statements that would create a table or a view as it is now. PostgreSQL has no
+    /// statement that prints them: a view's is its stored query under a `CREATE VIEW` line,
+    /// and a table's is put together from the catalogue with the server's own `pg_get_…`
+    /// functions. Not included: owner, grants, row-level-security policies, storage
+    /// parameters, inheritance and the options of identity sequences.
+    pub async fn table_definition(&self, table: &TableRef, kind: ObjectKind) -> Result<String> {
+        let schema = super::require_schema(table.schema.as_deref())?;
+        let name = format!(
+            "{}.{}",
+            ident::postgres(schema)?,
+            ident::postgres(&table.name)?
+        );
+        let kinds = if kind == ObjectKind::Table {
+            "'r', 'p'"
+        } else {
+            "'v', 'm'"
+        };
+        let found = self
+            .query_text(
+                &table.database,
+                &format!(
+                    "SELECT c.oid::text, c.relkind::text, c.relpersistence::text,
+                            CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END,
+                            quote_literal(obj_description(c.oid, 'pg_class'))
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ({kinds})"
+                ),
+                &[Some(schema.to_string()), Some(table.name.clone())],
+            )
+            .await?;
+        let mut found = found
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NotFound(format!("Table {}", table.name)))?
+            .into_iter();
+        let mut next = || found.next().flatten();
+        let oid = [next()];
+        let (relkind, persistence, partition_key, comment) = (
+            next().unwrap_or_default(),
+            next().unwrap_or_default(),
+            next(),
+            next(),
+        );
+        // One column of text per row, read by the object's oid.
+        let lines = |sql: &'static str| async {
+            let rows = self.query_text(&table.database, sql, &oid).await?;
+            Ok::<_, Error>(
+                rows.into_iter()
+                    .filter_map(|r| r.into_iter().next().flatten())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let ended = |s: String| format!("{};", s.trim_end().trim_end_matches(';'));
+
+        let mut parts: Vec<String> = Vec::new();
+        let word = match relkind.as_str() {
+            "v" => "VIEW",
+            "m" => "MATERIALIZED VIEW",
+            _ => "TABLE",
+        };
+        if kind == ObjectKind::Table {
+            let columns = self
+                .query_text(
+                    &table.database,
+                    "SELECT quote_ident(a.attname), format_type(a.atttypid, a.atttypmod),
+                            CASE WHEN a.attcollation <> t.typcollation
+                                 THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) END,
+                            a.attidentity::text, a.attgenerated::text,
+                            pg_get_expr(d.adbin, d.adrelid), a.attnotnull::text
+                     FROM pg_attribute a
+                     JOIN pg_type t ON t.oid = a.atttypid
+                     LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                     LEFT JOIN pg_collation co ON co.oid = a.attcollation
+                     LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
+                     WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped
+                     ORDER BY a.attnum",
+                    &oid,
+                )
+                .await?;
+            let mut body: Vec<String> = Vec::with_capacity(columns.len());
+            for c in columns {
+                let cell = |i: usize| c.get(i).cloned().flatten().unwrap_or_default();
+                let mut line = format!("    {} {}", cell(0), cell(1));
+                if !cell(2).is_empty() {
+                    line.push_str(&format!(" COLLATE {}", cell(2)));
+                }
+                match (cell(3).as_str(), cell(4).as_str()) {
+                    ("a", _) => line.push_str(" GENERATED ALWAYS AS IDENTITY"),
+                    ("d", _) => line.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
+                    (_, "s") => {
+                        line.push_str(&format!(" GENERATED ALWAYS AS ({}) STORED", cell(5)))
+                    }
+                    _ if !cell(5).is_empty() => line.push_str(&format!(" DEFAULT {}", cell(5))),
+                    _ => {}
+                }
+                if cell(6) == "true" {
+                    line.push_str(" NOT NULL");
+                }
+                body.push(line);
+            }
+            // Primary key, unique, check and exclusion constraints, then foreign keys.
+            body.extend(
+                lines(
+                    "SELECT '    CONSTRAINT ' || quote_ident(conname) || ' ' || pg_get_constraintdef(oid, true)
+                     FROM pg_constraint
+                     WHERE conrelid = $1::oid AND contype IN ('p', 'u', 'c', 'x', 'f')
+                     ORDER BY array_position(ARRAY['p', 'u', 'c', 'x', 'f'], contype::text), conname",
+                )
+                .await?,
+            );
+            let unlogged = if persistence == "u" { "UNLOGGED " } else { "" };
+            let mut create = format!("CREATE {unlogged}TABLE {name} (\n{}\n)", body.join(",\n"));
+            if let Some(key) = partition_key {
+                create.push_str(&format!("\nPARTITION BY {key}"));
+            }
+            parts.push(ended(create));
+        } else {
+            let query = lines("SELECT pg_get_viewdef($1::oid, true)").await?;
+            parts.push(ended(format!(
+                "CREATE {word} {name} AS\n{}",
+                query.concat()
+            )));
+        }
+
+        // Indexes that are not the ones a constraint above creates by itself.
+        let indexes = lines(
+            "SELECT pg_get_indexdef(i.indexrelid)
+             FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
+             WHERE i.indrelid = $1::oid
+               AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid)
+             ORDER BY ic.relname",
+        )
+        .await?;
+        let triggers = lines(
+            "SELECT pg_get_triggerdef(oid, true) FROM pg_trigger
+             WHERE tgrelid = $1::oid AND NOT tgisinternal ORDER BY tgname",
+        )
+        .await?;
+        let mut comments: Vec<String> = comment
+            .into_iter()
+            .map(|text| format!("COMMENT ON {word} {name} IS {text};"))
+            .collect();
+        comments.extend(
+            self.query_text(
+                &table.database,
+                "SELECT quote_ident(a.attname), quote_literal(col_description(a.attrelid, a.attnum))
+                 FROM pg_attribute a
+                 WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped
+                   AND col_description(a.attrelid, a.attnum) IS NOT NULL
+                 ORDER BY a.attnum",
+                &oid,
+            )
+            .await?
+            .into_iter()
+            .filter_map(|r| match (r.first().cloned().flatten(), r.get(1).cloned().flatten()) {
+                (Some(column), Some(text)) => Some(format!("COMMENT ON COLUMN {name}.{column} IS {text};")),
+                _ => None,
+            }),
+        );
+        for group in [indexes, triggers] {
+            if !group.is_empty() {
+                parts.push(group.into_iter().map(ended).collect::<Vec<_>>().join("\n"));
+            }
+        }
+        if !comments.is_empty() {
+            parts.push(comments.join("\n"));
+        }
+        Ok(parts.join("\n\n"))
+    }
+
+    /// Run a read-only query whose columns are all text.
     pub async fn query_text(
         &self,
         database: &str,

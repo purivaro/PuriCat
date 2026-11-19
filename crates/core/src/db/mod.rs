@@ -65,7 +65,7 @@ pub struct Namespace {
     pub system: bool,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ObjectKind {
     Table,
@@ -526,6 +526,40 @@ impl Session {
         match self {
             Session::MySql(s) => s.execute_statement(sql).await?,
             _ => unreachable!("refused by ddl::flush"),
+        }
+        Ok(sql)
+    }
+
+    /// The statements that would create a table or a view as it is now, and where the text
+    /// comes from. Reads only.
+    pub async fn table_definition(
+        &self,
+        table: &TableRef,
+        kind: ObjectKind,
+    ) -> Result<ddl::Definition> {
+        use ddl::DefinitionSource::{Catalogue, File, Server};
+        let (sql, source) = match self {
+            Session::MySql(s) => (s.table_definition(table, kind).await?, Server),
+            Session::Postgres(s) => (s.table_definition(table, kind).await?, Catalogue),
+            Session::Sqlite(s) => (s.table_definition(table, kind).await?, File),
+        };
+        Ok(ddl::Definition { sql, source })
+    }
+
+    /// The exact statement `table_change` would run, for the form's preview.
+    pub fn table_change_sql(&self, change: &ddl::TableChange) -> Result<String> {
+        ddl::table_change(self.engine(), change)
+    }
+
+    /// Rename, empty or drop a table or a view. Returns the statement that ran.
+    pub async fn table_change(&self, change: &ddl::TableChange) -> Result<String> {
+        let sql = self.table_change_sql(change)?;
+        let database = &change.table().database;
+        match self {
+            Session::MySql(s) => s.execute_statement(&sql).await?,
+            // From inside the database that holds the table, not the one the session opened on.
+            Session::Postgres(s) => s.execute_on(database, &sql).await?,
+            Session::Sqlite(s) => s.execute_statement(database, &sql).await?,
         }
         Ok(sql)
     }

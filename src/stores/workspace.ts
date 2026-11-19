@@ -105,6 +105,12 @@ interface WorkspaceState {
   hasUnsavedFor: (connectionId: string) => boolean;
   /** Unsaved edits in a table of this database, or an open transaction in a query tab on it. */
   hasUnsavedInDatabase: (connectionId: string, database: string) => boolean;
+  /** How many times each table tab was told from outside to read its rows again. */
+  reloads: Record<string, number>;
+  /** A table was changed from outside its tab (emptied): the tab, if open, reads it again. */
+  reloadTable: (connectionId: string, table: TableRef) => void;
+  /** A table was renamed or dropped: its tab closes. */
+  tableGone: (connectionId: string, table: TableRef) => void;
   /** Close even if dirty (after the user confirmed). */
   forceClose: (id: string) => void;
   cancelClose: () => void;
@@ -301,5 +307,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     },
     databaseGone: (connectionId, database, to) =>
       commit(databaseGoneIn(get().tabs, get().activeId, connectionId, database, to)),
+    reloads: {},
+    reloadTable: (connectionId, table) => {
+      const id = tableTabId(connectionId, table);
+      set((s) => ({ reloads: { ...s.reloads, [id]: (s.reloads[id] ?? 0) + 1 } }));
+    },
+    tableGone: (connectionId, table) => commit(closeTabIn(get().tabs, get().activeId, tableTabId(connectionId, table))),
   };
 });

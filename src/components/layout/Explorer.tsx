@@ -5,12 +5,14 @@ import {
   Database,
   DatabaseBackup,
   DatabaseZap,
+  Eraser,
   Eye,
   FileCode2,
   FolderTree,
   HardDriveDownload,
   Lock,
   Pencil,
+  PencilLine,
   Plug,
   Plus,
   RefreshCw,
@@ -35,7 +37,7 @@ import { fullPlace } from "../../lib/connection";
 import { errorMessage, ipc } from "../../lib/ipc";
 import type { ConnectionView, DbObject, FlushKind, Namespace } from "../../lib/types";
 import { type Loadable, nodeKey, sessionOf, useConnections } from "../../stores/connections";
-import { useUi } from "../../stores/ui";
+import { type TableTask, useUi } from "../../stores/ui";
 import { tableTabId, useWorkspace } from "../../stores/workspace";
 import { EngineTag, EnvBadge } from "../Brand";
 import {
@@ -226,6 +228,7 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                 const table = { database, schema, name: o.name };
                 const active = activeId === tableTabId(connection.id, table);
                 const Icon = o.kind === "table" ? Table2 : Eye;
+                const ask = (kind: TableTask["kind"]) => useUi.getState().askTableTask({ kind, connection, table, objectKind: o.kind });
                 return (
                   <Row
                     key={o.name}
@@ -240,11 +243,30 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                         <ContextMenu.Item className={menuItemClass} onSelect={() => openTable(connection.id, table, o.kind)}>
                           <Table2 className="size-3.5" /> {t("explorer.openData")}
                         </ContextMenu.Item>
+                        <ContextMenu.Item className={menuItemClass} onSelect={() => ask("definition")}>
+                          <FileCode2 className="size-3.5" /> {t("schema.definition")}
+                        </ContextMenu.Item>
                         <ContextMenu.Item
                           className={menuItemClass}
                           onSelect={() => void clipboard.write(o.name).then(() => toast.success(t("common.copied")))}
                         >
                           <Copy className="size-3.5" /> {t("explorer.copyName")}
+                        </ContextMenu.Item>
+                        <ContextMenu.Separator className={menuSeparatorClass} />
+                        {/* SQLite cannot rename a view. */}
+                        {(o.kind === "table" || connection.engine !== "sqlite") && (
+                          <ContextMenu.Item className={menuItemClass} onSelect={() => ask("rename")}>
+                            <PencilLine className="size-3.5" /> {t("schema.renameTable")}
+                          </ContextMenu.Item>
+                        )}
+                        {o.kind === "table" && (
+                          <ContextMenu.Item className={menuItemClass} onSelect={() => ask("empty")}>
+                            <Eraser className="size-3.5" /> {t("schema.emptyTable")}
+                          </ContextMenu.Item>
+                        )}
+                        <ContextMenu.Separator className={menuSeparatorClass} />
+                        <ContextMenu.Item className={cn(menuItemClass, menuDangerClass)} onSelect={() => ask("drop")}>
+                          <Trash2 className="size-3.5" /> {t(o.kind === "table" ? "schema.dropTable" : "schema.dropView")}
                         </ContextMenu.Item>
                       </>
                     }

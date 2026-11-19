@@ -335,7 +335,27 @@ impl MySqlSession {
         tx.commit().await.map_err(Error::database)
     }
 
-    /// Run a read-only query whose columns are all text.
+    /// The server's own `CREATE` statement for a table or a view.
+    pub async fn table_definition(&self, table: &TableRef, kind: ObjectKind) -> Result<String> {
+        let what = if kind == ObjectKind::Table {
+            "TABLE"
+        } else {
+            "VIEW"
+        };
+        let sql = format!(
+            "SHOW CREATE {what} {}.{}",
+            ident::mysql(&table.database)?,
+            ident::mysql(&table.name)?
+        );
+        // Both answers hold the statement in their second column.
+        self.query_text(&sql, &[])
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().nth(1).flatten())
+            .ok_or_else(|| Error::NotFound(format!("Table {}", table.name)))
+    }
+
     /// Run one statement that is not a query and has no parameters (DDL from a form).
     pub async fn execute_statement(&self, sql: &str) -> Result<()> {
         sqlx::raw_sql(sql)
@@ -345,6 +365,7 @@ impl MySqlSession {
         Ok(())
     }
 
+    /// Run a read-only query whose columns are all text.
     pub async fn query_text(
         &self,
         sql: &str,

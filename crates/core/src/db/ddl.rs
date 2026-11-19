@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ident;
+use super::{ident, ObjectKind, TableRef};
 use crate::model::Engine;
 use crate::{Error, Result};
 
@@ -66,17 +66,17 @@ pub struct DatabaseOptions {
     pub default_encoding: Option<String>,
 }
 
-/// How long a database name may be. MySQL counts characters. PostgreSQL counts bytes, and
-/// silently shortens a longer name: the database would get another name than the statement
-/// shows, so the limit is enforced here and not left to the server.
-fn check_length(engine: Engine, name: &str) -> Result<()> {
+/// How long the name of a database or a table may be. MySQL counts characters. PostgreSQL
+/// counts bytes, and silently shortens a longer name: the object would get another name than
+/// the statement shows, so the limit is enforced here and not left to the server.
+fn check_length(engine: Engine, what: &str, name: &str) -> Result<()> {
     let (length, most, unit) = match engine {
         Engine::Postgres => (name.len(), 63, "bytes"),
         _ => (name.chars().count(), 64, "characters"),
     };
     if length > most {
         return Err(Error::Invalid(format!(
-            "A database name can be at most {most} {unit} long; this one is {length}"
+            "A {what} name can be at most {most} {unit} long; this one is {length}"
         )));
     }
     Ok(())
@@ -136,7 +136,7 @@ pub fn create_database(engine: Engine, spec: &NewDatabase) -> Result<String> {
     if name.is_empty() {
         return Err(Error::Invalid("The database needs a name".into()));
     }
-    check_length(engine, name)?;
+    check_length(engine, "database", name)?;
     match engine {
         Engine::Mysql => {
             refuse(&spec.owner, "An owner", "MySQL")?;
@@ -264,7 +264,7 @@ pub fn alter_database(engine: Engine, spec: &AlterDatabase) -> Result<Vec<String
                 ));
             }
             if let Some(new_name) = clean(&spec.new_name).filter(|n| *n != name) {
-                check_length(engine, new_name)?;
+                check_length(engine, "database", new_name)?;
                 statements.push(format!(
                     "ALTER DATABASE {} RENAME TO {}",
                     ident::postgres(name)?,
@@ -316,6 +316,141 @@ pub fn flush(engine: Engine, what: Flush) -> Result<&'static str> {
         Flush::Logs => "FLUSH LOGS",
         Flush::Status => "FLUSH STATUS",
     })
+}
+
+/// Where the text of a definition comes from, so the form can say how far to trust it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DefinitionSource {
+    /// The server's own statement (MySQL's `SHOW CREATE`).
+    Server,
+    /// Put together from the catalogue: PostgreSQL has no statement that prints a table.
+    Catalogue,
+    /// The text SQLite keeps in the file.
+    File,
+}
+
+/// The statements that would create a table or a view as it is now. Read, never run.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Definition {
+    pub sql: String,
+    pub source: DefinitionSource,
+}
+
+/// A change to one table or view, chosen in a form of the explorer's table menu.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum TableChange {
+    #[serde(rename_all = "camelCase")]
+    Rename {
+        table: TableRef,
+        kind: ObjectKind,
+        new_name: String,
+    },
+    /// Remove every row. Tables only.
+    Empty {
+        table: TableRef,
+    },
+    Drop {
+        table: TableRef,
+        kind: ObjectKind,
+    },
+}
+
+impl TableChange {
+    /// The table or view the change is made to, as the server lists it now.
+    pub fn table(&self) -> &TableRef {
+        match self {
+            TableChange::Rename { table, .. }
+            | TableChange::Empty { table }
+            | TableChange::Drop { table, .. } => table,
+        }
+    }
+}
+
+/// The table's name as the engine addresses it: with its database (MySQL) or its schema
+/// (PostgreSQL). A SQLite file is one database, so the name stands alone.
+fn table_name(engine: Engine, table: &TableRef) -> Result<String> {
+    match engine {
+        Engine::Mysql => Ok(format!(
+            "{}.{}",
+            ident::mysql(&table.database)?,
+            ident::mysql(&table.name)?
+        )),
+        Engine::Postgres => Ok(format!(
+            "{}.{}",
+            ident::postgres(super::require_schema(table.schema.as_deref())?)?,
+            ident::postgres(&table.name)?
+        )),
+        Engine::Sqlite => ident::sqlite(&table.name),
+        Engine::Sqlserver => Err(unsupported(engine)),
+    }
+}
+
+/// `TABLE`, `VIEW` or `MATERIALIZED VIEW`, for an engine that has that kind of object.
+fn object_word(engine: Engine, kind: ObjectKind) -> Result<&'static str> {
+    match (kind, engine) {
+        (ObjectKind::Table, _) => Ok("TABLE"),
+        (ObjectKind::View, _) => Ok("VIEW"),
+        (ObjectKind::Matview, Engine::Postgres) => Ok("MATERIALIZED VIEW"),
+        (ObjectKind::Matview, _) => Err(Error::Unsupported(
+            "Only PostgreSQL has materialized views".into(),
+        )),
+    }
+}
+
+/// The statement for `change`. One statement: no `IF EXISTS`, no `CASCADE` — what stands in
+/// the way is the server's to say.
+pub fn table_change(engine: Engine, change: &TableChange) -> Result<String> {
+    if engine == Engine::Sqlserver {
+        return Err(unsupported(engine));
+    }
+    let name = table_name(engine, change.table())?;
+    match change {
+        TableChange::Rename {
+            table,
+            kind,
+            new_name,
+        } => {
+            let word = object_word(engine, *kind)?;
+            let new_name = new_name.trim();
+            if new_name.is_empty() {
+                return Err(Error::Invalid("The new name is empty".into()));
+            }
+            if new_name == table.name {
+                return Err(Error::Invalid("That is its name already".into()));
+            }
+            check_length(engine, "table", new_name)?;
+            match engine {
+                // MySQL renames views with the same statement, and names the database on
+                // both sides: without it the new name would go to the session's database.
+                Engine::Mysql => Ok(format!(
+                    "RENAME TABLE {name} TO {}.{}",
+                    ident::mysql(&table.database)?,
+                    ident::mysql(new_name)?
+                )),
+                Engine::Postgres => Ok(format!(
+                    "ALTER {word} {name} RENAME TO {}",
+                    ident::postgres(new_name)?
+                )),
+                _ if *kind == ObjectKind::View => Err(Error::Unsupported(
+                    "SQLite cannot rename a view. Drop it and create it again under the new name."
+                        .into(),
+                )),
+                _ => Ok(format!(
+                    "ALTER TABLE {name} RENAME TO {}",
+                    ident::sqlite(new_name)?
+                )),
+            }
+        }
+        // SQLite has no TRUNCATE: a DELETE without a condition is its way to empty a table.
+        TableChange::Empty { .. } if engine == Engine::Sqlite => Ok(format!("DELETE FROM {name}")),
+        TableChange::Empty { .. } => Ok(format!("TRUNCATE TABLE {name}")),
+        TableChange::Drop { kind, .. } => {
+            Ok(format!("DROP {} {name}", object_word(engine, *kind)?))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -549,5 +684,217 @@ mod tests {
         let parsed: Flush = serde_json::from_str("\"status\"").unwrap();
         assert_eq!(parsed, Flush::Status);
         assert!(serde_json::from_str::<Flush>("\"hosts; DROP DATABASE x\"").is_err());
+    }
+
+    fn at(database: &str, schema: Option<&str>, name: &str) -> TableRef {
+        TableRef {
+            database: database.into(),
+            schema: schema.map(Into::into),
+            name: name.into(),
+        }
+    }
+
+    fn rename(table: TableRef, kind: ObjectKind, new_name: &str) -> TableChange {
+        TableChange::Rename {
+            table,
+            kind,
+            new_name: new_name.into(),
+        }
+    }
+
+    #[test]
+    fn table_statements_per_engine() {
+        let my = at("shop", None, "orders");
+        let pg = at("app", Some("shop"), "orders");
+        let lite = at("main", None, "orders");
+        let all = [
+            (Engine::Mysql, &my),
+            (Engine::Postgres, &pg),
+            (Engine::Sqlite, &lite),
+        ];
+        let run = |engine, change: TableChange| table_change(engine, &change).unwrap();
+
+        // rename: the new name is trimmed
+        let renamed = |engine, table: &TableRef, kind| {
+            run(engine, rename(table.clone(), kind, "  orders_2026 "))
+        };
+        assert_eq!(
+            renamed(Engine::Mysql, &my, ObjectKind::Table),
+            "RENAME TABLE `shop`.`orders` TO `shop`.`orders_2026`"
+        );
+        assert_eq!(
+            renamed(Engine::Mysql, &my, ObjectKind::View),
+            "RENAME TABLE `shop`.`orders` TO `shop`.`orders_2026`"
+        );
+        assert_eq!(
+            renamed(Engine::Postgres, &pg, ObjectKind::Table),
+            r#"ALTER TABLE "shop"."orders" RENAME TO "orders_2026""#
+        );
+        assert_eq!(
+            renamed(Engine::Postgres, &pg, ObjectKind::View),
+            r#"ALTER VIEW "shop"."orders" RENAME TO "orders_2026""#
+        );
+        assert_eq!(
+            renamed(Engine::Postgres, &pg, ObjectKind::Matview),
+            r#"ALTER MATERIALIZED VIEW "shop"."orders" RENAME TO "orders_2026""#
+        );
+        assert_eq!(
+            renamed(Engine::Sqlite, &lite, ObjectKind::Table),
+            r#"ALTER TABLE "orders" RENAME TO "orders_2026""#
+        );
+
+        // empty
+        let emptied: Vec<String> = all
+            .iter()
+            .map(|(engine, table)| {
+                run(
+                    *engine,
+                    TableChange::Empty {
+                        table: (*table).clone(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            emptied,
+            [
+                "TRUNCATE TABLE `shop`.`orders`",
+                r#"TRUNCATE TABLE "shop"."orders""#,
+                r#"DELETE FROM "orders""#
+            ]
+        );
+
+        // drop
+        let dropped = |engine, table: &TableRef, kind| {
+            run(
+                engine,
+                TableChange::Drop {
+                    table: table.clone(),
+                    kind,
+                },
+            )
+        };
+        assert_eq!(
+            dropped(Engine::Mysql, &my, ObjectKind::Table),
+            "DROP TABLE `shop`.`orders`"
+        );
+        assert_eq!(
+            dropped(Engine::Mysql, &my, ObjectKind::View),
+            "DROP VIEW `shop`.`orders`"
+        );
+        assert_eq!(
+            dropped(Engine::Postgres, &pg, ObjectKind::Matview),
+            r#"DROP MATERIALIZED VIEW "shop"."orders""#
+        );
+        assert_eq!(
+            dropped(Engine::Sqlite, &lite, ObjectKind::View),
+            r#"DROP VIEW "orders""#
+        );
+    }
+
+    #[test]
+    fn nothing_typed_can_leave_a_table_statement() {
+        // A table that already has a hostile name, and a hostile new name for it.
+        let hostile = "x`\"; DROP TABLE users; --";
+        assert_eq!(
+            table_change(
+                Engine::Mysql,
+                &rename(at("a`b", None, hostile), ObjectKind::Table, hostile.trim_end_matches('-'))
+            )
+            .unwrap(),
+            "RENAME TABLE `a``b`.`x``\"; DROP TABLE users; --` TO `a``b`.`x``\"; DROP TABLE users;`"
+        );
+        assert_eq!(
+            table_change(
+                Engine::Postgres,
+                &TableChange::Drop {
+                    table: at("app", Some("s\"x"), hostile),
+                    kind: ObjectKind::Table
+                }
+            )
+            .unwrap(),
+            r#"DROP TABLE "s""x"."x`""; DROP TABLE users; --""#
+        );
+        assert_eq!(
+            table_change(
+                Engine::Sqlite,
+                &TableChange::Empty {
+                    table: at("main", None, hostile)
+                }
+            )
+            .unwrap(),
+            r#"DELETE FROM "x`""; DROP TABLE users; --""#
+        );
+    }
+
+    #[test]
+    fn refuses_table_changes_that_cannot_be() {
+        let my = at("shop", None, "orders");
+        let pg = at("app", Some("shop"), "orders");
+        let invalid = |engine, change: TableChange| {
+            matches!(table_change(engine, &change), Err(Error::Invalid(_)))
+        };
+        let unsupported = |engine, change: TableChange| {
+            matches!(table_change(engine, &change), Err(Error::Unsupported(_)))
+        };
+
+        // a new name that is empty, unchanged, too long, or holds a NUL
+        for (engine, table) in [(Engine::Mysql, &my), (Engine::Postgres, &pg)] {
+            assert!(invalid(
+                engine,
+                rename(table.clone(), ObjectKind::Table, "   ")
+            ));
+            assert!(invalid(
+                engine,
+                rename(table.clone(), ObjectKind::Table, " orders ")
+            ));
+            assert!(invalid(
+                engine,
+                rename(table.clone(), ObjectKind::Table, "a\0b")
+            ));
+        }
+        assert!(invalid(
+            Engine::Mysql,
+            rename(my.clone(), ObjectKind::Table, &"n".repeat(65))
+        ));
+        assert!(table_change(
+            Engine::Mysql,
+            &rename(my.clone(), ObjectKind::Table, &"ก".repeat(64))
+        )
+        .is_ok());
+        // PostgreSQL would shorten a longer name without saying so.
+        assert!(invalid(
+            Engine::Postgres,
+            rename(pg.clone(), ObjectKind::Table, &"n".repeat(64))
+        ));
+        assert!(table_change(
+            Engine::Postgres,
+            &rename(pg.clone(), ObjectKind::Table, &"ก".repeat(21))
+        )
+        .is_ok());
+
+        // PostgreSQL needs the schema
+        assert!(invalid(
+            Engine::Postgres,
+            TableChange::Empty {
+                table: at("app", None, "orders")
+            }
+        ));
+        // what an engine does not have
+        assert!(unsupported(
+            Engine::Mysql,
+            TableChange::Drop {
+                table: my.clone(),
+                kind: ObjectKind::Matview
+            }
+        ));
+        assert!(unsupported(
+            Engine::Sqlite,
+            rename(at("main", None, "v"), ObjectKind::View, "w")
+        ));
+        assert!(unsupported(
+            Engine::Sqlserver,
+            TableChange::Empty { table: my }
+        ));
     }
 }

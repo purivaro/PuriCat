@@ -339,6 +339,57 @@ impl SqliteSession {
         tx.commit().await.map_err(Error::database)
     }
 
+    /// The statements SQLite keeps in the file for a table or a view, followed by those of
+    /// its indexes and triggers. Indexes SQLite made by itself have no text and are left out.
+    pub async fn table_definition(&self, table: &TableRef, kind: ObjectKind) -> Result<String> {
+        only_main(&table.database)?;
+        let name = [Some(table.name.clone())];
+        let kind = if kind == ObjectKind::Table {
+            "table"
+        } else {
+            "view"
+        };
+        let own = self
+            .query_text(
+                &format!("SELECT sql FROM main.sqlite_master WHERE type = '{kind}' AND name = ?"),
+                &name,
+            )
+            .await?;
+        let own = own
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NotFound(format!("Table {}", table.name)))?;
+        let around = self
+            .query_text(
+                "SELECT sql FROM main.sqlite_master
+                 WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
+                 ORDER BY type, name",
+                &name,
+            )
+            .await?;
+        Ok(std::iter::once(own)
+            .chain(around)
+            .filter_map(|row| row.into_iter().next().flatten())
+            .map(|sql| format!("{};", sql.trim_end().trim_end_matches(';')))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
+
+    /// Run one statement that is not a query and has no parameters (a change from a form).
+    pub async fn execute_statement(&self, database: &str, sql: &str) -> Result<()> {
+        only_main(database)?;
+        if self.read_only {
+            return Err(Error::Invalid(
+                "This file is opened read-only. Turn off the read-only session in the connection's settings to change it.".into(),
+            ));
+        }
+        sqlx::raw_sql(sql)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::database)?;
+        Ok(())
+    }
+
     /// Run a read-only query whose columns are all text.
     pub async fn query_text(
         &self,

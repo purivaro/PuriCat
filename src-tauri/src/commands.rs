@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use puricat_core::db::console::{RunOptions, RunOutcome, Status};
 use puricat_core::db::ddl::{
-    self, AlterDatabase, DatabaseDetails, DatabaseOptions, Flush, NewDatabase,
+    self, AlterDatabase, DatabaseDetails, DatabaseOptions, Definition, Flush, NewDatabase,
+    TableChange,
 };
 use puricat_core::db::export::{self, Format};
 use puricat_core::db::filter::Filter;
@@ -20,8 +21,8 @@ use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
 use puricat_core::db::write::{ApplyResult, CellValue, ChangeSet, Statement};
 use puricat_core::db::{
-    CellContent, DbObject, Namespace, PageRequest, RowCount, RowPage, ServerInfo, Session,
-    TableMeta, TableRef,
+    CellContent, DbObject, Namespace, ObjectKind, PageRequest, RowCount, RowPage, ServerInfo,
+    Session, TableMeta, TableRef,
 };
 use puricat_core::model::{ConnectionProfile, Engine};
 use puricat_core::secrets::password_key;
@@ -432,6 +433,50 @@ pub async fn drop_database(
     session.drop_database_sql(&name)?;
     state.release_consoles(&id, &name).await;
     session.drop_database(&name).await
+}
+
+/// The statements that would create a table or a view as it is now. Reads only.
+#[tauri::command]
+pub async fn table_definition(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    kind: ObjectKind,
+) -> Result<Definition> {
+    state
+        .session(&id)
+        .await?
+        .table_definition(&table, kind)
+        .await
+}
+
+/// The exact statement a form of the table menu would run. Runs nothing.
+#[tauri::command]
+pub async fn plan_table_change(
+    state: State<'_, AppState>,
+    id: String,
+    change: TableChange,
+) -> Result<String> {
+    state.session(&id).await?.table_change_sql(&change)
+}
+
+/// Rename, empty or drop a table or a view. Returns the statement that ran. Emptying and
+/// dropping destroy data: `typed` is what the user typed to confirm, checked here too.
+#[tauri::command]
+pub async fn apply_table_change(
+    state: State<'_, AppState>,
+    id: String,
+    change: TableChange,
+    typed: Option<String>,
+) -> Result<String> {
+    refuse_read_only(&state, &id, "change a table").await?;
+    let destroys = !matches!(change, TableChange::Rename { .. });
+    if destroys && typed.as_deref() != Some(change.table().name.as_str()) {
+        return Err(Error::Invalid(
+            "Type the table's name exactly as it is shown to confirm.".into(),
+        ));
+    }
+    state.session(&id).await?.table_change(&change).await
 }
 
 /// The exact `FLUSH` statement of a MySQL connection's menu. Runs nothing.

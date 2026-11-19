@@ -94,6 +94,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [inspect, setInspect] = useState<Cell | null>(null);
   const [load, setLoad] = useState<Load>({ status: "idle" });
   const [reloads, setReloads] = useState(0);
+  // The table was changed outside this tab (emptied from the explorer's menu).
+  const outside = useWorkspace((s) => s.reloads[tab.id] ?? 0);
   const request = useRef(0);
 
   // Staged edits for the loaded page, with undo history. Nothing reaches the database until Save.
@@ -133,7 +135,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       });
     // `page` is intentionally not a dependency: it only gates the first load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, filters, reloads]);
+  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, filters, reloads, outside]);
 
   // A closed session invalidates what is on screen.
   useEffect(() => {
@@ -165,7 +167,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       if (countJob.current) void ipc.cancelJob(countJob.current);
       countJob.current = null;
     };
-  }, [tab.connectionId, tab.table, filters, reloads, connected]);
+  }, [tab.connectionId, tab.table, filters, reloads, outside, connected]);
   const countRows = () => {
     const job = crypto.randomUUID();
     countJob.current = job;

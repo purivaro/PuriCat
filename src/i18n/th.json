@@ -900,6 +900,47 @@
     "prodFlushWarning": "คำสั่งนี้จะรันบนเซิร์ฟเวอร์ที่ใช้งานจริง (PRODUCTION)",
     "run": "รัน",
     "running": "กำลังรัน…",
-    "flushed": "รัน {{statement}} แล้ว"
+    "flushed": "รัน {{statement}} แล้ว",
+    "definition": "คำสั่งสร้าง (Definition)…",
+    "definitionTitle": "คำสั่งสร้างของ “{{name}}”",
+    "definitionFrom": {
+      "server": "คำสั่งจากเซิร์ฟเวอร์เอง (SHOW CREATE)",
+      "file": "ข้อความที่ SQLite เก็บไว้ในไฟล์ ตามด้วย index และ trigger ของตาราง",
+      "catalogue": "PuriCat ประกอบขึ้นจาก catalogue เพราะ PostgreSQL ไม่มีคำสั่งสำหรับเรื่องนี้ ไม่รวมเจ้าของ สิทธิ์ (grants) นโยบาย row-level security ค่า storage และการสืบทอดตาราง ถ้าต้องการฉบับที่ครบถ้วนให้ใช้ pg_dump"
+    },
+    "openInQueryTab": "เปิดในแท็บคิวรี",
+    "renameTable": "เปลี่ยนชื่อ…",
+    "renameTableTitle": "เปลี่ยนชื่อ “{{name}}”",
+    "newName": "ชื่อใหม่",
+    "renameEmpty": "พิมพ์ชื่ออื่นเพื่อดูคำสั่ง",
+    "renameAction": "เปลี่ยนชื่อ",
+    "renaming": "กำลังเปลี่ยนชื่อ…",
+    "tableRenamed": "“{{from}}” เปลี่ยนชื่อเป็น “{{to}}” แล้ว",
+    "emptyTable": "ล้างข้อมูลในตาราง…",
+    "emptyTableTitle": "ล้างข้อมูลใน “{{name}}”?",
+    "emptyAbout": {
+      "mysql": "ทุกแถวในตารางจะถูกลบ TRUNCATE มีผลทันที ย้อนกลับ (rollback) ไม่ได้ และ AUTO_INCREMENT จะเริ่มนับใหม่ตั้งแต่ต้น",
+      "postgres": "ทุกแถวในตารางจะถูกลบและกู้คืนไม่ได้ ตัวนับ identity และ serial ยังคงค่าเดิม ถ้ามีตารางอื่นอ้างถึงตารางนี้ด้วย foreign key เซิร์ฟเวอร์จะปฏิเสธ",
+      "sqlite": "ทุกแถวในตารางจะถูกลบและกู้คืนไม่ได้ SQLite ไม่มี TRUNCATE จึงรัน DELETE แทน และ trigger ของตารางจะทำงาน"
+    },
+    "emptyAction": "ล้างข้อมูล",
+    "emptying": "กำลังล้างข้อมูล…",
+    "tableEmptied": "ล้างข้อมูลใน “{{name}}” แล้ว",
+    "dropTable": "ลบตาราง…",
+    "dropView": "ลบ view…",
+    "dropTableTitle": "ลบ “{{name}}”?",
+    "dropAbout": {
+      "table": "ตารางจะถูกลบออกจากเซิร์ฟเวอร์พร้อมทั้งแถวข้อมูล index และ trigger และกู้คืนไม่ได้ ถ้ามี view หรือ foreign key ที่ต้องใช้ตารางนี้ เซิร์ฟเวอร์อาจปฏิเสธ",
+      "view": "ลบเฉพาะ view เท่านั้น ข้อมูลในตารางที่ view อ่านยังอยู่ครบ ถ้ามี view อื่นที่ต้องใช้ view นี้ เซิร์ฟเวอร์อาจปฏิเสธ",
+      "matview": "materialized view และผลลัพธ์ที่เก็บไว้จะถูกลบ ข้อมูลในตารางต้นทางยังอยู่ครบ"
+    },
+    "dropTableAction": "ลบตาราง",
+    "dropViewAction": "ลบ view",
+    "tableDropped": "ลบ “{{name}}” แล้ว",
+    "holdsNoRows": "ตารางนี้ไม่มีข้อมูล",
+    "holdsRows_other": "มีข้อมูลประมาณ {{count}} แถว",
+    "closesTab": "แท็บของตารางนี้ที่เปิดอยู่จะถูกปิด",
+    "unsavedTable": "มีแท็บของตารางนี้ที่ยังไม่ได้บันทึกการแก้ไข กรุณาบันทึกหรือยกเลิกก่อน",
+    "prodTableWarning": "คำสั่งนี้จะรันบนเซิร์ฟเวอร์ที่ใช้งานจริง (PRODUCTION)"
   }
 }
