@@ -96,6 +96,8 @@ pub fn run() {
             backups::run_backup,
             backups::list_backup_runs,
             backups::reveal_backup,
+            backups::restore_plan,
+            backups::restore_backup,
             updates::check_update,
             updates::install_update,
             updates::restart_app,

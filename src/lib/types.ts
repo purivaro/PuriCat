@@ -488,6 +488,17 @@ export interface BackupRun {
   removedAt: number | null;
 }
 
+/** What restoring a backup into a new database would do, before anything runs. */
+export interface RestorePlan {
+  /** The exact `CREATE DATABASE` statement. */
+  statement: string;
+  /** The program that loads the backup, with its version: `mysql 9.3.0`. */
+  client: string;
+  clientPath: string;
+  /** A failed or stopped load leaves the new database empty (PostgreSQL) or not (MySQL). */
+  allOrNothing: boolean;
+}
+
 export interface BackupAgent {
   supported: boolean;
   needed: boolean;

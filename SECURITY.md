@@ -304,7 +304,7 @@ SQL console limitations:
 
 ## Subprocess policy
 
-Subprocesses are started from Rust, never from the web view, with a fixed argument vector. The probes and the chat turns have a timeout and kill-on-drop; the `kill` helper, a backup (which can take as long as the database is large, and has a Stop button) and the short system tools of the last rows have none.
+Subprocesses are started from Rust, never from the web view, with a fixed argument vector. The probes and the chat turns have a timeout and kill-on-drop; the `kill` helper, a backup and a restore (which can take as long as the database is large, and have a Stop button) and the short system tools of the last rows have none.
 
 | Command | Purpose | stdin | Timeout |
 |---|---|---|---|
@@ -316,7 +316,8 @@ Subprocesses are started from Rust, never from the web view, with a fixed argume
 | `<puricat> --mcp-bridge <socket>` | Not started by PuriCat: the CLI starts it as its MCP server in a turn with the database tools. PuriCat's own executable, which in this mode only copies its stdin to the turn's socket and the socket to its stdout | The CLI's MCP requests | None of its own. It ends when the CLI closes its input or when the socket closes with the turn. Whether Stop's process-group kill reaches it depends on how the CLI started it; that was not examined |
 | `mysqldump --version`, `mariadb-dump --version`, `pg_dump --version` (every one found) | Which dump tools are installed, and their versions, when a backup dialog opens or a backup starts | Closed | 8 s |
 | `mysqldump --defaults-file=<file> … -- <database>` / `pg_dump … --dbname=<database>` (the vectors are in `crates/core/src/backup.rs`) | One backup. The password is in the option file or in `PGPASSWORD`, never an argument | Closed | None; Stop kills it |
-| `pg_restore --list <file>` | Checks a PostgreSQL archive before it is kept | Closed | 120 s |
+| `pg_restore --list <file>` | Checks a PostgreSQL archive before it is kept, and again before it is restored | Closed | 120 s |
+| `mysql --defaults-file=<file> … -- <database>` (or `mariadb`) / `psql … --dbname=<database> --single-transaction` / `pg_restore … --dbname=<database> --single-transaction <file>` (the vectors are in `crates/core/src/restore.rs`) | One restore, into a database PuriCat created for it. The client is the one installed next to the dump tool. The password is in the option file or in `PGPASSWORD`, never an argument | The unpacked dump, then closed; closed for `pg_restore`, which reads the file itself | None; Stop kills it |
 | `/bin/launchctl bootstrap` / `bootout` / `print gui/<uid>[/<label>]` | Installs, removes and looks at the LaunchAgent of scheduled backups | Closed | None |
 | `/usr/bin/open -R -- <file>` | "Show in Finder" for a backup recorded in the history | Closed | None |
 | `/usr/bin/osascript -e … <title> <text>` | A notification when a scheduled backup failed; started by the runner | Closed | None |
@@ -446,7 +447,16 @@ How it is built is in [ADR 0021](docs/adr/0021-backups-with-dump-tools.md); what
 
 **Deleting.** Only files recorded in the history as made by a schedule are ever deleted, only beyond the number to keep, and only after a newer backup was kept. A backup made by hand is never deleted.
 
-Not done: encryption of backup files; a restore inside the app and its confirmations; confining the folder; a time limit for a scheduled run; a check of the dump tool's origin.
+**A restore creates a database and replaces nothing** ([ADR 0022](docs/adr/0022-restore-into-a-new-database.md)).
+
+- The only target is a database that `restore_backup` creates itself, with a `CREATE DATABASE` that has no `IF NOT EXISTS`. A name that is taken is refused by PuriCat and, were that check skipped, by the server. No command of this feature drops, truncates or replaces anything, also after a failure.
+- **The web view names a run of the history and a new name; it never names a file.** The backend loads only the file that run recorded, only for the connection the run belongs to, and only while the file has the size that was recorded. A script in the web view can therefore create databases on a connection that is open and not read-only, filled from that connection's own backups; it cannot load anything else.
+- **The size is not a signature.** No checksum of a backup is stored. Whoever can write to the backup folder can change a backup, keep its size and its closing line, and have its SQL run with the connection's rights at the next restore — into the new database, but a dump is a script: it can name other databases the account may write to. The folder is as trusted as the connection.
+- The client is the one installed next to the dump tool, started as the dump tool is: a fixed argument vector, no shell, a cleared environment, the password in MySQL's private option file or in `PGPASSWORD`. Its error output is shown to the user; the tests check that a refused password is not in it.
+- After a failed or stopped load PostgreSQL's new database is empty (one transaction); MySQL's holds what was loaded up to then. The message says which, and that the database is still there. PuriCat does not drop it.
+- A read-only connection cannot restore. A Production-labelled one gets a warning and a danger-styled button, as for a new database; there is no typed confirmation, because nothing existing is at stake.
+
+Not done: encryption of backup files; a restore over an existing database and its confirmations; a checksum of a backup; a record of restores; confining the folder; a time limit for a scheduled run; a check of the dump tool's origin.
 
 ## App updates
 

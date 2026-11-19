@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { fileName, fromTimeInput, scheduleOf, sizeText, toTimeInput } from "./schedule";
+import { fileName, fromTimeInput, restoredName, scheduleOf, sizeText, toTimeInput } from "./schedule";
 
 describe("backup schedule form", () => {
   it("turns the form into the schedule that is saved", () => {
@@ -19,6 +19,19 @@ describe("backup schedule form", () => {
     expect(fromTimeInput("23:59")).toEqual({ hour: 23, minute: 59 });
     expect(fromTimeInput("")).toEqual({ hour: 0, minute: 0 });
     expect(fromTimeInput("25:70")).toEqual({ hour: 0, minute: 0 });
+  });
+
+  it("offers a name for the restored database that is never the source's own", () => {
+    const at = new Date(2026, 10, 19, 14, 5, 9);
+    expect(restoredName("shopdb", at)).toBe("shopdb_restored_20261119_1405");
+    // A long name is cut so that the whole stays within 63 bytes; Thai letters are cut whole.
+    const long = restoredName("a".repeat(80), at);
+    expect(long).toBe(`${"a".repeat(40)}_restored_20261119_1405`);
+    expect(new TextEncoder().encode(long).length).toBe(63);
+    const thai = restoredName("ฐานข้อมูลของวัดและโรงเรียนพระปริยัติธรรม", at);
+    expect(thai.endsWith("_restored_20261119_1405")).toBe(true);
+    expect(new TextEncoder().encode(thai).length).toBeLessThanOrEqual(63);
+    expect(thai.startsWith("ฐานข้อมูลของ")).toBe(true);
   });
 
   it("previews the file name the backend will give", () => {

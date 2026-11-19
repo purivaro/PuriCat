@@ -82,9 +82,9 @@ Right-click a MySQL or PostgreSQL connection and choose *New database…*: give 
 
 The same right-click menus look after a database later on. *Edit database…* changes the default character set and collation (MySQL) or the name and the owner (PostgreSQL). *Drop database…* tells you how many tables and views are inside and stays locked until you type the database's name. *Open SQL file…* puts a `.sql` file into a new query tab without running it, and a MySQL connection has *Flush* (Privileges, Tables, Logs, Status). In each case you read the exact statement before it runs.
 
-### Backups, by hand and on a schedule
+### Backups, by hand and on a schedule, and a restore into a new database
 
-Right-click a database → **Back up…** makes a backup with the database's own tool (`mysqldump` or `pg_dump`, which must be installed) into **a folder you choose**, and shows which tool it found and whether it fits the server. A file is kept only after it was checked to be complete; a backup that fails or is stopped leaves nothing behind. In the same dialog you can have the backup made **every day or on chosen days**, also while PuriCat is closed, and say how many to keep. Restoring is done with the same tools, outside PuriCat: [BACKUP_RESTORE.md](BACKUP_RESTORE.md) has the commands and the limits. Backup files are not encrypted.
+Right-click a database → **Back up…** makes a backup with the database's own tool (`mysqldump` or `pg_dump`, which must be installed) into **a folder you choose**, and shows which tool it found and whether it fits the server. A file is kept only after it was checked to be complete; a backup that fails or is stopped leaves nothing behind. In the same dialog you can have the backup made **every day or on chosen days**, also while PuriCat is closed, and say how many to keep. Every backup in the dialog's history has **Restore…**, which loads it into a **new database** on the same connection, so that you can look at it beside the original: nothing that exists is replaced. Replacing an existing database is done with the same tools, outside PuriCat: [BACKUP_RESTORE.md](BACKUP_RESTORE.md) has the commands and the limits. Backup files are not encrypted.
 
 ### SQLite files, opened carefully
 
@@ -106,7 +106,7 @@ The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY
 
 ## Not there yet
 
-SQL Server, SSH tunnels, creating and altering tables, imports of more than 10,000 rows, restoring a backup from inside the app, encrypted backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+SQL Server, SSH tunnels, creating and altering tables, imports of more than 10,000 rows, restoring a backup over an existing database, encrypted backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
 
 ## Build from source
 

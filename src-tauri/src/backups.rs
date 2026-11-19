@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use puricat_core::backup::{self, BackupRequest, Choice, Format};
 use puricat_core::backup_schedule::{self, Schedule, Subject};
-use puricat_core::model::Engine;
+use puricat_core::db::ddl::NewDatabase;
+use puricat_core::db::Session;
+use puricat_core::model::{ConnectionProfile, Engine};
+use puricat_core::restore;
 use puricat_core::secrets::password_key;
 use puricat_core::store::{now_ms, BackupJob, BackupRun, Store};
 use puricat_core::{Error, Result};
@@ -520,6 +523,211 @@ pub async fn reveal_backup(state: State<'_, AppState>, run: i64) -> Result<()> {
     {
         Err(Error::Unsupported(format!("The file is {file}")))
     }
+}
+
+// ---- restoring a backup into a new database --------------------------------------------
+
+/// What the restore dialog shows before anything runs.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePlan {
+    /// The exact `CREATE DATABASE` statement that makes the database the backup goes into.
+    statement: String,
+    /// The program that loads the backup, with its version.
+    client: String,
+    client_path: String,
+    /// A failed or stopped load leaves the new database empty (PostgreSQL) or not (MySQL).
+    all_or_nothing: bool,
+}
+
+/// Everything a restore needs, checked: the run is a backup of this connection whose file
+/// is still what PuriCat wrote, a client fits it, and the new database has a valid name
+/// that is not taken.
+struct Restore {
+    profile: ConnectionProfile,
+    session: Arc<Session>,
+    tool: backup::DumpTool,
+    client: PathBuf,
+    file: PathBuf,
+    spec: NewDatabase,
+    statement: String,
+}
+
+async fn prepared_restore(state: &AppState, id: &str, run: i64, database: &str) -> Result<Restore> {
+    let profile = state.store.get_connection(id).await?;
+    let run = state.store.get_backup_run(run).await?;
+    // The web view names a run, never a path: only a file the history recorded is loaded.
+    if run.connection_id != id {
+        return Err(Error::Invalid(
+            "This backup was made from another connection.".into(),
+        ));
+    }
+    let file = run
+        .file
+        .as_deref()
+        .filter(|_| run.status == "ok" && run.removed_at.is_none())
+        .map(PathBuf::from)
+        .filter(|f| f.is_file())
+        .ok_or_else(|| Error::NotFound("The backup file".into()))?;
+    // Not proof against a deliberate change, but a file that was cut, replaced or edited
+    // since PuriCat wrote it rarely keeps its size.
+    let size = std::fs::metadata(&file)?.len() as i64;
+    if run.bytes.is_some_and(|recorded| recorded != size) {
+        return Err(Error::Invalid(format!(
+            "{} has changed since PuriCat made it ({size} bytes now, {} then). PuriCat restores only a backup that is as it wrote it.",
+            file.display(),
+            run.bytes.unwrap_or(0)
+        )));
+    }
+    let kind = restore::Kind::of(&file)
+        .ok_or_else(|| Error::Invalid(format!("{} is not a backup file.", file.display())))?;
+
+    let session = state.session(id).await?;
+    let server_version = session.server_info().await?.version;
+    let tools = backup::find_tools(profile.engine).await;
+    let choice = backup::choose(profile.engine, &server_version, &tools);
+    let tool = choice
+        .tool
+        .ok_or_else(|| Error::Unsupported(choice.problem.unwrap_or_default()))?;
+    let client = restore::client_for(&tool, kind)?;
+    restore::check_made_by(&run.tool, &tool)?;
+
+    let name = database.trim();
+    // The new database gets the character set of the one the backup came from, while that
+    // one is still there: a MySQL dump of one database does not carry it.
+    let (charset, collation) = match profile.engine {
+        Engine::Mysql => session
+            .database_details(&run.database)
+            .await
+            .map(|d| (d.charset, d.collation))
+            .unwrap_or_default(),
+        _ => (None, None),
+    };
+    let spec = NewDatabase {
+        name: name.to_string(),
+        charset,
+        collation,
+        ..Default::default()
+    };
+    let statement = session.create_database_sql(&spec)?;
+    // The server refuses a taken name too, when the statement runs; this says it earlier
+    // and in PuriCat's words. MySQL's database names may differ by case only on some servers.
+    let taken = session.list_databases().await?.iter().any(|d| {
+        d.name == name || (profile.engine == Engine::Mysql && d.name.eq_ignore_ascii_case(name))
+    });
+    if taken {
+        return Err(Error::Conflict(format!(
+            "A database named “{name}” already exists. A backup is restored into a new database only: nothing that exists is replaced."
+        )));
+    }
+    Ok(Restore {
+        profile,
+        session,
+        tool,
+        client,
+        file,
+        spec,
+        statement,
+    })
+}
+
+fn client_label(prepared: &Restore) -> String {
+    let name = prepared
+        .client
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{name} {}", prepared.tool.version)
+}
+
+/// What restoring this backup into a new database named `database` would do. Runs nothing.
+#[tauri::command]
+pub async fn restore_plan(
+    state: State<'_, AppState>,
+    id: String,
+    run: i64,
+    database: String,
+) -> Result<RestorePlan> {
+    let prepared = prepared_restore(&state, &id, run, &database).await?;
+    Ok(RestorePlan {
+        client: client_label(&prepared),
+        client_path: prepared.client.to_string_lossy().into_owned(),
+        all_or_nothing: restore::all_or_nothing(prepared.profile.engine),
+        statement: prepared.statement,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Restored {
+    database: String,
+    /// The statement that created it.
+    statement: String,
+    duration_ms: u64,
+}
+
+/// Create the database and load the backup into it. `job` names the run for `cancel_job`;
+/// progress is the number of bytes of the file read so far (a SQL dump only).
+///
+/// A load that fails or is stopped leaves the database it was going into: empty on
+/// PostgreSQL, with what was loaded up to then on MySQL. PuriCat does not drop it by itself.
+#[tauri::command]
+pub async fn restore_backup(
+    state: State<'_, AppState>,
+    id: String,
+    run: i64,
+    database: String,
+    job: String,
+    on_progress: Channel<u64>,
+) -> Result<Restored> {
+    if state.store.get_connection(&id).await?.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to restore a backup.".into(),
+        ));
+    }
+    let prepared = prepared_restore(&state, &id, run, &database).await?;
+    let password = stored_password(&state, &prepared.profile).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+
+    let outcome = async {
+        // Fails when the name was taken in the meantime: the statement has no IF NOT EXISTS.
+        let statement = prepared.session.create_database(&prepared.spec).await?;
+        let name = prepared.spec.name.clone();
+        let mut reported = 0u64;
+        let done = restore::run(
+            &prepared.profile,
+            password.as_deref(),
+            &prepared.tool,
+            &prepared.file,
+            &name,
+            &stop,
+            |bytes| {
+                if bytes - reported >= 256 * 1024 {
+                    reported = bytes;
+                    let _ = on_progress.send(bytes);
+                }
+            },
+        )
+        .await
+        .map_err(|e| {
+            let note = format!(" The database “{name}” was created for this restore and is still there: drop it from its menu before trying again.");
+            match e {
+                Error::Database(text) => Error::Database(text + &note),
+                Error::Conflict(text) => Error::Conflict(text + &note),
+                Error::Invalid(text) => Error::Invalid(text + &note),
+                other => other,
+            }
+        })?;
+        Ok(Restored {
+            database: name,
+            statement,
+            duration_ms: done.duration_ms,
+        })
+    }
+    .await;
+    state.jobs.lock().unwrap().remove(&job);
+    outcome
 }
 
 // ---- the runner ------------------------------------------------------------------------

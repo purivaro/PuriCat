@@ -25,9 +25,9 @@ use crate::{Error, Result};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 /// How much of a tool's error output is kept for the message of a failed run.
-const STDERR_KEPT: usize = 8 * 1024;
+pub(crate) const STDERR_KEPT: usize = 8 * 1024;
 /// The end of a dump is looked at for the tool's "completed" line.
-const TAIL_KEPT: usize = 512;
+pub(crate) const TAIL_KEPT: usize = 512;
 
 // ---- the tools -------------------------------------------------------------------------
 
@@ -67,7 +67,7 @@ impl Server {
     }
 }
 
-fn first_number(text: &str) -> Option<u32> {
+pub(crate) fn first_number(text: &str) -> Option<u32> {
     let start = text.find(|c: char| c.is_ascii_digit())?;
     let digits: String = text[start..]
         .chars()
@@ -375,12 +375,45 @@ fn option_file_value(value: &str) -> Result<String> {
 }
 
 /// The option file that carries what must not be an argument.
-fn mysql_option_file(password: Option<&str>) -> Result<String> {
+pub(crate) fn mysql_option_file(password: Option<&str>) -> Result<String> {
     let mut text = String::from("[client]\n");
     if let Some(password) = password {
         text.push_str(&format!("password=\"{}\"\n", option_file_value(password)?));
     }
     Ok(text)
+}
+
+/// The TLS options of MySQL's and MariaDB's command-line programs, from the connection's
+/// own setting. The same for the tool that dumps and the client that loads a backup.
+pub(crate) fn mysql_tls_args(profile: &ConnectionProfile, client: Client) -> Vec<String> {
+    let mut args = Vec::new();
+    match client {
+        Client::Mariadb => match profile.tls {
+            TlsMode::Disable => args.push("--skip-ssl".into()),
+            TlsMode::Prefer => {}
+            TlsMode::Require | TlsMode::VerifyCa => args.push("--ssl".into()),
+            TlsMode::VerifyFull => {
+                args.push("--ssl".into());
+                args.push("--ssl-verify-server-cert".into());
+            }
+        },
+        _ => args.push(format!(
+            "--ssl-mode={}",
+            match profile.tls {
+                TlsMode::Disable => "DISABLED",
+                TlsMode::Prefer => "PREFERRED",
+                TlsMode::Require => "REQUIRED",
+                TlsMode::VerifyCa => "VERIFY_CA",
+                TlsMode::VerifyFull => "VERIFY_IDENTITY",
+            }
+        )),
+    }
+    if let Some(ca) = &profile.tls_ca_path {
+        if matches!(profile.tls, TlsMode::VerifyCa | TlsMode::VerifyFull) {
+            args.push(format!("--ssl-ca={ca}"));
+        }
+    }
+    args
 }
 
 /// `mysqldump`'s arguments. `option_file` is read instead of the user's own option files,
@@ -406,39 +439,14 @@ pub fn mysqldump_args(
         "--hex-blob".into(),
         "--default-character-set=utf8mb4".into(),
     ];
-    match tool.client {
-        Client::Mariadb => match profile.tls {
-            TlsMode::Disable => args.push("--skip-ssl".into()),
-            TlsMode::Prefer => {}
-            TlsMode::Require | TlsMode::VerifyCa => args.push("--ssl".into()),
-            TlsMode::VerifyFull => {
-                args.push("--ssl".into());
-                args.push("--ssl-verify-server-cert".into());
-            }
-        },
-        _ => {
-            args.push(format!(
-                "--ssl-mode={}",
-                match profile.tls {
-                    TlsMode::Disable => "DISABLED",
-                    TlsMode::Prefer => "PREFERRED",
-                    TlsMode::Require => "REQUIRED",
-                    TlsMode::VerifyCa => "VERIFY_CA",
-                    TlsMode::VerifyFull => "VERIFY_IDENTITY",
-                }
-            ));
-            // A dump meant to be restored anywhere: no GTID state of this server in it.
-            args.push("--set-gtid-purged=OFF".into());
-            if tool.major >= 8 {
-                // Needs no PROCESS privilege; and no query for statistics the server may lack.
-                args.push("--no-tablespaces".into());
-                args.push("--column-statistics=0".into());
-            }
-        }
-    }
-    if let Some(ca) = &profile.tls_ca_path {
-        if matches!(profile.tls, TlsMode::VerifyCa | TlsMode::VerifyFull) {
-            args.push(format!("--ssl-ca={ca}"));
+    args.extend(mysql_tls_args(profile, tool.client));
+    if tool.client != Client::Mariadb {
+        // A dump meant to be restored anywhere: no GTID state of this server in it.
+        args.push("--set-gtid-purged=OFF".into());
+        if tool.major >= 8 {
+            // Needs no PROCESS privilege; and no query for statistics the server may lack.
+            args.push("--no-tablespaces".into());
+            args.push("--column-statistics=0".into());
         }
     }
     // After `--`, a database whose name starts with a dash is still a name.
@@ -477,7 +485,10 @@ pub fn pg_dump_args(
 
 /// The environment `pg_dump` and `pg_restore` run in: the password and the TLS policy, and
 /// nothing of the user's own `PG*` variables.
-fn pg_env(profile: &ConnectionProfile, password: Option<&str>) -> Vec<(&'static str, String)> {
+pub(crate) fn pg_env(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+) -> Vec<(&'static str, String)> {
     let mut env = vec![
         (
             "PGSSLMODE",
@@ -509,10 +520,10 @@ fn pg_env(profile: &ConnectionProfile, password: Option<&str>) -> Vec<(&'static 
 // ---- a run -----------------------------------------------------------------------------
 
 /// A directory only this user can enter, removed with everything in it when dropped.
-struct PrivateDir(PathBuf);
+pub(crate) struct PrivateDir(pub(crate) PathBuf);
 
 impl PrivateDir {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let path =
             std::env::temp_dir().join(format!("puricat-backup-{}", uuid::Uuid::new_v4().simple()));
         let mut builder = std::fs::DirBuilder::new();
@@ -533,7 +544,7 @@ impl Drop for PrivateDir {
 }
 
 /// A file that only its owner can read, which must not exist yet.
-fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -809,9 +820,14 @@ pub async fn run(
     })
 }
 
-/// Have `pg_restore` read the archive's table of contents: an archive that was cut short
-/// or damaged does not list.
-async fn list_archive(profile: &ConnectionProfile, tool: &DumpTool, archive: &Path) -> Result<()> {
+/// Have `pg_restore` read the archive's table of contents. A file that is not an archive,
+/// or whose front is damaged, does not list; a cut further in, inside the data, still does
+/// (`live_restore` shows it), so this is a check of the file's form, not of all its data.
+pub(crate) async fn list_archive(
+    profile: &ConnectionProfile,
+    tool: &DumpTool,
+    archive: &Path,
+) -> Result<()> {
     let pg_restore = Path::new(&tool.path).with_file_name("pg_restore");
     if !pg_restore.is_file() {
         return Err(Error::Unsupported(format!(

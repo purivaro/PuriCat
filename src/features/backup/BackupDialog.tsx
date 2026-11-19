@@ -9,6 +9,7 @@ import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
 import type { BackupAgent, BackupFormat, BackupPlan, BackupRun, BackupSchedule, ConnectionView } from "../../lib/types";
 import { useUi } from "../../stores/ui";
+import { RestoreDialog } from "./RestoreDialog";
 import { fileName, scheduleOf, sizeText, type ScheduleKind, toTimeInput } from "./schedule";
 
 /**
@@ -69,6 +70,8 @@ function Body({ connection, database, onBusy }: { connection: ConnectionView; da
   const [last, setLast] = useState<BackupRun | null>(null);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // The backup of the history that the restore dialog is open for.
+  const [restoring, setRestoring] = useState<BackupRun | null>(null);
   const alive = useRef(true);
   useEffect(() => {
     // Set again on every mount: React's strict mode mounts, unmounts and mounts once more.
@@ -480,9 +483,14 @@ function Body({ connection, database, onBusy }: { connection: ConnectionView; da
                     {run.removedAt !== null && <div className="text-fg-subtle">{t("backup.removed")}</div>}
                   </div>
                   {run.status === "ok" && run.removedAt === null && (
-                    <Button size="sm" variant="ghost" onClick={() => reveal(run)}>
-                      {t("backup.reveal")}
-                    </Button>
+                    <div className="flex shrink-0 flex-col items-end">
+                      <Button size="sm" variant="ghost" data-backup-restore disabled={!!running} onClick={() => setRestoring(run)}>
+                        {t("restore.menu")}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => reveal(run)}>
+                        {t("backup.reveal")}
+                      </Button>
+                    </div>
                   )}
                 </li>
               ))}
@@ -490,6 +498,7 @@ function Body({ connection, database, onBusy }: { connection: ConnectionView; da
           )}
         </div>
       </div>
+      <RestoreDialog connection={connection} run={restoring} onClose={() => setRestoring(null)} />
     </>
   );
 }

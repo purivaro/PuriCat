@@ -33,6 +33,7 @@ import type {
   PasswordChange,
   PasteAnalysis,
   PickedFile,
+  RestorePlan,
   RowCount,
   RowFilter,
   PasteRequest,
@@ -186,6 +187,14 @@ export const ipc = {
     invoke<BackupRun[]>("list_backup_runs", { id, database, limit }),
   /** Shows the file of a run in Finder. */
   revealBackup: (run: number) => invoke<void>("reveal_backup", { run }),
+  /** What restoring this backup into a new database of that name would do. Runs nothing. */
+  restorePlan: (id: string, run: number, database: string) => invoke<RestorePlan>("restore_plan", { id, run, database }),
+  /** Creates the database and loads the backup into it. `cancelJob(job)` stops the load. */
+  restoreBackup: (id: string, run: number, database: string, job: string, onProgress: (bytes: number) => void) => {
+    const channel = new Channel<number>();
+    channel.onmessage = onProgress;
+    return invoke<{ database: string; statement: string; durationMs: number }>("restore_backup", { id, run, database, job, onProgress: channel });
+  },
   /** Asks the release manifest for a newer version. `null`: this is the latest. */
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   /** Downloads, verifies and installs what the last check found. The app keeps running. */

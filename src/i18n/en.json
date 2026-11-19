@@ -166,8 +166,8 @@
       "sql": "SQL editor with completion and formatting, cancellable runs, history, and CSV / JSON / XLSX export",
       "sqlserver": "SQL Server and SSH tunnels",
       "ai": "AI agent through your own Claude Code CLI (Codex not yet verified): it can look things up when you allow it, and every change waits for your approval",
-      "backup": "Backups by hand and on a schedule, into a folder you choose",
-      "restore": "Restoring a backup from inside the app, and encrypted backups"
+      "backup": "Backups by hand and on a schedule, into a folder you choose, and a restore into a new database",
+      "restore": "Restoring over an existing database, and encrypted backups"
     }
   },
   "table": {
@@ -574,6 +574,29 @@
       "failed": "Failed",
       "stopped": "Stopped"
     }
+  },
+  "restore": {
+    "menu": "Restore…",
+    "title": "Restore into a new database",
+    "source": "Backup of {{database}} · {{when}}",
+    "readOnly": "This connection is read-only. Turn off the read-only session in its settings to restore a backup.",
+    "name": "New database",
+    "nameHint": "PuriCat creates this database and loads the backup into it. Nothing that exists is replaced.",
+    "nameEmpty": "Type a name for the new database.",
+    "steps": "What will run",
+    "stepsDone": "What ran",
+    "load": "Then {{client}} loads the backup into it.",
+    "atomic": "The load is one transaction: if it fails or is stopped, the new database stays empty.",
+    "notAtomic": "MySQL cannot undo a load: if it fails or is stopped, the new database holds what was loaded up to then.",
+    "prodWarning": "You are about to create a database on a PRODUCTION server.",
+    "run": "Restore",
+    "running": "Restoring…",
+    "progress": "{{percent}}% · {{minutes}}:{{seconds}}",
+    "elapsed": "{{minutes}}:{{seconds}}",
+    "done": "Restored into “{{database}}”",
+    "doneHint_one": "It took {{count}} second. The database is in the list on the left: look at it before you rely on it.",
+    "doneHint_other": "It took {{count}} seconds. The database is in the list on the left: look at it before you rely on it.",
+    "failed": "The restore did not finish"
   },
   "updates": {
     "check": "Check for updates…",
