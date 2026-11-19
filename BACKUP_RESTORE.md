@@ -1,80 +1,109 @@
 # Backup and restore
 
-**Status: nothing is implemented.** Backup and restore are Planned (Phase 6). There is no backup code, UI, helper binary or scheduler in the repository. This document records the design and the limits PuriCat will state to users. The decision record is [ADR 0010](docs/adr/0010-backup-scheduler.md).
+**Status: backups are built; restore is not.** PuriCat makes a backup of one MySQL or PostgreSQL database with the vendor's own dump tool, when you ask and on a schedule, into a folder you choose. Restoring is done with the vendor's tools, outside PuriCat: the commands are below. The decision record is [ADR 0021](docs/adr/0021-backups-with-dump-tools.md), which builds on [ADR 0010](docs/adr/0010-backup-scheduler.md).
 
-Until Phase 6 ships, PuriCat must not be relied on for backups in any way.
+**Verified on one pair of versions**: `mysqldump` 9.3.0 with MySQL 9.3.0 and `pg_dump` 16.13 with PostgreSQL 16.13, on macOS. Until you have restored one of your own backups, treat it as untested: only a restore proves a backup. [TESTING.md](TESTING.md) says what was run.
 
-## Plan per engine — Planned (Phase 6)
+A dump is a snapshot of one database at the time it ran. It is not a replacement for server-side physical backups or point-in-time recovery.
 
-| Engine | Tool | Notes |
+## What you need
+
+| Engine | Tool | Where it comes from |
 |---|---|---|
-| MySQL | `mysqldump` | Consistent dump of transactional (InnoDB) tables taken inside a single transaction; non-transactional tables need locking, which will be stated. Client and server versions are checked before running |
-| PostgreSQL | `pg_dump`, `pg_restore` | Custom format for selective restore, or plain SQL. `pg_dump` must not be older than the server; checked before running |
-| SQL Server | `BACKUP DATABASE` (server-side) | **Writes to a path on the server, not on the client.** Needs server privileges and a server-visible path. Offered as a separate, clearly labelled strategy; an alternative client-side export, if any, will be documented as an export, not a backup |
+| MySQL | `mysqldump` | MySQL's client tools, for example `brew install mysql-client` |
+| MariaDB | `mariadb-dump` (or MariaDB's `mysqldump`) | MariaDB's client tools. MySQL's `mysqldump` is used with a warning when it is the only one found |
+| PostgreSQL | `pg_dump`, and `pg_restore` next to it | PostgreSQL's client tools, for example `brew install libpq`. **`pg_dump` must not be older than the server** |
+| SQLite, SQL Server | — | No backup in PuriCat. A SQLite database is one file: copy it while nothing writes to it |
 
-The vendor tools are not bundled. PuriCat will detect them, show their versions, and explain what is missing. Exact flags and version rules will be confirmed against each tool's documentation in Phase 6.
+The tools are not shipped with PuriCat. The backup dialog shows which tool it found, its version and the server's, and says what is missing.
 
-Tools run from Rust with fixed argument vectors and no shell. Passwords are never placed on the command line.
+## Making a backup
 
-## What a logical backup contains
+Right-click a database → **Back up…**
 
-A single-database dump from `mysqldump` or `pg_dump`:
+- **Folder.** "Choose…" opens the system's folder dialog. The first offer is `Documents/PuriCat Backups`. The choice is remembered for that database.
+- **File.** `<connection>_<database>_<date>_<time>.sql.gz`, or `.dump` for a PostgreSQL archive. Readable by you only. An existing file is never overwritten.
+- **Format.** SQL statements, gzipped unless you switch that off. For PostgreSQL the default is its own archive format, which is compressed and can be restored in parts.
+- **Back up now** shows the size so far and can be stopped. A backup that fails or is stopped leaves no file.
+
+A file is given its name only after the tool finished without error and the dump was checked: a SQL dump must end with the tool's closing line, an archive must be listed by `pg_restore`.
+
+## What a backup contains
 
 | Included | Not included |
 |---|---|
 | Table definitions and data | Users, roles and their passwords |
 | Indexes, constraints, views | Server configuration |
-| Routines, triggers and events when the matching options are enabled | Other databases on the server |
-| Sequences and their values (PostgreSQL) | Tablespaces and replication settings |
+| Routines, triggers and events (MySQL); functions and sequences with their values (PostgreSQL) | Other databases on the server |
 | | Privileges granted to roles that do not exist on the target |
-| | Binary logs / WAL — no point-in-time recovery |
+| | Binary logs / WAL: no point-in-time recovery |
 
-A dump is a snapshot at the time it ran. It is not a replacement for server-side physical backups or point-in-time recovery. The UI will say this where backups are configured.
+MySQL's transactional (InnoDB) tables are dumped as one consistent snapshot, without locking them. Tables of other storage engines (MyISAM) are read without a lock and may not match each other if something writes during the dump.
 
-## Scheduler design — Planned (Phase 6)
+## Scheduled backups
 
-- **Manual backups** run inside the app while it is open.
-- **Scheduled backups** on macOS use a per-user LaunchAgent (launchd) that starts a small `puricat-backup` helper built on `puricat-core`. The helper reads job definitions from the settings store and passwords from the Keychain, runs the job, applies retention and records the result.
-- **Windows** will use Task Scheduler with the same helper (after the macOS beta).
-- No privileged service is installed. Creating or removing the LaunchAgent requires explicit consent in the UI, and the UI shows whether it is installed.
+In the same dialog: **Every day** or **Weekly**, a time, and how many scheduled backups to keep.
 
-### Limitations PuriCat will show
+- Saving a schedule installs a small background runner for your user in macOS (a LaunchAgent, `~/Library/LaunchAgents/com.purivaro.puricat.backups.plist`). macOS tells you that a background item was added. It starts PuriCat's own program, without a window, at the scheduled times, **also while PuriCat is closed**. Removing the last schedule removes the runner.
+- The dialog shows the next time only when the runner is really installed. Otherwise it says that the schedule will not run.
+- A failed run is in the history with its reason, and macOS shows a notification.
+- After each scheduled backup that was kept, older scheduled backups of that database beyond the number to keep are deleted (7 unless you change it; 0 keeps all). **Backups you made by hand are never deleted.**
+
+### When a scheduled backup does not run
 
 | Situation | What happens |
 |---|---|
-| Mac asleep or powered off at the scheduled time | Nothing runs. After wake, launchd runs a missed calendar job once, not once per missed interval |
-| User not logged in, or login keychain locked | The helper cannot read credentials; the run fails and is recorded |
-| LaunchAgent not installed or disabled | No scheduled runs; the UI shows schedules as inactive rather than pending |
-| Vendor tool missing or incompatible with the server | The run fails with that reason |
-| Server unreachable (VPN down, SSH tunnel needed) | The run fails; nothing is retried silently |
-| Destination missing or full | The run fails; older backups are not deleted to make room |
+| Mac asleep or powered off at the scheduled time | Nothing runs. After it wakes, the missed backup runs once, not once per missed day |
+| You are logged out, or the login keychain is locked | The runner cannot read the password; the run fails and is recorded |
+| The dump tool is missing or older than the server | The run fails with that reason |
+| The server cannot be reached (VPN down) | The run fails; nothing is tried again before the next scheduled time |
+| The folder is missing (an external disk that is not plugged in) | The run fails; nothing is deleted |
+| PuriCat was moved or deleted | Open PuriCat once after moving it: it points the runner at the new place. After deleting it the runner starts nothing; remove the file in `~/Library/LaunchAgents` by hand |
 
-PuriCat will not display a "next run" time unless the scheduler is actually installed and enabled, and will not promise unattended runs it cannot perform.
+The runner's own log is `backup-runner.log` in PuriCat's settings folder (`~/Library/Application Support/com.purivaro.puricat/`).
 
-## Encryption, retention and verification — Planned (Phase 6)
+## Restoring a backup by hand
 
-- **Permissions:** backup files are created readable by the owner only.
-- **Encryption:** optional, with the key or passphrase held in the OS credential store. The format and library are not chosen. A lost key means an unrecoverable backup; the UI will say so.
-- **Compression:** optional; the format is not chosen.
-- **Retention:** by count or by age. Retention deletes only files PuriCat created and only after a newer backup has completed successfully.
-- **Destination:** a local folder. No cloud upload by default.
-- **History:** each run records start, end, size, tool versions, exit status and a log without secrets.
-- **Notifications:** failures are surfaced in the app and through an OS notification; a failed run is never shown as successful.
-- **Verification:** a completed dump is checked for a clean exit and a readable archive (for the PostgreSQL custom format, by having `pg_restore` list its contents). A real restore test into a scratch database is offered as an explicit action, because only a restore proves a backup.
+Restore into a **new, empty database** first, and look at it, before anything else. Replace the names in capitals.
 
-## Restore safety rules — Planned (Phase 6)
+MySQL (`.sql.gz`, or `.sql` without the `gunzip`):
 
-1. Restore targets a new or explicitly chosen database; the default is never the source database.
-2. Restoring over an existing database requires typing its name, and for Production-labelled connections a statement that a recovery path exists (a fresh backup taken first is offered).
-3. Tool and server versions are checked before starting.
-4. Progress and the tool's own output are shown. On failure the UI states what was applied, because a logical restore is not atomic unless run in a single transaction.
-5. AI agents cannot start a restore without the same approval as any other mutation ([AI_INTEGRATION.md](AI_INTEGRATION.md)).
-6. A restore from a file PuriCat did not create is treated as running an untrusted SQL script and is labelled as such.
+```sh
+mysql -h HOST -u USER -p -e 'CREATE DATABASE restored_copy'
+gunzip -c BACKUP.sql.gz | mysql -h HOST -u USER -p restored_copy
+```
 
-## Testing plan — Planned (Phase 6)
+PostgreSQL archive (`.dump`):
 
-- Unit tests: schedule calculation, missed-run handling, retention selection.
-- Integration tests: dump and restore round trips against disposable MySQL and PostgreSQL databases, comparing schema and row checksums.
-- The scheduler itself needs a manual test procedure on a real login session (sleep, wake, locked keychain).
+```sh
+createdb -h HOST -U USER restored_copy
+pg_restore -h HOST -U USER --no-owner -d restored_copy BACKUP.dump
+```
 
-None of these tests exist yet.
+PostgreSQL SQL dump (`.sql.gz`):
+
+```sh
+createdb -h HOST -U USER restored_copy
+gunzip -c BACKUP.sql.gz | psql -h HOST -U USER -d restored_copy --set ON_ERROR_STOP=1
+```
+
+These are the commands PuriCat's own tests use to check its backups. A restore is not atomic: if it stops half way, the target holds what was restored up to then.
+
+## Where things are kept
+
+| What | Where |
+|---|---|
+| Backup files | The folder you chose. PuriCat keeps no copy |
+| The settings of each database's backups, and the history of runs | PuriCat's settings database (`backup_jobs`, `backup_runs`). The history holds the last 2,000 runs; dropping an entry does not delete its file |
+| Passwords | The macOS Keychain, as for connecting. During a MySQL backup the password is in a file only you can read, in a private temporary folder, and is removed when the run ends |
+
+Backup files are **not encrypted**. Anyone who can read the folder can read the data: choose the folder accordingly, especially on an external disk or in a folder that syncs to a cloud service.
+
+## Planned, not built
+
+- **Restore inside PuriCat**, with these rules: the default target is never the source database; restoring over an existing database requires typing its name, and on a Production connection a fresh backup is offered first; tool and server versions are checked; the tool's output is shown, and after a failure the dialog says what was applied; an AI agent cannot start a restore without the same approval as any other change; a file PuriCat did not create is treated as an untrusted SQL script.
+- **Encryption** of backup files, with the key in the Keychain.
+- **A restore test as an action**: restore into a scratch database and compare, as PuriCat's own tests do.
+- **SQL Server**: `BACKUP DATABASE` writes to a path on the server, not on this computer. It will be offered as a separate, clearly labelled strategy.
+- **Windows**: Task Scheduler with the same runner.
+- Backups of several databases at once, a time limit for a scheduled run, retention by age.

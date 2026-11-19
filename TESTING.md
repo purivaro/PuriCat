@@ -7,7 +7,7 @@
 | Rust unit tests | `crates/core/src/**` (`#[cfg(test)]`) | Nothing | Yes | Yes |
 | Frontend unit tests (Vitest) | `src/**/*.test.ts` | Nothing | Yes | Yes |
 | Static checks | `tsc`, `cargo fmt`, `cargo clippy -D warnings` | Nothing | Yes | Yes |
-| Live database tests | `crates/core/tests/live_db.rs` (connect, browse), `crates/core/tests/live_write.rs` (save edits, Smart Paste), `crates/core/tests/live_console.rs` (SQL console), `crates/core/tests/live_agent_tools.rs` (the AI's database tools; its whole-turn part also needs `python3` and `/usr/bin/nc`, and uses the stand-in `claude` of `e2e/fixtures/bin`), `crates/core/tests/live_ddl.rs` (creating, changing and dropping a database and MySQL's `FLUSH`, through the backend of the database forms; its SQLite test needs no server) | Disposable MySQL and PostgreSQL servers | Server tests run only if the variables are set | Server tests skip (variables unset) |
+| Live database tests | `crates/core/tests/live_backup.rs` (backups: the dump tools installed on the computer are needed too), `crates/core/tests/live_db.rs` (connect, browse), `crates/core/tests/live_write.rs` (save edits, Smart Paste), `crates/core/tests/live_console.rs` (SQL console), `crates/core/tests/live_agent_tools.rs` (the AI's database tools; its whole-turn part also needs `python3` and `/usr/bin/nc`, and uses the stand-in `claude` of `e2e/fixtures/bin`), `crates/core/tests/live_ddl.rs` (creating, changing and dropping a database and MySQL's `FLUSH`, through the backend of the database forms; its SQLite test needs no server) | Disposable MySQL and PostgreSQL servers | Server tests run only if the variables are set | Server tests skip (variables unset) |
 | SQLite tests | `crates/core/tests/sqlite.rs` | Nothing: each test makes its own database file in the system's temporary folder and removes it | Yes | Yes |
 | OS credential store test | `secrets::tests::os_keychain_round_trip` (ignored by default) | A real Keychain / Credential Manager | No | No |
 | Real AI CLI test | `agent::tests::real_claude_cli_answers` (ignored by default) | The real Claude Code CLI, installed and signed in; sends one small prompt on that account | No | No |
@@ -129,7 +129,7 @@ Side effects to know about:
 
 ## What each suite covers
 
-### Rust unit tests (97, plus 2 ignored)
+### Rust unit tests (111 in the core, plus 2 ignored; 3 in the app crate)
 
 | Module | Covers |
 |---|---|
@@ -326,6 +326,18 @@ One whole turn per engine (`whole_turn`, Unix only): `agent::chat_with` with a `
 
 Not covered by `live_agent_tools`: the IPC commands (`agent_send` with tools, `agent_proposal_run`, `agent_proposal_reject`, `agent_audit`, `clear_agent_audit` — the tests call the core below them, so storing a proposal, running one, the read-only refusal and the activity log are not exercised here); the 30-second limit of `run_select` (the test stops the query after 0.6 seconds instead) and the cancel when a call is dropped unfinished; the default of 50 rows and the ceiling of 200; the cut of a cell and of a long answer against a server (unit-tested); `list_tables` beyond 500 names; a query naming another database on MySQL; unqualified names on PostgreSQL without the `search_path` the test sets on its scratch database; the tools on a read-only session; that the turn's socket is gone after `whole_turn` (the unit test of the endpoint and the end-to-end runner assert it); anything with Codex.
 
+### Live database tests: `live_backup` (3 tests)
+
+They need the dump tools on the computer (`mysqldump` with `mysql`; `pg_dump` with `pg_restore` and `psql`), found the way the app finds them. Every backup is restored into a second scratch database and compared: only a restore proves a backup.
+
+| Test | Covers |
+|---|---|
+| `mysql_backup_restores_to_the_same_data` | A database with 500 rows (Thai text, an emoji, quotes, a backslash, `--` inside a string, a `VARBINARY` and a `JSON` column), a view, a trigger and a function. A gzipped SQL backup: one file, named for the connection (with its Thai name), the database and the time, mode 0600, nothing unfinished beside it, progress that only grows, ending with `-- Dump completed`. Restored with `mysql`: the same row count and the same checksum over every column, and the view, the trigger and the function are there. Then what must leave no file: a database that does not exist, a wrong password (refused, and the message does not repeat it), a stop, a folder that is not there, the custom format on MySQL |
+| `postgres_backup_restores_to_the_same_data` | A schema with 500 such rows (`BYTEA`, `JSONB`, `TIMESTAMPTZ`, an identity column), a view and a function. The custom archive (mode 0600, listed by `pg_restore`) restored with `pg_restore`, and the gzipped SQL dump restored with `psql`: each has the same rows by an MD5 over every column, the sequence goes on at 501, the view and the function are there. A missing database and a stop leave no file, in both formats |
+| `scheduled_jobs_run_when_due_and_keep_the_newest` | The runner's logic against a real MySQL server, with the clock given by the test: nothing is due right after a job is saved; one run per day for four days and none when asked twice in a day; with "keep 2" the two newest files exist, the two older are deleted and marked in the history; a job whose folder is gone and a job whose connection was deleted are failed runs with their reason while the good job still runs |
+
+Not covered by `live_backup`: any server or tool but MySQL 9.3.0 with `mysqldump` 9.3.0 and PostgreSQL 16.13 with `pg_dump` 16.13; MariaDB; a server that needs a password (the test servers accept none, so the option file and `PGPASSWORD` are exercised only with a wrong password) or TLS; an events table; MyISAM; a database large enough to stop mid-way; a full disk; `pg_dump` older than the server (unit-tested in `choose`); the LaunchAgent (see the results below).
+
 ### Live database tests: `live_ddl` (5 tests)
 
 `mysql_create_database`, `postgres_create_database` and `sqlite_has_no_databases_to_create`, added with the "New database" form, and `mysql_alter_and_drop_database` and `postgres_alter_and_drop_database`, added with the database menu (their table is further down). The four server tests use the same opt-in variables as the other live tests and skip without them; the SQLite test needs no server. The first three call `Session::database_options`, `create_database_sql` and `create_database`, the functions behind the three IPC commands. This is the one suite in which PuriCat itself issues DDL; what it created is checked and dropped by a separate admin connection.
@@ -365,7 +377,7 @@ Not covered by `live_ddl`: the IPC commands themselves — so the read-only refu
 
 Not covered by the live tests: a wrong password on PostgreSQL, a wrong password (as opposed to an unknown user) on MySQL, reading rows through a PostgreSQL materialized view, any TLS mode other than the default, the 10,000-change limit, two PuriCat sessions editing the same row, a foreign-key or unique-constraint failure (the end-to-end test covers one foreign-key refusal), the PostgreSQL `TimeZone=UTC` behaviour (documented in [DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), not asserted), and the types listed there as not verified on the write path.
 
-### Frontend unit tests (87 cases in 13 files)
+### Frontend unit tests (91 cases in 14 files)
 
 | File | Cases | Covers |
 |---|---|---|
@@ -380,6 +392,7 @@ Not covered by the live tests: a wrong password on PostgreSQL, a wrong password 
 | `src/stores/workspace.test.ts` | 9 | Tab closing and neighbour activation, tab id uniqueness across connection / database / schema. Four cases added with the database menu, for `databaseGoneIn`: the table tabs of a dropped database close and its query tabs move to the default database, with the right neighbour of a closed active tab taking over; other databases and other connections are left alone; after a rename the query tabs carry the new name; with nothing else open the welcome tab comes back |
 | `src/features/table/sort.test.ts` | 2 | The sort cycle of a header click |
 | `src/features/agent/markdown.test.ts` | 5 | The Markdown reader for AI answers: paragraphs, fenced code with its language, headings and lists in one answer; a code block still streaming (no closing fence) and the text inside a fence kept verbatim; simple tables, and a line with a pipe character that is not a table; markup-looking text (`<img … onerror=…>`) stays text and single asterisks are not emphasis; which code blocks count as runnable SQL (by tag, or untagged by first keyword; `bash` and `json` blocks do not) |
+| `src/features/backup/schedule.test.ts` | 4 (new) | The backup dialog's own logic: the schedule a form describes (off, daily, weekly with the days in order and each once, every day of the week as a daily schedule, no day left as it is); the time input read and written, with nonsense read as midnight; the preview of the file name, with the same cases as the backend's test; a size with the unit that reads best |
 | `src/stores/updates.test.ts` | 6 (new) | The updates store with the IPC layer mocked: a check that was asked for opens the dialog and shows what it found, or that nothing is newer; the check at start-up opens nothing and shows no failure, and a later quiet failure keeps an update that was found on offer; a failed check that was asked for says why and can be repeated; an install reports progress, ends in "ready", and a check then shows that state instead of asking again; a failed install keeps the update so it can be tried again; nothing is installed when nothing was found |
 | `src/stores/agent.test.ts` | 8 | The chat store with the IPC layer mocked: an answer streams into its turn and the request carries the context, the conversation and no tools; an error keeps the CLI's message and "Try again" asks the same question with the model chosen since; Stop cancels the job and keeps the text that had arrived; Stop or "New chat" while the context is still being read sends nothing, and a second send while a turn is claimed is ignored; answers that failed are left out of what is resent. Three cases added with the database tools. **Scope**: no tools at "Off"; at "Structure" the scope of the question's tab without rows; at "Structure and rows" the scope with its schema and with rows; no tools when the question has no tab. **Steps and notes**: tool events become steps at the position in the text where they happened, with the exact output; a call that never got an answer ends as failed; an accepted proposal is pending; the next turn's transcript carries "[Tools used: …]" and "[Proposed SQL: … — waiting for the user's decision; it has not been run]" under the answer. **Deciding**: a rejected proposal calls the reject command and cannot be approved afterwards; "run without the limit" is ignored before anything was held back; an approval that the row limit holds back leaves the proposal blocked, and running what was held back keeps the statement that ran before it on record and replaces the held one; a final proposal cannot be approved again; a server error is final; a run that could not start (the mocked command rejects) leaves the proposal pending with the message; the transcript notes for rejected, run, failed and waiting proposals; "New chat" withdraws only what was never decided |
 
@@ -395,6 +408,15 @@ In-app updates (stages `update-available`, `update-refused`, right after the emp
 4. "Download and install" must end in "The update was not installed" with the reason: a development build is no app bundle (in the bundled build: the package is not on the server). After "Close" the status bar must still offer the update.
 
 After a full run the runner reads the server's log: every request must be a `GET` of `/latest.json` (or of the package, in the bundled build), with no header besides `Accept`, `Accept-Encoding`, `Host` and `User-Agent`, a `User-Agent` of the updater plugin, and nothing in it that names the user, a connection or a database of the test. Installing for real is not in this test; `e2e/update.sh` does that (below).
+
+Backups (stages `backup-done`, `backup-schedule`, and the `backups` log entry, after the database menu). The folder dialog is answered by the runner with a folder in its temporary directory.
+
+1. "Back up…" in the menu of MySQL's `puricat_e2e`: the dialog names the dump tool and the server; the folder offered is `Documents/PuriCat Backups` (it is not created: the test chooses another first); "Choose…" puts the chosen folder there; the previewed file name has the connection, the database and a time; the history is empty.
+2. "Back up now" must end in "Backup saved" with a file in the chosen folder, and the run must appear in the history.
+3. A schedule: "Every day", 03:15, keep 3. Before saving the status says "Not saved yet."; after saving it says that a development build installs no background runner (so no next time is shown), and `backup_plan` returns the job as saved. "Off" and "Remove schedule" bring the status back to "Backups are made only when you ask."
+4. PostgreSQL's `puricat_e2e`: the archive format is the default and the file ends in `.dump`. Opened again, the dialog has the folder and the run.
+
+After a full run the runner checks the two files: exactly two in the folder, mode 0600; the MySQL dump gunzips to a complete dump with the `orders` table; `pg_restore --list` finds the `orders` data in the archive; and no LaunchAgent was installed. Not covered here: Stop, a failure through the UI, a weekly schedule, "Show in Finder", the dialog in Thai and dark.
 
 ### Updater test: `e2e/update.sh`
 
@@ -553,6 +575,30 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The end-to-end test starts no real AI CLI and sends nothing to an AI provider: `e2e/fixtures/bin` is put first on `PATH` for the app it launches, and the stand-ins only print canned lines and write what they were given into the runner's temporary work directory. In the database-tool stages the stand-in also starts the app's own executable as a relay and calls PuriCat's tools on `puricat_e2e`; what the tools return goes to the stand-in and into that work directory, nowhere else. `PURICAT_STAND_IN_DIR` is read by the stand-in scripts, not by PuriCat.
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
+
+## Results — 2026-11-19 (backups)
+
+macOS on Apple Silicon; local MySQL 9.3.0 with `mysqldump` 9.3.0, local PostgreSQL 16.13 with `pg_dump` 16.13 (a `pg_dump` 17 and one of libpq 18 are installed too; the chooser took 16, the server's own major). Neither server asks for a password. Only what was run for this change is listed. Design: [ADR 0021](docs/adr/0021-backups-with-dump-tools.md).
+
+| Check | Result |
+|---|---|
+| `pnpm check` | Pass on the final code: 91 Vitest cases in 14 files (4 new, `src/features/backup/schedule.test.ts`); 111 Rust unit tests of the core, 2 ignored (14 new: 9 in `backup`, 5 in `backup_schedule`); 3 in the app crate (2 new: the LaunchAgent's property list, the folder as a full path); fmt, clippy and typecheck clean |
+| `cargo test --workspace` with both servers configured | Pass: every live suite, with `live_backup` 3 passed. Each backup was restored into a second database and compared |
+| `e2e/run.sh` (dev-server mode), the whole smoke test with the stages `backup-done` and `backup-schedule` | Pass, once, on the final code, with an empty `problems` list; the runner's check of the two backup files passed. An earlier full run passed in the app and failed in that check for a reason in the check itself (`grep -q` closing a pipe under `pipefail`), which was fixed |
+| The two stages as a partial script | Failed three times before they passed, and found one defect in the dialog: under React's strict mode a "still mounted" flag stayed false, so the folder chosen in the dialog never reached the form. Fixed; the stage would have caught nothing of it in a production build, where strict mode does not remount |
+| Screenshots (`SHOTS=1`) | Looked at by hand: the dialog after a backup and with a schedule (English, light). The first look led to two changes (a row of the schedule broke over two lines; sizes under 0.1 MB were shown as "<0.1 MB") |
+| **A scheduled run started by launchd** | Done once, by hand, with a bundled debug build (`PURICAT_BACKUP_AGENT=1`, label `com.purivaro.puricat.backups.dev`, a throwaway settings directory): a daily job was saved for two minutes later and the app was closed. launchd reported `runs = 1`, `last exit code = 0`; the folder held one complete dump, mode 0600; the history had the run as scheduled and `ok`; the runner's log had its line. The schedule was then removed through the app: the property list was gone and launchd no longer had the agent. Not an automated test, and the script used is not in the repository |
+| `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Not run with these stages |
+
+Not verified (details under "Gaps"):
+
+- **any server or tool but the pair above**: MariaDB as a server or as the tool, MySQL 5.7 and 8.x, older or newer PostgreSQL, `pg_dump` being refused for a newer server (unit-tested only);
+- **a server that needs a password**: the option file and `PGPASSWORD` were exercised only by a wrong password being refused. A server that enforces TLS, and the tools' TLS options, were not tried at all;
+- **a scheduled run from an installed release**: whether the Keychain gives the runner the password without a prompt, the "Background Items" notice, the failure notification, a run made up for after sleep, a weekly schedule under launchd, an app that was moved;
+- a large database, a dump that fails half way, a full disk, an external disk that is unplugged;
+- Stop, a failed backup and "Show in Finder" through the UI; the dialog in Thai and in the dark theme; a weekly schedule in the form;
+- MyISAM tables and MySQL events in a dump;
+- what a second runner does while one is at work (the lock), and the app and the runner writing the settings database at the same moment.
 
 ## Results — 2026-11-19 (in-app updates)
 
@@ -934,6 +980,9 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Export through the Save dialog and the Export menu | The end-to-end test calls `export_result` directly; the menu being disabled during a run and a failing Save dialog are not exercised. XLSX cell types are not read back by any test (the unit test checks which texts convert; the runner checks that the Thai name is in the workbook). A JSON file from a result with two columns of one name is not written by a test (the key naming is unit-tested) |
 | History: masking on the `run_sql` path, loading an entry, "Clear history", deletion with the connection | The masking function and the store are unit-tested; the end-to-end test only lists the entries. `delete_connection` clearing the history is not asserted (the end-to-end test deletes a connection that has none). A literal after a double-quoted `"password"` identifier is not tested ([SECURITY.md](SECURITY.md)) |
 | Completion and formatting in the SQL editor | No automated test |
+| Backups: other servers and tools | Everything was run with `mysqldump` 9.3.0 against MySQL 9.3.0 and `pg_dump` 16.13 against PostgreSQL 16.13, on servers that ask for no password and no TLS. MariaDB, MySQL 5.7 / 8.x, a password that is accepted, TLS options, a refused `pg_dump`: unit tests of the argument vectors and of the chooser only, or nothing |
+| Backups: scheduled runs from an installed release | launchd started the runner once from a development build. The release's Keychain access, the notification, a run after sleep, weekly schedules, a moved app, two runners at once: not tried |
+| Backups: failure paths and the rest of the dialog | A dump that breaks off, a full disk, an unplugged disk, Stop and a failure through the UI, "Show in Finder", Thai and dark, a large database: no test |
 | In-app updates: a released build | Everything was tested with debug builds and stand-in servers on `127.0.0.1` (`e2e/update.sh`, two stages of the smoke test). No release build has asked GitHub, followed its redirect, required HTTPS or replaced a notarized app. The release workflow's steps that build, check and publish the package and `latest.json` have not run |
 | In-app updates: around the install | The warning about unsaved tabs and the restart with such tabs; a download that breaks off; an app the user cannot write to or that runs from the disk image; the menu item and the palette command; the dialog in Thai and dark: no test |
 | The "New query" button beyond two cases | The end-to-end test clicks it with a MySQL table tab in front and with the welcome tab in front while two connections are open (where it also sends ⌘T, for its message). With a query tab in front, with a single connection, with none connected, the menu in Thai or dark or with a SQLite connection in it, and the keyboard: no test |
