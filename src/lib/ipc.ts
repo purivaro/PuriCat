@@ -7,6 +7,12 @@ import type {
   AppError,
   ApplyResult,
   AuditEntry,
+  BackupAgent,
+  BackupFormat,
+  BackupJob,
+  BackupPlan,
+  BackupRun,
+  BackupSettings,
   CellContent,
   ChangeSet,
   ChatRequest,
@@ -157,6 +163,29 @@ export const ipc = {
   agentProposalReject: (id: string) => invoke<void>("agent_proposal_reject", { id }),
   agentAudit: (limit: number) => invoke<AuditEntry[]>("agent_audit", { limit }),
   clearAgentAudit: () => invoke<void>("clear_agent_audit"),
+  /** What the backup dialog of a database shows: the dump tool, the saved settings, the history. */
+  backupPlan: (id: string, database: string) => invoke<BackupPlan>("backup_plan", { id, database }),
+  /** Shows the native dialog for a folder. `null` when it was cancelled. */
+  pickBackupFolder: () => invoke<string | null>("pick_backup_folder"),
+  /** Saves the settings and installs or removes the background runner to match every schedule. */
+  saveBackupJob: (id: string, database: string, settings: BackupSettings) =>
+    invoke<{ job: BackupJob; agent: BackupAgent; nextRun: string | null }>("save_backup_job", { id, database, settings }),
+  /** Backs the database up now. Resolves with the run, kept or failed; `cancelJob(job)` stops it. */
+  runBackup: (
+    id: string,
+    database: string,
+    target: { destination: string; format: BackupFormat; compress: boolean },
+    job: string,
+    onProgress: (bytes: number) => void,
+  ) => {
+    const channel = new Channel<number>();
+    channel.onmessage = onProgress;
+    return invoke<BackupRun>("run_backup", { id, database, target, job, onProgress: channel });
+  },
+  listBackupRuns: (id: string | null, database: string | null, limit: number) =>
+    invoke<BackupRun[]>("list_backup_runs", { id, database, limit }),
+  /** Shows the file of a run in Finder. */
+  revealBackup: (run: number) => invoke<void>("reveal_backup", { run }),
   /** Asks the release manifest for a newer version. `null`: this is the latest. */
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   /** Downloads, verifies and installs what the last check found. The app keeps running. */

@@ -351,6 +351,68 @@
     await waitFor(() => !dbRowOf("Demo PostgreSQL", "puricat_e2e_renamed"), "the database gone from the explorer");
     log.push({ stage: "database-menu", flushPlan, flushToast, renamePlan });
 
+    // ---- backups: a database's menu, a folder of the user's choice, the history, a schedule
+    const backupDialog = () => document.querySelector("[data-backup-dialog]");
+    const inBackup = (sel) => backupDialog()?.querySelector(sel);
+    const backUp = async (connectionName, extension) => {
+      await dbMenu(connectionName, "puricat_e2e", "Back up…");
+      await waitFor(() => inBackup("[data-backup-tool]"), `the dump tool for ${connectionName}`, 20000);
+      const tool = inBackup("[data-backup-tool]").textContent.replace(/\s+/g, " ").trim();
+      // Nothing was chosen yet: the folder offered is in the user's Documents. It is only
+      // created when a backup is made, and the test chooses another one first.
+      const offered = inBackup("[data-backup-folder]").textContent.trim();
+      if (!offered.endsWith("/Documents/PuriCat Backups")) throw new Error(`the folder offered is ${offered}`);
+      await click(inBackup("[data-backup-choose]"), "choose the folder");
+      await waitFor(() => inBackup("[data-backup-folder]").textContent.trim() === "__WORK__/backups", "the chosen folder");
+      const preview = inBackup("[data-backup-file-name]").textContent.trim();
+      const pattern = new RegExp(`^${connectionName.replace(" ", "-")}_puricat_e2e_\\d{4}-\\d\\d-\\d\\d_\\d{6}\\.${extension.replace(".", "\\.")}$`);
+      if (!pattern.test(preview)) throw new Error(`the file name previewed is ${preview}`);
+      if (all("[data-backup-run]").length !== 0) throw new Error("a database that was never backed up has a history");
+      await click(inBackup("[data-backup-now]"), "back up now");
+      const result = await waitFor(() => inBackup("[data-backup-result]"), "the backup to end", 60000);
+      const said = result.textContent.replace(/\s+/g, " ").trim();
+      if (result.dataset.backupResult !== "ok" || !said.includes("Backup saved")) throw new Error(`the backup of ${connectionName} ended with: ${said}`);
+      const file = said.match(/\/[^ ]+_puricat_e2e_[\d_-]+\.[a-z.]+/)?.[0];
+      if (!file?.startsWith("__WORK__/backups/") || !file.endsWith(`.${extension}`)) throw new Error(`the backup was saved as ${file}`);
+      await waitFor(() => all("[data-backup-run]").length === 1 && inBackup('[data-backup-run="ok"]'), "the run in the history");
+      return { tool, preview, file, history: inBackup("[data-backup-run]").textContent.replace(/\s+/g, " ").trim() };
+    };
+    const closeBackup = async () => {
+      await click(inBackup('button[aria-label="Close"]'), "close the backup dialog");
+      await waitFor(() => !backupDialog(), "the backup dialog to close");
+    };
+
+    const mysqlBackup = await backUp("Demo MySQL", "sql.gz");
+    await stage("backup-done", { mysqlBackup });
+    // A schedule: every day at 03:15, keeping three. A development build installs no
+    // background runner, and the dialog says that the schedule will not run instead of
+    // showing a next time.
+    await click(exact('[data-backup-dialog] [role="radio"]', "Every day"), "every day");
+    await type(await waitFor(() => inBackup("[data-backup-time]"), "the time field"), "03:15");
+    await type(inBackup("[data-backup-keep]"), "3");
+    const scheduleStatus = () => inBackup("[data-backup-schedule-status]").textContent.replace(/\s+/g, " ").trim();
+    await waitFor(() => scheduleStatus() === "Not saved yet.", "the schedule shown as not saved");
+    await click(inBackup("[data-backup-save]"), "save the schedule");
+    await waitFor(() => scheduleStatus().includes("development build does not install the background runner"), "the schedule's status", 15000);
+    const backupConnection = (await invoke("list_connections")).find((c) => c.name === "Demo MySQL").id;
+    const savedJob = (await invoke("backup_plan", { id: backupConnection, database: "puricat_e2e" })).job;
+    if (JSON.stringify(savedJob.schedule) !== '{"kind":"daily","hour":3,"minute":15}' || savedJob.keep !== 3 || savedJob.destination !== "__WORK__/backups")
+      throw new Error(`the job was saved as ${JSON.stringify(savedJob)}`);
+    await stage("backup-schedule", { status: scheduleStatus(), savedJob });
+    await click(exact('[data-backup-dialog] [role="radio"]', "Off"), "schedule off");
+    await click(await waitFor(() => exact("[data-backup-dialog] button", "Remove schedule"), "the remove button"), "remove the schedule");
+    await waitFor(() => scheduleStatus() === "Backups are made only when you ask.", "the schedule removed", 15000);
+    await closeBackup();
+
+    // PostgreSQL: its own archive by default, into the folder chosen for this database.
+    const pgBackup = await backUp("Demo PostgreSQL", "dump");
+    await closeBackup();
+    // Opened again, the dialog remembers the folder and shows the run.
+    await dbMenu("Demo PostgreSQL", "puricat_e2e", "Back up…");
+    await waitFor(() => inBackup("[data-backup-folder]")?.textContent.trim() === "__WORK__/backups" && all("[data-backup-run]").length === 1, "the remembered folder and the history", 20000);
+    await closeBackup();
+    log.push({ stage: "backups", mysqlBackup, pgBackup });
+
 
     // ---- editing: type, paste from a spreadsheet, undo, review, save ------------------
     const gridEl = () => document.querySelector(`${panelSel} [role="grid"]`);

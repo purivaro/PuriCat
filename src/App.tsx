@@ -13,6 +13,7 @@ import { Explorer } from "./components/layout/Explorer";
 import { TitleBar } from "./components/layout/TitleBar";
 import { Workspace } from "./components/layout/Workspace";
 import { Button, StateMessage } from "./components/ui/primitives";
+import { BackupDialog } from "./features/backup/BackupDialog";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
 import { DatabaseDialogs } from "./features/schema/DatabaseDialogs";
 import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
@@ -302,6 +303,7 @@ export default function App() {
       <DeleteConnectionDialog />
       <NewDatabaseDialog />
       <DatabaseDialogs />
+      <BackupDialog />
       <UpdateDialog />
       <CommandPalette />
       <Toaster

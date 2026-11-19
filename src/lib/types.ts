@@ -443,6 +443,77 @@ export interface ChatRequest {
   tools: ToolScope | null;
 }
 
+export type BackupFormat = "sql" | "custom";
+
+/** When a backup runs by itself, in local time. `days`: 1 = Monday … 7 = Sunday. */
+export type BackupSchedule =
+  | { kind: "off" }
+  | { kind: "daily"; hour: number; minute: number }
+  | { kind: "weekly"; days: number[]; hour: number; minute: number };
+
+export interface DumpTool {
+  path: string;
+  client: "mysql" | "mariadb" | "postgres";
+  version: string;
+  major: number;
+}
+
+export interface BackupJob {
+  id: number;
+  connectionId: string;
+  database: string;
+  destination: string;
+  format: BackupFormat;
+  compress: boolean;
+  schedule: BackupSchedule;
+  /** Scheduled backups to keep; 0 keeps all. */
+  keep: number;
+  updatedAt: number;
+}
+
+export interface BackupRun {
+  id: number;
+  startedAt: number;
+  finishedAt: number;
+  connectionId: string;
+  connectionName: string;
+  database: string;
+  scheduled: boolean;
+  status: "ok" | "failed" | "stopped";
+  file: string | null;
+  bytes: number | null;
+  tool: string;
+  message: string;
+  /** When the retention rule deleted the file. */
+  removedAt: number | null;
+}
+
+export interface BackupAgent {
+  supported: boolean;
+  needed: boolean;
+  installed: boolean;
+  problem: string | null;
+}
+
+export interface BackupPlan {
+  serverVersion: string;
+  choice: { tool: DumpTool | null; problem: string | null; warning: string | null };
+  job: BackupJob | null;
+  defaultDestination: string;
+  runs: BackupRun[];
+  agent: BackupAgent;
+  /** Local time `YYYY-MM-DDTHH:MM`, only when the schedule will really run. */
+  nextRun: string | null;
+}
+
+export interface BackupSettings {
+  destination: string;
+  format: BackupFormat;
+  compress: boolean;
+  schedule: BackupSchedule;
+  keep: number;
+}
+
 /** A newer version found by the last check. */
 export interface UpdateInfo {
   version: string;

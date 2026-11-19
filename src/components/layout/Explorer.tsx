@@ -8,6 +8,7 @@ import {
   Eye,
   FileCode2,
   FolderTree,
+  HardDriveDownload,
   Lock,
   Pencil,
   Plug,
@@ -400,6 +401,12 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                           onSelect={() => useUi.getState().askDatabaseTask({ kind: "edit", connection, database: db.name })}
                         >
                           <DatabaseBackup className="size-3.5" /> {t("schema.editDatabase")}
+                        </ContextMenu.Item>
+                      )}
+                      {/* A dump of one database, made with the vendor's own tool. */}
+                      {!db.system && (
+                        <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askBackup({ connection, database: db.name })}>
+                          <HardDriveDownload className="size-3.5" /> {t("backup.menu")}
                         </ContextMenu.Item>
                       )}
                     </>
