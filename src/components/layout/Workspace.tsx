@@ -151,7 +151,7 @@ function NewQueryButton() {
         <QueryButton />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align="start" sideOffset={4} className={menuContentClass}>
+        <DropdownMenu.Content align="start" sideOffset={4} collisionPadding={12} className={menuContentClass}>
           {connected.map((c) => (
             <DropdownMenu.Item key={c.id} className={menuItemClass} onSelect={() => openSql(c.id, null)}>
               <EngineTag engine={c.engine} className="size-4 rounded text-[9px]" />

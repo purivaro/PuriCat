@@ -775,7 +775,22 @@
     if (viaButton !== "Query 1 — Demo MySQL › puricat_e2e") throw new Error(`the new query button opened “${viaButton}” from “${frontBefore}”`);
     await click(frontTab().querySelector("button"), "close the button's query tab");
     await waitFor(() => !all('[role="tab"]').some((t) => t.title.startsWith("Query 1")), "that tab to close");
-    log.push({ stage: "new-query-button", frontBefore, viaButton });
+    // With two connections open and the welcome tab in front, it asks which one.
+    await click(all('[role="tab"]')[0], "welcome tab");
+    document.querySelector("[data-new-query]").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    await waitFor(() => menuItemWith("New query on "), "the connections under the new query button");
+    const asked = all(`[role="menu"]${OPEN} [role="menuitem"]`).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    if (asked.length !== 2 || !asked.some((x) => x.endsWith("New query on Demo MySQL")) || !asked.some((x) => x.endsWith("New query on Demo PostgreSQL")))
+      throw new Error(`the new query button offered ${JSON.stringify(asked)}`);
+    await stage("new-query-menu", { frontBefore, viaButton, asked });
+    await click(menuItemWith("New query on Demo PostgreSQL"), "new query on postgres");
+    const viaMenu = (await waitFor(() => frontTab()?.title.startsWith("Query 1 — ") && frontTab(), "query tab from the menu")).title;
+    if (viaMenu !== "Query 1 — Demo PostgreSQL") throw new Error(`the menu opened “${viaMenu}”`);
+    await click(frontTab().querySelector("button"), "close the menu's query tab");
+    await waitFor(() => !all('[role="tab"]').some((t) => t.title.startsWith("Query 1")), "that tab to close");
+    await click(all('[role="tab"]').find((t) => t.title === frontBefore), "back to the tab that was in front");
+    await waitFor(() => frontTab()?.title === frontBefore, "that tab in front again");
+    log.push({ stage: "new-query-button", frontBefore, viaButton, asked, viaMenu });
 
     await rightClick(treeRow("Demo MySQL"));
     await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
