@@ -1,6 +1,9 @@
+mod backups;
 mod commands;
 mod state;
 mod updates;
+
+pub use backups::run_backups;
 
 use tauri::Manager;
 
@@ -21,6 +24,12 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             let state = tauri::async_runtime::block_on(state::AppState::open(&dir))?;
             app.manage(state);
+            // The app may have moved since a schedule was saved: point the background runner
+            // at this copy again. Nothing happens when no job has a schedule.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = backups::sync_agent(&handle.state::<state::AppState>()).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -81,6 +90,12 @@ pub fn run() {
             commands::agent_proposal_reject,
             commands::agent_audit,
             commands::clear_agent_audit,
+            backups::backup_plan,
+            backups::pick_backup_folder,
+            backups::save_backup_job,
+            backups::run_backup,
+            backups::list_backup_runs,
+            backups::reveal_backup,
             updates::check_update,
             updates::install_update,
             updates::restart_app,

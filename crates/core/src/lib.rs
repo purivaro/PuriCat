@@ -6,6 +6,8 @@
 pub mod agent;
 pub mod agent_tools;
 pub mod ai_detect;
+pub mod backup;
+pub mod backup_schedule;
 pub mod db;
 pub mod error;
 pub mod mcp;

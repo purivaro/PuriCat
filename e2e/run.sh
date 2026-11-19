@@ -81,7 +81,9 @@ export PURICAT_STAND_IN_DIR="$WORK"
 printf 'SELECT 42 AS answer; -- เปิดจากไฟล์\n' >"$WORK/open.sql"
 printf 'id,name,city\n9001,ทดสอบภาษาไทย,ลำปาง\n' | iconv -f UTF-8 -t CP874 >"$WORK/thai874.csv"
 { echo "id,name,city"; seq 1 10001 | sed 's/$/,x,y/'; } >"$WORK/big.csv"
-export PURICAT_E2E_PICK="$WORK/open.sql:$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
+# After the SQL file come the folder the backups go to, once for each of the two databases
+# backed up (a folder dialog is answered like a file dialog).
+export PURICAT_E2E_PICK="$WORK/open.sql:$WORK/backups:$WORK/backups:$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
 # A release that does not exist, on a server of the test's own: the app must find it, show it,
 # and fail to install it without harm (the package is not there).
 mkdir -p "$WORK/updates"
@@ -241,6 +243,25 @@ if [ "$last" = done ]; then
   made=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname IN ('puricat_e2e_made', 'puricat_e2e_renamed')")
   [ "$made" = 0 ] || { echo "✗ database check failed: PostgreSQL still has $made of the created and renamed databases"; exit 1; }
   echo "  · databases verified on both servers: created, altered, renamed, dropped"
+fi
+if [ "$last" = done ]; then
+  # The two backups made through the window are real: MySQL's is a complete gzipped dump of
+  # the demo tables, PostgreSQL's an archive that pg_restore can list. Both are readable by
+  # their owner only, nothing unfinished is left, and no background runner was installed.
+  mysql_backup=$(ls "$WORK"/backups/Demo-MySQL_puricat_e2e_*.sql.gz)
+  pg_backup=$(ls "$WORK"/backups/Demo-PostgreSQL_puricat_e2e_*.dump)
+  [ "$(ls -A "$WORK/backups" | wc -l | tr -d ' ')" = 2 ] || { echo "✗ backup check failed: the folder holds $(ls -A "$WORK/backups")"; exit 1; }
+  for f in "$mysql_backup" "$pg_backup"; do
+    [ "$(stat -f %Lp "$f")" = 600 ] || { echo "✗ backup check failed: $f has mode $(stat -f %Lp "$f")"; exit 1; }
+  done
+  # Into files first: with `pipefail`, a `grep -q` that stops reading early fails the pipe.
+  gunzip -c "$mysql_backup" >"$WORK/backup.sql"
+  "$(dirname "$PSQL")/pg_restore" --list "$pg_backup" >"$WORK/backup.toc"
+  grep -q 'CREATE TABLE `orders`' "$WORK/backup.sql" || { echo "✗ backup check failed: no orders table in the MySQL dump"; exit 1; }
+  tail -1 "$WORK/backup.sql" | grep -q '^-- Dump completed' || { echo "✗ backup check failed: the MySQL dump is cut short"; exit 1; }
+  grep -q 'TABLE DATA shop orders' "$WORK/backup.toc" || { echo "✗ backup check failed: no orders data in the PostgreSQL archive"; exit 1; }
+  [ ! -e "$HOME/Library/LaunchAgents/com.purivaro.puricat.backups.dev.plist" ] || { echo "✗ backup check failed: the test installed a LaunchAgent"; exit 1; }
+  echo "  · backups: MySQL dump and PostgreSQL archive verified, no background runner installed"
 fi
 if [ "$last" = done ]; then
   # What looking for an update sent: a plain GET of the manifest, with nothing that says who

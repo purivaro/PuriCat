@@ -17,6 +17,8 @@ Status on 2026-11-16. This is a hand-maintained summary of **direct** dependenci
 | `tauri-plugin-clipboard-manager` (+ `@tauri-apps/plugin-clipboard-manager`) | 2 | MIT OR Apache-2.0 | Plain-text copy and paste in the data grid |
 | `tauri-plugin-dialog` (+ `@tauri-apps/plugin-dialog`) | 2 | Apache-2.0 OR MIT (npm package: MIT OR Apache-2.0) | Native Save dialog for exports; only the `save` permission is granted |
 | `tauri-plugin-updater` | 2 | Apache-2.0 OR MIT | Looking for a newer version, verifying and installing it ([ADR 0020](docs/adr/0020-in-app-updates.md)). Brings in `reqwest` (MIT OR Apache-2.0) with rustls, `minisign-verify` (MIT), `tar`, `flate2` and `zip` (MIT OR Apache-2.0 / MIT) |
+| chrono | 0.4 | MIT OR Apache-2.0 | The local time in a backup's file name and in backup schedules |
+| flate2 | 1 | MIT OR Apache-2.0 | Gzip for SQL backups |
 | rust_xlsxwriter | 0.96 | MIT OR Apache-2.0 | Writing XLSX exports |
 | csv (+ csv-core) | 1 | Unlicense OR MIT | Reading CSV and TSV files for Smart Paste |
 | calamine (+ quick-xml, codepage, atoi_simd, fast-float2) | 0.35 | MIT (calamine, quick-xml); MIT OR Apache-2.0 (the others) | Reading Excel and OpenDocument workbooks for Smart Paste |

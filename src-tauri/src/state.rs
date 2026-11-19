@@ -45,6 +45,8 @@ pub struct Proposal {
 }
 
 pub struct AppState {
+    /// Where the settings database is. The background backup runner is told this path.
+    pub data_dir: std::path::PathBuf,
     pub store: Store,
     pub secrets: Arc<dyn SecretStore>,
     /// Open sessions by connection id.
@@ -72,6 +74,7 @@ pub struct AppState {
 impl AppState {
     pub async fn open(data_dir: &Path) -> Result<Self> {
         Ok(AppState {
+            data_dir: data_dir.to_path_buf(),
             store: Store::open(&data_dir.join("puricat.db")).await?,
             secrets: secret_store(),
             sessions: RwLock::new(HashMap::new()),
@@ -167,7 +170,7 @@ impl AppState {
     }
 }
 
-fn secret_store() -> Arc<dyn SecretStore> {
+pub(crate) fn secret_store() -> Arc<dyn SecretStore> {
     // Development escape hatch: keep secrets in memory so unsigned debug builds do not
     // trigger a Keychain prompt on every rebuild. Compiled out of release builds.
     #[cfg(debug_assertions)]

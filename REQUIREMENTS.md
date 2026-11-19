@@ -100,10 +100,10 @@ Status values: **Done** (implemented and verified), **Partial** (some of it is i
 
 | Requirement | Acceptance criteria | Status |
 |---|---|---|
-| Manual backup per engine with version checks | Accurate status; contents documented | Planned (Phase 6) |
-| Scheduled backup that runs without the app open | Uses an installed OS scheduler; limits shown in the UI | Planned (Phase 6) |
-| Retention, optional encryption, history, notifications | Failures are visible, never silent | Planned (Phase 6) |
-| Restore with integrity verification | Never overwrites production without explicit confirmation | Planned (Phase 6) |
+| Manual backup per engine with version checks | Accurate status; contents documented | Done for MySQL and PostgreSQL ([ADR 0021](docs/adr/0021-backups-with-dump-tools.md)): the vendor's dump tool is found and chosen for the server's version, the folder is the user's choice, a file is kept only after it was checked, and every run is in the history. Verified with `mysqldump` 9.3.0 / MySQL 9.3.0 and `pg_dump` 16.13 / PostgreSQL 16.13 by restoring each backup and comparing. SQL Server and SQLite: no backup |
+| Scheduled backup that runs without the app open | Uses an installed OS scheduler; limits shown in the UI | Done on macOS: a per-user LaunchAgent starts the app's own executable as a runner; a next time is shown only when launchd has it loaded. Run once for real from a development build (launchd started the runner with the app closed); not yet from an installed release |
+| Retention, optional encryption, history, notifications | Failures are visible, never silent | Partial: retention by count (scheduled backups only, after a newer one was kept), the history, and a system notification for a failed scheduled run are done. **Encryption is not built**: files are readable by their owner only |
+| Restore with integrity verification | Never overwrites production without explicit confirmation | Not built. [BACKUP_RESTORE.md](BACKUP_RESTORE.md) gives the commands for a restore by hand, and the rules a restore in the app will follow |
 
 ## 8. Distribution, security and quality
 

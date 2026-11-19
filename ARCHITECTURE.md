@@ -54,6 +54,8 @@ The backend also writes export files (CSV, JSON, XLSX) to paths the user picks i
 | `model` | `ConnectionProfile`, `Engine` (`mysql`, `postgres`, `sqlite`, `sqlserver` — the last has no adapter). A SQLite profile is a `file` path; host, port, user name, default database and TLS are cleared, `Environment`, `TlsMode`; input normalisation |
 | `store` | SQLite settings database: `connections` (one JSON profile per row plus timestamps), `settings` (key/value), since migration 2 `query_history` (one row per run of a query tab; at most 1,000 rows are kept) and, since migration 3, `agent_audit` (the AI activity log: time, connection id and name, database, provider, model, event, SQL, detail; `add_audit` keeps the newest 5,000 rows, `list_audit` returns at most 1,000 newest first, `clear_audit` deletes all) and, since migration 4, `saved_scripts` (the user's saved scripts: connection id, name, text, created and updated times; a name is unique per connection without regard to ASCII case, at most 120 characters and one line; the text is stored as written, at most 1 MB). Append-only migrations keyed on `PRAGMA user_version`; a database from a newer build is refused |
 | `secrets` | `SecretStore` trait; `OsKeychain` (via `keyring`) and `MemoryStore` (tests, debug runs). Service `PuriCat`, key `connection/<id>/password` |
+| `backup` | Backups with the vendors' dump tools ([ADR 0021](docs/adr/0021-backups-with-dump-tools.md)): finding the tools and reading their versions, choosing one for a server, the argument vectors and the option file, one run (`run`) from the partial file to the checked and renamed one |
+| `backup_schedule` | `Schedule` (off, daily, weekly) with its previous and next time and launchd's calendar entries; `is_due`; which scheduled backups are beyond the number to keep; `perform` (one backup written into the history, then retention) and `run_due` (every job that is due), used by the app and by the runner |
 | `db` | `Session` enum (`MySql`, `Postgres`, `Sqlite`), `Capabilities`, shared paging/truncation logic, `ident` quoting, one module of SQL per engine. `db::sqlite` opens a file (existing files only, read-only when asked, nothing of the file's settings changed), reads the catalogue from `sqlite_master` and the `pragma_…` table functions, and maps declared types to an affinity and a value kind ([ADR 0018](docs/adr/0018-sqlite-files.md)) |
 | `db::filter` | Turns the conditions of a table tab's filter into one parameterised `WHERE` clause: a fixed set of operators, the column checked against the table's metadata, typed comparison for numbers, dates and text, the shown text for everything else ([DATABASE_COMPATIBILITY.md](DATABASE_COMPATIBILITY.md), "Row filter") |
 | `db::write` | Turns a change set (updates, inserts, deletes) into parameterised statements and enforces the write rules; the engine modules execute the plan in one transaction ([ADR 0013](docs/adr/0013-staged-edits-and-optimistic-saves.md)) |
@@ -79,6 +81,10 @@ The backend also writes export files (CSV, JSON, XLSX) to paths the user picks i
 | Query results | Backend memory, per query tab | The full rows of the tab's last run, replaced by the next run and dropped with the tab's console. Never written to disk except by an export |
 | Exported files | Wherever the user saves them | Written by the backend; PuriCat keeps no record of them |
 | Passwords | OS credential store | Never written to `puricat.db` |
+| Backup settings and history | `puricat.db`, tables `backup_jobs` (one per database: folder, format, schedule, how many to keep) and `backup_runs` (every run: time, by hand or scheduled, outcome, tool, size, file, reason; the last 2,000) | Also read and written by the backup runner while the app may be open |
+| Backup files | The folder the user chose | Mode 0600, not encrypted. PuriCat keeps no copy; retention deletes scheduled backups beyond the number to keep |
+| The backup runner's lock and log | `backup-runner.lock`, `backup-runner.log` in the app-data directory | The lock keeps two runners from working at once; the log has one line per scheduled run |
+| The LaunchAgent of scheduled backups | `~/Library/LaunchAgents/com.purivaro.puricat.backups.plist` | Exists only while some job has a schedule. Starts `puricat --run-backups --data-dir <app-data directory>` |
 | Agent chat preferences | `puricat.db`, table `settings`, key `agent` | Provider, model per provider, the "Share context" switch, the access level of the database tools (`none`, `schema` or `data`; anything else is read as `none`) |
 | Agent conversation | Web view memory (`stores/agent.ts`) | The turns, and with each sent message the exact context that went with it; with each answer its tool steps (what was asked, the exact text the model was given) and its proposals with their outcomes. Gone with "New chat" or when the app closes; never written to disk by PuriCat |
 | The AI's undecided proposals | Backend memory (`AppState.proposals`), by id | Connection, database, SQL, provider, model, what the impact guard held back, and whether it is running. Removed when run, rejected or cleared with the conversation; lost when the app closes |
@@ -89,7 +95,7 @@ The backend also writes export files (CSV, JSON, XLSX) to paths the user picks i
 
 ## IPC surface
 
-All commands are registered in `src-tauri/src/lib.rs` and implemented in `commands.rs`; the three of the updater are in `updates.rs`. Errors arrive as `{ kind, message }`.
+All commands are registered in `src-tauri/src/lib.rs` and implemented in `commands.rs`; the six of the backups are in `backups.rs` and the three of the updater in `updates.rs`. Errors arrive as `{ kind, message }`.
 
 | Command | Arguments | Returns |
 |---|---|---|
@@ -150,6 +156,12 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `agent_proposal_reject` | `id` | — (removes the stored proposal and logs `rejected`; unknown ids are ignored; a running proposal is refused with `conflict`) |
 | `agent_audit` | `limit` (capped at 1,000) | Entries of the AI activity log, newest first |
 | `clear_agent_audit` | — | — (deletes every entry of the activity log) |
+| `backup_plan` | `id`, `database` | The server's version, the dump tool chosen (or why none), the database's saved job, the folder first offered, its last 20 runs, the state of the LaunchAgent, and the next scheduled time when one will really run |
+| `pick_backup_folder` | — | The folder chosen in the native dialog, or `null` |
+| `save_backup_job` | `id`, `database`, `settings` (folder, format, compress, schedule, keep) | The saved job, the agent's state and the next time. Installs, updates or removes the LaunchAgent to match every schedule |
+| `run_backup` | `id`, `database`, `target` (folder, format, compress), `job`, `onProgress` (channel) | The run as written into the history, whatever its outcome. The settings are remembered. `cancel_job(job)` stops it |
+| `list_backup_runs` | `id`, `database` (both or neither), `limit` | Runs, newest first |
+| `reveal_backup` | `run` | — (shows the file of that run in Finder) |
 | `check_update` | — | A newer version (`version`, `currentVersion`, `date`, `notes`) or `null`; what was found is kept in `AppState.update` |
 | `install_update` | `onProgress` (channel) | — (downloads, verifies and installs what the last check found; refused outside an app bundle). Progress as `{ downloaded, total }` |
 | `restart_app` | — | — (the app starts again) |
@@ -274,6 +286,17 @@ An approved proposal:
 4. If a statement was blocked, the proposal stays in `AppState.proposals` with `resume` — that statement and the rest of the script — and the card offers "Run without the limit…". Confirming it calls `agent_proposal_run` with `liftLimit: true`, which runs `resume` with no `changeLimit`; the store puts the new outcome after the statements that had already run. If the run ended any other way the proposal is removed; if it could not start, it is kept and the card shows the error.
 5. "Reject", "Don't run it" and "New chat" call `agent_proposal_reject`, which removes the proposal and logs `rejected`. Stop on a running proposal calls `cancel_sql` with `proposal:<id>`.
 6. The history icon in the AI panel opens `ActivityLog.tsx`, which calls `agent_audit` with a limit of 500; "Clear log" calls `clear_agent_audit`.
+
+## Data flow: a backup
+
+Design: [ADR 0021](docs/adr/0021-backups-with-dump-tools.md).
+
+1. "Back up…" in a database's menu sets `ui.backupOf`; `BackupDialog.tsx` calls `backup_plan`, which asks the open session for the server's version, probes the dump tools on the computer and chooses one.
+2. "Choose…" calls `pick_backup_folder` (the backend shows the dialog). "Back up now" calls `run_backup`: the settings are saved as the database's job, the password is read from the credential store, and `backup_schedule::perform` runs.
+3. `backup::run` starts the tool with its fixed vector, writes its output (gzipped if asked) to `.<name>.partial`, reports the size as it grows, checks the closing line or has `pg_restore` list the archive, and renames the file. `perform` writes the run into `backup_runs` whatever happened.
+4. "Save schedule" calls `save_backup_job`, which stores the job and brings the LaunchAgent in line with all jobs (`launchd::sync`: write the property list, `launchctl bootout`, `launchctl bootstrap`; or remove it).
+5. At a scheduled time launchd starts `puricat --run-backups --data-dir <dir>`. `main.rs` sees the first argument and calls `backups::run_backups` instead of starting the app: lock, open the store, `backup_schedule::run_due` with passwords from the Keychain, one log line per run, a notification for a failure.
+6. `run_due` runs each job whose scheduled time has passed since its last scheduled run and since it was saved; after a backup that was kept it deletes the job's scheduled backups beyond the number to keep.
 
 ## Data flow: an update
 

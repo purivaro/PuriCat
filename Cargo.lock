@@ -3129,6 +3129,7 @@ dependencies = [
 name = "puricat"
 version = "0.3.0"
 dependencies = [
+ "chrono",
  "puricat-core",
  "serde",
  "serde_json",
@@ -3145,8 +3146,10 @@ name = "puricat-core"
 version = "0.3.0"
 dependencies = [
  "calamine",
+ "chrono",
  "csv",
  "encoding_rs",
+ "flate2",
  "futures-util",
  "keyring",
  "rust_xlsxwriter",

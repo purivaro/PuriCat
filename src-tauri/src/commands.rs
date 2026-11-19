@@ -65,7 +65,10 @@ async fn view(state: &AppState, profile: ConnectionProfile) -> Result<Connection
     })
 }
 
-async fn stored_password(state: &AppState, profile: &ConnectionProfile) -> Result<Option<String>> {
+pub(crate) async fn stored_password(
+    state: &AppState,
+    profile: &ConnectionProfile,
+) -> Result<Option<String>> {
     // A SQLite file has no password: the keychain is not asked.
     if profile.id.is_empty() || profile.engine == Engine::Sqlite {
         return Ok(None);
@@ -167,6 +170,10 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result
     // connection whole rather than without its password.
     state.store.clear_history(&id).await?;
     state.store.clear_scripts(&id).await?;
+    // Its backup schedules too, and with the last of them the background runner. The
+    // backups already made stay where they are, and in the history.
+    state.store.clear_backup_jobs(&id).await?;
+    let _ = crate::backups::sync_agent(&state).await;
     state.with_secrets(move |s| s.delete(&key)).await?;
     state.store.delete_connection(&id).await
 }
@@ -512,7 +519,7 @@ pub async fn apply_paste(
         .unwrap()
         .insert(job.clone(), cancelled.clone());
     let keep_going = move |done: usize| {
-        if done % 20 == 0 {
+        if done.is_multiple_of(20) {
             let _ = on_progress.send(done as u32);
         }
         !cancelled.load(Ordering::Relaxed)
@@ -905,7 +912,7 @@ pub async fn pick_sql_file(
 /// `PURICAT_E2E_PICK` (paths separated by `:`) answers each request with the next path
 /// instead of showing one, and every request after the last path as a cancelled dialog
 /// (`Some(None)`). Release builds contain none of this.
-fn e2e_pick(state: &AppState) -> Option<Option<std::path::PathBuf>> {
+pub(crate) fn e2e_pick(state: &AppState) -> Option<Option<std::path::PathBuf>> {
     #[cfg(debug_assertions)]
     if let Some(list) = std::env::var_os("PURICAT_E2E_PICK") {
         let n = state.e2e_picks.fetch_add(1, Ordering::Relaxed);

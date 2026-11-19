@@ -10,7 +10,7 @@ Status on 2026-11-17. Phases follow the delivery plan in the [product brief](doc
 | 3 | Flagship editing | Partial (grid editing, the row filter and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
 | 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; CSV and Excel files open in Smart Paste, up to 10,000 rows; a first slice of object editing — creating, editing and dropping a database from forms — is done; the rest of object editing, batched import and the other items are listed below) |
 | 5 | AI agent | Partial (CLI detection, an agent chat, and — off by default — database tools for the model: catalogue lookups, a read-only query, proposals the user approves, an activity log. Verified for Claude Code; no Codex turn with tools has been observed. Redaction, version checks and the gaps listed below remain) |
-| 6 | Backups | Not started |
+| 6 | Backups | Partial (manual and scheduled backups of a MySQL or PostgreSQL database with the vendors' dump tools, into a folder of the user's choice, with retention and a history. No restore, no encryption, no SQL Server) |
 | 7 | Public beta | Not started |
 
 ## Phase 0 — Discovery and decisions: done
@@ -194,13 +194,21 @@ Remaining:
 | Context redaction | Not started: columns marked sensitive, sample rows on request, pinning, a scope the user can narrow. With "Structure and rows" the rows the model reads are sent as the database returned them, cut for length only |
 | Translating backend messages | The chat's own error messages are English only; so are, in the Thai UI, the reason a tool step failed, the note on a flagged statement, the row count on a query step and the detail line of an activity-log entry |
 
-## Phase 6 — Backups: not started
+## Phase 6 — Backups: partially complete
 
-1. Tool detection and version checks; manual backup for MySQL and PostgreSQL.
+Done (2026-11-19, [ADR 0021](docs/adr/0021-backups-with-dump-tools.md)):
+
+- Tool detection and version checks; a manual backup of one MySQL or PostgreSQL database from its menu, into a folder chosen in the system's dialog, with the size so far and a Stop button. A file is kept only after the tool's closing line was seen or `pg_restore` listed the archive.
+- Scheduled backups, every day or on chosen days of the week: a per-user LaunchAgent starts the app's own executable as a runner (not a separate helper, see the ADR), also while the app is closed. A missed time is made up for once. The dialog shows a next time only when the runner is installed.
+- Retention by count for scheduled backups, the history of every run, a system notification when a scheduled run fails.
+
+Remaining:
+
+1. **Verification beyond one pair of versions**: MariaDB, MySQL 5.7 and 8.x servers, a server that needs a password or enforces TLS, a large database, a scheduled run from an installed release. None of these has been tried.
 2. Restore workflow with the safety rules in [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
-3. `puricat-backup` helper and LaunchAgent install with consent ([ADR 0010](docs/adr/0010-backup-scheduler.md)).
-4. Retention, optional encryption, history, notifications.
-5. SQL Server strategy, clearly labelled as server-side.
+3. Encryption of backup files.
+4. An overview of every database's backups and schedules (today each database has its own dialog), a time limit for a scheduled run, several databases in one job.
+5. SQL Server strategy, clearly labelled as server-side; SQLite files.
 
 ## Phase 7 — Public beta: not started
 

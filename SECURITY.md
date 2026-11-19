@@ -39,7 +39,7 @@ Out of scope: an attacker who already runs code as the logged-in user or as root
 | Threat | Mitigation | Status |
 |---|---|---|
 | Password disclosed through files, logs or the UI | Stored only in the OS credential store; no IPC command returns one; connections use typed options, not URLs, so driver errors do not carry it | Implemented & verified (Keychain round trip; MySQL auth failure does not echo the password) |
-| Script running in the web view escalates to the system | No shell, filesystem or HTTP capability; CSP `script-src 'self'`; all effects go through 61 typed commands plus plain-text clipboard read and write and the native Save dialog | Implemented; not penetration-tested. Script in the web view could read the clipboard, could call `apply_changes` or `apply_paste` on an open connection, could create, alter or drop a database on an open connection that is not read-only (`create_database`, `alter_database`, `drop_database` — the name it must send along to confirm a drop is no obstacle to a script) and run a `FLUSH` there (`flush_server`), could show the Open dialog for a SQL file and read the text of the file the user then picks (`pick_sql_file`), could run any SQL on an open connection through `run_sql`, could make the backend write an export file to any path the OS user may write (`export_result`), and could send any text to an AI provider under the user's account through `agent_send` — with Codex, whose sandboxed shell tool can read local files, that is a way to read files the web view cannot reach itself (see "AI chat"). It could also start a turn with the database tools at any level on an open connection, whatever the user chose, and approve a stored proposal (`agent_proposal_run`); neither gives it more than `run_sql` already does, except that rows read by a model go to the provider |
+| Script running in the web view escalates to the system | No shell, filesystem or HTTP capability; CSP `script-src 'self'`; all effects go through 67 typed commands plus plain-text clipboard read and write and the native Save dialog | Implemented; not penetration-tested. Script in the web view could read the clipboard, could call `apply_changes` or `apply_paste` on an open connection, could create, alter or drop a database on an open connection that is not read-only (`create_database`, `alter_database`, `drop_database` — the name it must send along to confirm a drop is no obstacle to a script) and run a `FLUSH` there (`flush_server`), could show the Open dialog for a SQL file and read the text of the file the user then picks (`pick_sql_file`), could run any SQL on an open connection through `run_sql`, could make the backend write an export file to any path the OS user may write (`export_result`), and could send any text to an AI provider under the user's account through `agent_send` — with Codex, whose sandboxed shell tool can read local files, that is a way to read files the web view cannot reach itself (see "AI chat"). It could also start a turn with the database tools at any level on an open connection, whatever the user chose, and approve a stored proposal (`agent_proposal_run`); neither gives it more than `run_sql` already does, except that rows read by a model go to the provider |
 | SQL injection through object names, sort columns, edited or pasted values | Values are bind parameters, including pasted keys in Smart Paste lookups; identifiers pass through per-engine quoting; sort, edited, mapped and key columns must exist in the table's metadata | Implemented & verified (unit and live tests) |
 | SQL injection through what is typed or chosen in the "New database" form | A `CREATE DATABASE` statement takes no bind parameters, so the builder is strict: the name, the owner and the template are each quoted as one identifier; a character set, collation or encoding must be a plain word (ASCII letters, digits, `_`, `-`) or the request is refused; an option of the other engine is refused (see "Schema changes through a form") | Implemented & verified (unit tests: hostile names stay one quoted identifier, hostile keywords are refused; live tests on MySQL 9.3.0 and PostgreSQL 16.13: a name with spaces, Thai letters and the engine's quote character is created under exactly that name) |
 | A database is dropped by a slip of the hand | "Drop database…" shows the statement and what the database holds, and its button works only once the database's name has been typed exactly; `drop_database` takes the typed text and compares it with the name again. The server's own databases and the database a PostgreSQL connection is opened on are refused by the backend (see "Schema changes through a form") | The refusals: implemented & verified (unit and live tests). The button: verified through the UI on PostgreSQL (E2E: disabled with nothing typed and with the name one letter short). The comparison in the command: implemented, not yet verified (no test calls the command with a wrong text) |
@@ -304,7 +304,7 @@ SQL console limitations:
 
 ## Subprocess policy
 
-Subprocesses are started from Rust, never from the web view, with a fixed argument vector. All but the `kill` helper have a timeout and kill-on-drop.
+Subprocesses are started from Rust, never from the web view, with a fixed argument vector. The probes and the chat turns have a timeout and kill-on-drop; the `kill` helper, a backup (which can take as long as the database is large, and has a Stop button) and the short system tools of the last rows have none.
 
 | Command | Purpose | stdin | Timeout |
 |---|---|---|---|
@@ -314,6 +314,13 @@ Subprocesses are started from Rust, never from the web view, with a fixed argume
 | `codex debug models` | The list for the chat's model selector; only the name, display name, description and visibility of each entry are read | Closed | 15 s |
 | `claude -p …` / `codex exec …` (the vectors are in [AI_INTEGRATION.md](AI_INTEGRATION.md)) | One chat turn, in a process group of its own on Unix | The prompt, then closed | 10 min; Stop kills it. After its verdict it has 5 s to exit |
 | `<puricat> --mcp-bridge <socket>` | Not started by PuriCat: the CLI starts it as its MCP server in a turn with the database tools. PuriCat's own executable, which in this mode only copies its stdin to the turn's socket and the socket to its stdout | The CLI's MCP requests | None of its own. It ends when the CLI closes its input or when the socket closes with the turn. Whether Stop's process-group kill reaches it depends on how the CLI started it; that was not examined |
+| `mysqldump --version`, `mariadb-dump --version`, `pg_dump --version` (every one found) | Which dump tools are installed, and their versions, when a backup dialog opens or a backup starts | Closed | 8 s |
+| `mysqldump --defaults-file=<file> … -- <database>` / `pg_dump … --dbname=<database>` (the vectors are in `crates/core/src/backup.rs`) | One backup. The password is in the option file or in `PGPASSWORD`, never an argument | Closed | None; Stop kills it |
+| `pg_restore --list <file>` | Checks a PostgreSQL archive before it is kept | Closed | 120 s |
+| `/bin/launchctl bootstrap` / `bootout` / `print gui/<uid>[/<label>]` | Installs, removes and looks at the LaunchAgent of scheduled backups | Closed | None |
+| `/usr/bin/open -R -- <file>` | "Show in Finder" for a backup recorded in the history | Closed | None |
+| `/usr/bin/osascript -e … <title> <text>` | A notification when a scheduled backup failed; started by the runner | Closed | None |
+| `<puricat> --run-backups --data-dir <dir>` | Not started by the app: launchd starts it at the scheduled times. PuriCat's own executable, which in this mode opens no window and runs the backups that are due | — | None |
 | `/bin/kill -KILL -<pid>` (Unix) | Ends a chat turn's whole process group on Stop, on timeout, or when the CLI does not exit after its verdict. `<pid>` is the process id of the CLI PuriCat started | Closed | None |
 
 Points to be aware of:
@@ -410,6 +417,37 @@ AI database tools limitations:
 - Backend enforcement of the access level.
 - Codex verified with tools, or refused for them.
 
+## Backups
+
+How it is built is in [ADR 0021](docs/adr/0021-backups-with-dump-tools.md); what a backup holds and how to restore one is in [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
+
+**The dump tools are the user's own installations.** PuriCat runs whichever `mysqldump`, `mariadb-dump` or `pg_dump` it finds in `PATH`, in Homebrew's directories, in Postgres.app or in the vendors' installer locations, and does not verify its origin. That program receives the password and reads the whole database. This is the same trust as for the AI CLIs.
+
+**The password is never an argument.**
+
+- `mysqldump` reads it from an option file: created with mode 0600 inside a directory of mode 0700 with a random name under the temporary directory, removed when the run ends, also after a failure. It is given with `--defaults-file`, which replaces the user's own option files: nothing in `~/.my.cnf` can redirect the dump to another server. A password with a line break is refused, since the file could not hold it.
+- `pg_dump` gets it in `PGPASSWORD`. Its environment is cleared and rebuilt (`PATH`, `HOME`, the TLS settings): the user's own `PG*` variables do not reach it. Another process of the same user can read a process's environment; such a process is outside the threat model.
+- The tools' error output is shown to the user and stored in the history. The tests check that a refused password is not in it.
+
+**What is on disk afterwards.**
+
+- The backup file, mode 0600, in the folder the user chose. **It is not encrypted**: it holds the database's data in clear, and whoever can read the folder can read it. A folder that syncs to a cloud service sends it there.
+- A file is written as `.<name>.partial` and renamed only after it was checked. A failed or stopped run removes it.
+- The history (`backup_runs`): connection name, database, time, tool, size, the file's path, the reason of a failure. No data from the database.
+
+**The folder is a path the web view names.** The dialog for choosing it is shown by the backend, but the chosen path comes back from the web view with `run_backup` and `save_backup_job`. The backend requires an absolute path and creates the folder; it does not confine where that is. A script in the web view could therefore have a backup written to any folder the user can write to. It cannot read one: `reveal_backup` takes the number of a run in the history, shows that run's file in Finder and nothing else.
+
+**Scheduled backups install a LaunchAgent.**
+
+- A per-user agent, `~/Library/LaunchAgents/com.purivaro.puricat.backups.plist`: no privilege, no daemon. It is written and loaded when a schedule is saved, and removed with the last schedule. The dialog says so before the schedule is saved. macOS reports it as a background item.
+- It starts PuriCat's own executable with `--run-backups --data-dir <the settings folder>`. In that mode the executable opens no window; it reads the jobs from the settings database, each connection's password from the Keychain, runs what is due and ends. One runs at a time (a lock file).
+- The paths in the property list are escaped as XML text; `launchctl`, `open` and `osascript` are started with fixed argument vectors. The texts of a failure notification are arguments of the AppleScript, never part of it.
+- **A scheduled backup runs with nobody watching.** It uses whatever dump tool is found at that moment, and whatever the connection's profile says at that moment.
+
+**Deleting.** Only files recorded in the history as made by a schedule are ever deleted, only beyond the number to keep, and only after a newer backup was kept. A backup made by hand is never deleted.
+
+Not done: encryption of backup files; a restore inside the app and its confirmations; confining the folder; a time limit for a scheduled run; a check of the dump tool's origin.
+
 ## App updates
 
 How it is built is in [ADR 0020](docs/adr/0020-in-app-updates.md); what was tested is in [TESTING.md](TESTING.md).
@@ -447,11 +485,12 @@ Not done: the manifest is not signed (the signed version closes the gap that mat
 | `PURICAT_E2E_SCRIPT` | Evaluate this file in the web view after each page load |
 | `PURICAT_E2E_REPORT` | File that the `e2e_report` command writes |
 | `PURICAT_E2E_PICK` | A list of paths (separated by `:`). Each request for the Open dialog is answered with the next one instead of showing the dialog; after the last, as if it was cancelled |
+| `PURICAT_BACKUP_AGENT=1` | Lets a debug build install the LaunchAgent for scheduled backups, under a label of its own (`com.purivaro.puricat.backups.dev`). Without it a debug build installs nothing and says that schedules do not run |
 | `PURICAT_UPDATE_ENDPOINT` | The address of the update manifest. A debug build asks only this address, plain HTTP included, and refuses to check without it: it never asks GitHub. The public key and the signature checks are the same as in a release build |
 
 `PURICAT_E2E_PICK` also answers the Open dialog of the SQLite connection form and the one of "Open SQL file…".
 
-They exist so tests never touch real settings or the Keychain ([ADR 0012](docs/adr/0012-e2e-testing-on-macos.md)). All six are behind `#[cfg(debug_assertions)]` and are absent from release builds. With `PURICAT_E2E_SCRIPT` set, the window is also kept on top of other windows, because a covered web view pauses its timers. The `e2e_report` command remains registered in release builds but only returns an error. Debug builds must not be distributed.
+They exist so tests never touch real settings or the Keychain ([ADR 0012](docs/adr/0012-e2e-testing-on-macos.md)). All seven are behind `#[cfg(debug_assertions)]` and are absent from release builds. With `PURICAT_E2E_SCRIPT` set, the window is also kept on top of other windows, because a covered web view pauses its timers. The `e2e_report` command remains registered in release builds but only returns an error. Debug builds must not be distributed.
 
 One hook is not debug-only: a query tab attaches its Monaco editor object to the tab's root DOM element as `__editor`, in every build, so the end-to-end test can set the editor's text. It gives a script that already runs in the web view nothing it could not reach otherwise.
 
@@ -478,7 +517,7 @@ One hook is not debug-only: a query tab attaches its Monaco editor object to the
 | AI: per-column redaction of the context and of tool results, masking of literals other than passwords in the active query's text, a scope the user can narrow, a policy per connection | 5 |
 | AI: Codex's successful path verified against the real CLI; a way to run Codex without its shell tool; CLI version checks | 5 |
 | AI: backend enforcement of the "Share context" switch and of the tools' access level | Not scheduled |
-| Backup file permissions and encryption | 6 |
+| Backups: encryption of the files; restore with its confirmations; a time limit for a scheduled run | 6 |
 | Updates: a first update of a released build through GitHub; a signed manifest; looking again while the app stays open | 7 |
 | Hardened runtime review | 7 |
 | Dependency audit in CI (`cargo audit` / `cargo deny`, `pnpm audit`) | 7 |
