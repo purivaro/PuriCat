@@ -4,7 +4,7 @@
 
 Accepted. Verification is recorded in [TESTING.md](../../TESTING.md), "Results — 2026-11-19 (in-app updates)".
 
-**Verified with stand-in servers only.** A bundled debug build found, verified, installed and restarted into a real package signed with the release key, and refused three packages it must refuse. No released build has updated itself yet: the first release that carries the updater has nothing newer to find, so the path through GitHub (the redirect of `releases/latest`, a notarized package, HTTPS only) is first exercised when the release after it is published.
+**Verified with stand-in servers only.** A bundled debug build found, verified, installed and restarted into a real package signed with the release key, and refused three packages it must refuse. The release workflow's steps ran for v0.3.1, the first release with the updater, and its published manifest and package were checked by hand. No released build has updated itself yet: that release has nothing newer to find, so the path through GitHub (the redirect of `releases/latest`, a notarized package, HTTPS only) is first exercised when the release after it is published.
 
 ## Context
 

@@ -576,6 +576,19 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-19 (release v0.3.1: the update package)
+
+The first release with the updater and with backups. What the release workflow's new steps did, on GitHub's macOS runner:
+
+| Check | Result |
+|---|---|
+| A rehearsal (`workflow_dispatch` on the merged code, nothing published), after the update key was put into the repository's secrets | Pass. The build made `PuriCat.app.tar.gz` and its signature; the unpacked app passed `codesign --verify --deep --strict`, was universal (`x86_64 arm64`), `stapler validate` and `spctl` accepted it as `Notarized Developer ID`; `latest.json` named both architectures. The artifact was downloaded: the key id in the package's signature is the key id of the public key in `src-tauri/tauri.conf.json`, and the signature names the version |
+| The run for the tag `v0.3.1` | Pass: the same steps, and the publish job. The release has `PuriCat-mac.dmg`, `PuriCat-mac.app.tar.gz`, its `.sig`, `latest.json` and `SHA256SUMS.txt` |
+| `https://github.com/purivaro/PuriCat/releases/latest/download/latest.json`, asked with the updater's `User-Agent` and `Accept` | HTTP 200 after 2 redirects; version 0.3.1; the package URL answers 200; the signature in it was made with the app's key, for version 0.3.1 |
+| A tag build without the update key, and a tag that is not the app's version | Not tried: both are meant to fail, and the checks are a few lines of shell that were only read |
+
+**Still not verified: an installed release updating itself.** 0.3.1 is the newest version, so an installed 0.3.1 finds nothing newer. That it finds the next release, downloads it over HTTPS from GitHub and replaces a notarized app in `/Applications` will be seen with the release after this one. What an installed 0.3.1 does when it checks today (it should say that it is up to date) was not looked at either.
+
 ## Results — 2026-11-19 (backups)
 
 macOS on Apple Silicon; local MySQL 9.3.0 with `mysqldump` 9.3.0, local PostgreSQL 16.13 with `pg_dump` 16.13 (a `pg_dump` 17 and one of libpq 18 are installed too; the chooser took 16, the server's own major). Neither server asks for a password. Only what was run for this change is listed. Design: [ADR 0021](docs/adr/0021-backups-with-dump-tools.md).
@@ -613,7 +626,7 @@ macOS on Apple Silicon. No database server is involved except in the full end-to
 | The two stages as a partial script | Pass, once, before the full run |
 | Screenshots (`SHOTS=1`) | Looked at by hand: the dialog that offers the update (English, light), the refusal, and the pill in the status bar in Thai and the dark theme. Not an automated check |
 | `APP=<bundle binary> e2e/run.sh` (debug bundle, production CSP) | Not run with these stages. The bundled debug build was run by `e2e/update.sh` only |
-| The release workflow's new steps (the signed package, `latest.json`, the check of the unpacked app, the upload) | **Not run.** They need the update key in the repository's secrets, which is not set at the time of writing. The YAML parses; the script that writes the manifest is the one `e2e/update.sh` uses for its stand-in server |
+| The release workflow's new steps (the signed package, `latest.json`, the check of the unpacked app, the upload) | Not run when this was written; run later the same day, see "Results — 2026-11-19 (release v0.3.1: the update package)" |
 
 Four runs of `e2e/update.sh` failed before the one above, from two causes, neither in the app's code:
 
@@ -983,7 +996,7 @@ Known dev-only warning: under `pnpm tauri dev` the web view logs "IPC custom pro
 | Backups: other servers and tools | Everything was run with `mysqldump` 9.3.0 against MySQL 9.3.0 and `pg_dump` 16.13 against PostgreSQL 16.13, on servers that ask for no password and no TLS. MariaDB, MySQL 5.7 / 8.x, a password that is accepted, TLS options, a refused `pg_dump`: unit tests of the argument vectors and of the chooser only, or nothing |
 | Backups: scheduled runs from an installed release | launchd started the runner once from a development build. The release's Keychain access, the notification, a run after sleep, weekly schedules, a moved app, two runners at once: not tried |
 | Backups: failure paths and the rest of the dialog | A dump that breaks off, a full disk, an unplugged disk, Stop and a failure through the UI, "Show in Finder", Thai and dark, a large database: no test |
-| In-app updates: a released build | Everything was tested with debug builds and stand-in servers on `127.0.0.1` (`e2e/update.sh`, two stages of the smoke test). No release build has asked GitHub, followed its redirect, required HTTPS or replaced a notarized app. The release workflow's steps that build, check and publish the package and `latest.json` have not run |
+| In-app updates: a released build | Everything was tested with debug builds and stand-in servers on `127.0.0.1` (`e2e/update.sh`, two stages of the smoke test). No release build has asked GitHub, followed its redirect, required HTTPS or replaced a notarized app. The release workflow's steps ran for v0.3.1 and the published manifest was fetched by hand; an installed release finding and installing the next one is still to be seen |
 | In-app updates: around the install | The warning about unsaved tabs and the restart with such tabs; a download that breaks off; an app the user cannot write to or that runs from the disk image; the menu item and the palette command; the dialog in Thai and dark: no test |
 | The "New query" button beyond two cases | The end-to-end test clicks it with a MySQL table tab in front and with the welcome tab in front while two connections are open (where it also sends ⌘T, for its message). With a query tab in front, with a single connection, with none connected, the menu in Thai or dark or with a SQLite connection in it, and the keyboard: no test |
 | ⌘T, the palette's "New query", running a selection; ⌘↵, ⇧⌘↵ and ⌘S as real keystrokes | No automated test for the first three; the end-to-end test uses the explorer menu and the Run button. The three shortcuts are exercised only as synthetic key events sent to the editor: that they arrive from the operating system (and are not taken by a menu or the web view) is not tested |
