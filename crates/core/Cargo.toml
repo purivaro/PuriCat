@@ -26,3 +26,6 @@ rust_xlsxwriter = "0.96.0"
 csv = "1.4.0"
 calamine = { version = "0.35.0", features = ["dates"] }
 encoding_rs = "0.8.35"
+# Backups: the local time in a file name and in schedules; gzip for SQL dumps.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+flate2 = "1"

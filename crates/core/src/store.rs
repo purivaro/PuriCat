@@ -62,6 +62,35 @@ const MIGRATIONS: &[&str] = &[
         updated_at    INTEGER NOT NULL
      );
      CREATE UNIQUE INDEX saved_scripts_name ON saved_scripts (connection_id, name COLLATE NOCASE);",
+    // 5 — backups: what to back up where and when (one job per database), and every run.
+    "CREATE TABLE backup_jobs (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection_id TEXT NOT NULL,
+        database_name TEXT NOT NULL,
+        destination   TEXT NOT NULL,
+        format        TEXT NOT NULL,
+        compress      INTEGER NOT NULL,
+        schedule      TEXT NOT NULL,
+        keep          INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        UNIQUE (connection_id, database_name)
+     );
+     CREATE TABLE backup_runs (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at      INTEGER NOT NULL,
+        finished_at     INTEGER NOT NULL,
+        connection_id   TEXT NOT NULL,
+        connection_name TEXT NOT NULL,
+        database_name   TEXT NOT NULL,
+        scheduled       INTEGER NOT NULL,
+        status          TEXT NOT NULL,
+        file            TEXT,
+        bytes           INTEGER,
+        tool            TEXT NOT NULL,
+        message         TEXT NOT NULL,
+        removed_at      INTEGER
+     );
+     CREATE INDEX backup_runs_database ON backup_runs (connection_id, database_name, id);",
 ];
 
 /// Entries kept; older ones are dropped as new ones arrive.
@@ -101,6 +130,51 @@ pub struct AuditEntry {
 
 /// Audit entries kept; older ones are dropped as new ones arrive.
 const AUDIT_LIMIT: i64 = 5000;
+
+/// What to back up, where to and when: one per database of a connection. It is also where
+/// the choices of the last backup made by hand are remembered.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupJob {
+    pub id: i64,
+    pub connection_id: String,
+    pub database: String,
+    /// The folder the files go to.
+    pub destination: String,
+    pub format: crate::backup::Format,
+    pub compress: bool,
+    pub schedule: crate::backup_schedule::Schedule,
+    /// How many of the scheduled backups to keep; 0 keeps all.
+    pub keep: u32,
+    pub updated_at: i64,
+}
+
+/// One backup that was run: by hand or by the schedule, kept or failed.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRun {
+    pub id: i64,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub connection_id: String,
+    pub connection_name: String,
+    pub database: String,
+    pub scheduled: bool,
+    /// `ok`, `failed` or `stopped`.
+    pub status: String,
+    /// The file that was kept, for an `ok` run.
+    pub file: Option<String>,
+    pub bytes: Option<i64>,
+    /// The dump tool and its version.
+    pub tool: String,
+    /// Why it failed; empty for an `ok` run.
+    pub message: String,
+    /// When the retention rule deleted the file.
+    pub removed_at: Option<i64>,
+}
+
+/// Runs kept in the history; older ones are dropped as new ones arrive. Their files are not.
+const BACKUP_RUN_LIMIT: i64 = 2000;
 
 /// A script saved for one connection. Unlike the history it is the user's own text, stored
 /// exactly as written: nothing is masked.
@@ -545,6 +619,204 @@ impl Store {
 
     pub async fn clear_audit(&self) -> Result<()> {
         sqlx::query("DELETE FROM agent_audit")
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
+    // ---- backups -----------------------------------------------------------------------
+
+    fn backup_job(r: &sqlx::sqlite::SqliteRow) -> Result<BackupJob> {
+        let format: String = r.try_get(4).map_err(Error::store)?;
+        let schedule: String = r.try_get(6).map_err(Error::store)?;
+        Ok(BackupJob {
+            id: r.try_get(0).map_err(Error::store)?,
+            connection_id: r.try_get(1).map_err(Error::store)?,
+            database: r.try_get(2).map_err(Error::store)?,
+            destination: r.try_get(3).map_err(Error::store)?,
+            format: serde_json::from_value(serde_json::Value::String(format))
+                .map_err(|e| Error::Store(format!("backup job: {e}")))?,
+            compress: r.try_get::<i64, _>(5).map_err(Error::store)? != 0,
+            schedule: serde_json::from_str(&schedule)
+                .map_err(|e| Error::Store(format!("backup job: {e}")))?,
+            keep: r.try_get::<i64, _>(7).map_err(Error::store)?.max(0) as u32,
+            updated_at: r.try_get(8).map_err(Error::store)?,
+        })
+    }
+
+    const BACKUP_JOB_COLUMNS: &'static str =
+        "id, connection_id, database_name, destination, format, compress, schedule, keep, updated_at";
+
+    /// Every job, in a stable order.
+    pub async fn list_backup_jobs(&self) -> Result<Vec<BackupJob>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM backup_jobs ORDER BY id",
+            Self::BACKUP_JOB_COLUMNS
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        rows.iter().map(Self::backup_job).collect()
+    }
+
+    pub async fn backup_job_for(
+        &self,
+        connection_id: &str,
+        database: &str,
+    ) -> Result<Option<BackupJob>> {
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM backup_jobs WHERE connection_id = ? AND database_name = ?",
+            Self::BACKUP_JOB_COLUMNS
+        ))
+        .bind(connection_id)
+        .bind(database)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        row.as_ref().map(Self::backup_job).transpose()
+    }
+
+    /// Create the job of a database or replace its settings. `id` and `updated_at` are
+    /// assigned here.
+    pub async fn save_backup_job(&self, job: &BackupJob) -> Result<BackupJob> {
+        let format = serde_json::to_value(job.format)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let schedule =
+            serde_json::to_string(&job.schedule).map_err(|e| Error::Store(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO backup_jobs (connection_id, database_name, destination, format, compress, schedule, keep, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (connection_id, database_name) DO UPDATE SET
+               destination = excluded.destination, format = excluded.format, compress = excluded.compress,
+               schedule = excluded.schedule, keep = excluded.keep, updated_at = excluded.updated_at",
+        )
+        .bind(&job.connection_id)
+        .bind(&job.database)
+        .bind(&job.destination)
+        .bind(format)
+        .bind(job.compress as i64)
+        .bind(schedule)
+        .bind(job.keep as i64)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        self.backup_job_for(&job.connection_id, &job.database)
+            .await?
+            .ok_or_else(|| Error::NotFound("backup job".into()))
+    }
+
+    /// A connection was deleted: its jobs go with it. The runs stay in the history (they say
+    /// where files are), under the name the connection had.
+    pub async fn clear_backup_jobs(&self, connection_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM backup_jobs WHERE connection_id = ?")
+            .bind(connection_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
+    }
+
+    /// Record a run. `id` is assigned here.
+    pub async fn add_backup_run(&self, run: &BackupRun) -> Result<i64> {
+        let id = sqlx::query(
+            "INSERT INTO backup_runs
+               (started_at, finished_at, connection_id, connection_name, database_name, scheduled, status, file, bytes, tool, message)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(run.started_at)
+        .bind(run.finished_at)
+        .bind(&run.connection_id)
+        .bind(&run.connection_name)
+        .bind(&run.database)
+        .bind(run.scheduled as i64)
+        .bind(&run.status)
+        .bind(&run.file)
+        .bind(run.bytes)
+        .bind(&run.tool)
+        .bind(&run.message)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::store)?
+        .last_insert_rowid();
+        sqlx::query("DELETE FROM backup_runs WHERE id <= (SELECT MAX(id) FROM backup_runs) - ?")
+            .bind(BACKUP_RUN_LIMIT)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        Ok(id)
+    }
+
+    fn backup_run(r: &sqlx::sqlite::SqliteRow) -> Result<BackupRun> {
+        Ok(BackupRun {
+            id: r.try_get(0).map_err(Error::store)?,
+            started_at: r.try_get(1).map_err(Error::store)?,
+            finished_at: r.try_get(2).map_err(Error::store)?,
+            connection_id: r.try_get(3).map_err(Error::store)?,
+            connection_name: r.try_get(4).map_err(Error::store)?,
+            database: r.try_get(5).map_err(Error::store)?,
+            scheduled: r.try_get::<i64, _>(6).map_err(Error::store)? != 0,
+            status: r.try_get(7).map_err(Error::store)?,
+            file: r.try_get(8).map_err(Error::store)?,
+            bytes: r.try_get(9).map_err(Error::store)?,
+            tool: r.try_get(10).map_err(Error::store)?,
+            message: r.try_get(11).map_err(Error::store)?,
+            removed_at: r.try_get(12).map_err(Error::store)?,
+        })
+    }
+
+    const BACKUP_RUN_COLUMNS: &'static str = "id, started_at, finished_at, connection_id, connection_name, database_name, scheduled, status, file, bytes, tool, message, removed_at";
+
+    /// Most recent first. With a database: its runs only; otherwise every run.
+    pub async fn list_backup_runs(
+        &self,
+        of: Option<(&str, &str)>,
+        limit: u32,
+    ) -> Result<Vec<BackupRun>> {
+        let filter = if of.is_some() {
+            "WHERE connection_id = ? AND database_name = ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {} FROM backup_runs {filter} ORDER BY id DESC LIMIT ?",
+            Self::BACKUP_RUN_COLUMNS
+        );
+        let mut query = sqlx::query(&sql);
+        if let Some((connection_id, database)) = of {
+            query = query.bind(connection_id).bind(database);
+        }
+        let rows = query
+            .bind(limit.min(1000))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::store)?;
+        rows.iter().map(Self::backup_run).collect()
+    }
+
+    pub async fn get_backup_run(&self, id: i64) -> Result<BackupRun> {
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM backup_runs WHERE id = ?",
+            Self::BACKUP_RUN_COLUMNS
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::store)?;
+        row.as_ref()
+            .map(Self::backup_run)
+            .transpose()?
+            .ok_or_else(|| Error::NotFound("backup".into()))
+    }
+
+    /// The retention rule deleted this run's file.
+    pub async fn mark_backup_removed(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE backup_runs SET removed_at = ? WHERE id = ?")
+            .bind(now_ms())
+            .bind(id)
             .execute(&self.pool)
             .await
             .map_err(Error::store)?;
