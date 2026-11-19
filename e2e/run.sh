@@ -12,6 +12,8 @@
 # and the app runs against a throwaway settings directory with an in-memory secret store.
 # The AI CLIs are stand-ins (e2e/fixtures/bin): the agent chat is tested without any account,
 # network or quota, and what the app hands to the CLI is checked afterwards.
+# The release server is a stand-in too (e2e/fixtures/update-server.py): the app never asks
+# GitHub, and what it sent when it looked for an update is checked afterwards.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -46,6 +48,7 @@ if command -v node >/dev/null 2>&1; then
 fi
 
 cleanup() {
+  if [ -n "${UPDATE_SERVER_PID:-}" ]; then kill "$UPDATE_SERVER_PID" 2>/dev/null || true; wait "$UPDATE_SERVER_PID" 2>/dev/null || true; fi
   rm -rf "$WORK"
   drop_made
   if [ "${KEEP_DB:-0}" != 1 ]; then
@@ -79,6 +82,26 @@ printf 'SELECT 42 AS answer; -- เปิดจากไฟล์\n' >"$WORK/ope
 printf 'id,name,city\n9001,ทดสอบภาษาไทย,ลำปาง\n' | iconv -f UTF-8 -t CP874 >"$WORK/thai874.csv"
 { echo "id,name,city"; seq 1 10001 | sed 's/$/,x,y/'; } >"$WORK/big.csv"
 export PURICAT_E2E_PICK="$WORK/open.sql:$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
+# A release that does not exist, on a server of the test's own: the app must find it, show it,
+# and fail to install it without harm (the package is not there).
+mkdir -p "$WORK/updates"
+python3 "$ROOT/e2e/fixtures/update-server.py" "$WORK/updates" "$WORK/update.port" "$WORK/update.log" &
+UPDATE_SERVER_PID=$!
+for _ in $(seq 1 50); do [ -s "$WORK/update.port" ] && break; sleep 0.1; done
+[ -s "$WORK/update.port" ] || { echo "✗ the stand-in update server did not start"; exit 1; }
+UPDATE_URL="http://127.0.0.1:$(cat "$WORK/update.port")"
+cat >"$WORK/updates/latest.json" <<JSON
+{
+  "version": "99.0.0",
+  "notes": "A release that exists only in the test.",
+  "pub_date": "2026-12-01T09:00:00Z",
+  "platforms": {
+    "darwin-aarch64": { "signature": "bm90IGEgc2lnbmF0dXJl", "url": "$UPDATE_URL/PuriCat.app.tar.gz" },
+    "darwin-x86_64": { "signature": "bm90IGEgc2lnbmF0dXJl", "url": "$UPDATE_URL/PuriCat.app.tar.gz" }
+  }
+}
+JSON
+export PURICAT_UPDATE_ENDPOINT="$UPDATE_URL/latest.json"
 if [ -n "${APP:-}" ]; then
   echo "› launching $APP"
   PURICAT_DATA_DIR="$WORK/data" PURICAT_SECRET_STORE=memory \
@@ -141,6 +164,7 @@ if [ "${SHOTS:-0}" = 1 ] && ! ls "$ROOT"/screenshots/e2e/*.png >/dev/null 2>&1; 
 fi
 
 cp "$REPORT" "$ROOT/target/e2e-report.json" 2>/dev/null || true
+cp "$WORK/update.log" "$ROOT/target/e2e-update-requests.jsonl" 2>/dev/null || true
 if [ "$last" = done ] && [ -n "${SMOKE:-}" ]; then
   # A part of the script does not export the files or make the changes checked below.
   echo "✓ partial script passed (the checks of a full run were not made) — report: target/e2e-report.json"
@@ -217,6 +241,22 @@ if [ "$last" = done ]; then
   made=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname IN ('puricat_e2e_made', 'puricat_e2e_renamed')")
   [ "$made" = 0 ] || { echo "✗ database check failed: PostgreSQL still has $made of the created and renamed databases"; exit 1; }
   echo "  · databases verified on both servers: created, altered, renamed, dropped"
+fi
+if [ "$last" = done ]; then
+  # What looking for an update sent: a plain GET of the manifest, with nothing that says who
+  # asks or what they are connected to. (The package is asked for only by a bundled build.)
+  python3 - "$WORK/update.log" "$USER" <<'PY' || { echo "✗ update check failed"; exit 1; }
+import json, sys
+seen = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert any(r["path"] == "/latest.json" for r in seen), "the app never asked for the manifest"
+for r in seen:
+    assert r["method"] == "GET" and r["path"] in ("/latest.json", "/PuriCat.app.tar.gz"), r
+    headers = {k.lower(): v for k, v in r["headers"].items()}
+    assert set(headers) <= {"accept", "accept-encoding", "host", "user-agent"}, sorted(headers)
+    assert headers["user-agent"].startswith("tauri-plugin-updater/"), headers["user-agent"]
+    assert not any(word in json.dumps(r) for word in (sys.argv[2], "Demo", "puricat_e2e")), r
+PY
+  echo "  · update check: $(grep -c '"/latest.json"' "$WORK/update.log") request(s) for the manifest, nothing else sent"
 fi
 if [ "$last" = done ]; then
   echo "✓ end-to-end smoke test passed — report: target/e2e-report.json"

@@ -12,6 +12,8 @@ interface UiSettings {
   aiOpen: boolean;
   explorerWidth: number;
   aiWidth: number;
+  /** Look for a newer PuriCat at start-up (one request to GitHub). */
+  autoUpdate: boolean;
 }
 
 interface SettingsState extends UiSettings {
@@ -27,6 +29,7 @@ const DEFAULTS: UiSettings = {
   aiOpen: false,
   explorerWidth: 268,
   aiWidth: 340,
+  autoUpdate: true,
 };
 
 /** Mirror of the theme for the very first paint, before the settings store answers. */
@@ -67,8 +70,8 @@ function clamp(n: unknown, min: number, max: number, fallback: number): number {
 }
 
 function pick(s: UiSettings): UiSettings {
-  const { theme, language, explorerOpen, aiOpen, explorerWidth, aiWidth } = s;
-  return { theme, language, explorerOpen, aiOpen, explorerWidth, aiWidth };
+  const { theme, language, explorerOpen, aiOpen, explorerWidth, aiWidth, autoUpdate } = s;
+  return { theme, language, explorerOpen, aiOpen, explorerWidth, aiWidth, autoUpdate };
 }
 
 export const useSettings = create<SettingsState>((set, get) => ({
@@ -95,6 +98,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
       aiOpen: saved.aiOpen ?? DEFAULTS.aiOpen,
       explorerWidth: clamp(saved.explorerWidth, 200, 480, DEFAULTS.explorerWidth),
       aiWidth: clamp(saved.aiWidth, 280, 560, DEFAULTS.aiWidth),
+      autoUpdate: saved.autoUpdate ?? DEFAULTS.autoUpdate,
     };
     applyTheme(next.theme);
     applyLanguage(next.language);

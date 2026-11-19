@@ -1,4 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { CircleAlert, Trash2 } from "lucide-react";
 import { AlertDialog, Tooltip } from "radix-ui";
 import { type PointerEvent, useEffect, useState } from "react";
@@ -15,12 +16,14 @@ import { Button, StateMessage } from "./components/ui/primitives";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
 import { DatabaseDialogs } from "./features/schema/DatabaseDialogs";
 import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
+import { UpdateDialog } from "./features/updates/UpdateDialog";
 import i18n from "./i18n";
 import { errorMessage, ipc } from "./lib/ipc";
 import { newQueryTarget } from "./lib/newQuery";
 import { useConnections } from "./stores/connections";
 import { resolveTheme, useSettings } from "./stores/settings";
 import { useUi } from "./stores/ui";
+import { useUpdates } from "./stores/updates";
 import { useWorkspace } from "./stores/workspace";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
@@ -125,6 +128,49 @@ function DeleteConnectionDialog() {
   );
 }
 
+/**
+ * The version, which is also the way to the updater: a click checks for a newer one, and a
+ * newer one that was found (or is being installed) takes the version's place.
+ */
+function UpdateStatus({ version }: { version: string }) {
+  const { t } = useTranslation();
+  const status = useUpdates((s) => s.status);
+  const info = useUpdates((s) => s.info);
+  const progress = useUpdates((s) => s.progress);
+  const { check, setOpen } = useUpdates.getState();
+  if (!version) return null;
+
+  // A failed install leaves the update on offer.
+  const offered = !!info && (status === "available" || status === "failed");
+  const pending = offered || status === "installing" || status === "ready";
+  const label =
+    offered && info
+      ? t("updates.pillAvailable", { version: info.version })
+      : status === "installing"
+        ? progress?.total
+          ? t("updates.pillInstallingPercent", { percent: Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) })
+          : t("updates.pillInstalling")
+        : status === "ready"
+          ? t("updates.pillReady")
+          : `PuriCat ${t("status.version", { version })}`;
+  return (
+    <button
+      type="button"
+      data-update-status={status}
+      title={pending ? undefined : t("updates.check")}
+      onClick={() => (pending ? setOpen(true) : void check())}
+      className={
+        pending
+          ? "flex h-5 items-center gap-1.5 rounded-full bg-accent-soft px-2 font-medium text-accent-text tabular-nums transition-colors outline-none hover:brightness-95 focus-visible:ring-2 focus-visible:ring-(--ring)"
+          : "rounded px-1 tabular-nums transition-colors outline-none hover:text-fg focus-visible:ring-2 focus-visible:ring-(--ring)"
+      }
+    >
+      {pending && <span className="size-1.5 rounded-full bg-accent" />}
+      {label}
+    </button>
+  );
+}
+
 function StatusBar() {
   const { t } = useTranslation();
   const total = useConnections((s) => s.connections.length);
@@ -140,7 +186,7 @@ function StatusBar() {
         {total === 0 ? t("status.ready") : t("status.connections", { open, total })}
       </span>
       <span className="flex-1" />
-      {version && <span className="tabular-nums">PuriCat {t("status.version", { version })}</span>}
+      <UpdateStatus version={version} />
     </footer>
   );
 }
@@ -156,6 +202,15 @@ export default function App() {
       (e: unknown) => setStartupError(errorMessage(e)),
     );
   }, []);
+
+  // One look for a newer PuriCat once the settings say whether to (the switch is in the
+  // update dialog), and the application menu's "Check for Updates…".
+  useEffect(() => {
+    if (!inTauri || !loaded) return;
+    if (useSettings.getState().autoUpdate) void useUpdates.getState().check(true);
+    const menu = listen("menu:check-updates", () => void useUpdates.getState().check());
+    return () => void menu.then((off) => off());
+  }, [loaded]);
 
   // Global shortcuts.
   useEffect(() => {
@@ -247,6 +302,7 @@ export default function App() {
       <DeleteConnectionDialog />
       <NewDatabaseDialog />
       <DatabaseDialogs />
+      <UpdateDialog />
       <CommandPalette />
       <Toaster
         theme={resolveTheme(theme)}

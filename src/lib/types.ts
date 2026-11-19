@@ -443,6 +443,21 @@ export interface ChatRequest {
   tools: ToolScope | null;
 }
 
+/** A newer version found by the last check. */
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  /** RFC 3339, when the release says. */
+  date: string | null;
+  notes: string | null;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  /** Bytes in all, when the server said. */
+  total: number | null;
+}
+
 export interface AppError {
   kind: "invalid" | "not_found" | "database" | "store" | "secret" | "unsupported" | "conflict" | "io" | "unknown";
   message: string;

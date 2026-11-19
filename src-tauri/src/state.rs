@@ -61,6 +61,9 @@ pub struct AppState {
     /// The file last chosen in the native Open dialog, under the token the web view was
     /// given for it. The web view never names a path to read.
     pub picked_file: std::sync::Mutex<Option<(String, std::path::PathBuf)>>,
+    /// The update the last check found. What is installed is this, not something the web
+    /// view names.
+    pub update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
     /// How many files the end-to-end test has been handed in place of the dialog.
     #[cfg(debug_assertions)]
     pub e2e_picks: std::sync::atomic::AtomicUsize,
@@ -77,6 +80,7 @@ impl AppState {
             agent_scratch: data_dir.join("agent-scratch"),
             proposals: Default::default(),
             picked_file: Default::default(),
+            update: Default::default(),
             #[cfg(debug_assertions)]
             e2e_picks: Default::default(),
         })
