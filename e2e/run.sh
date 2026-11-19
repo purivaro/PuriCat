@@ -29,11 +29,15 @@ echo "› fixtures"
 "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 puricat_e2e <"$ROOT/e2e/fixtures/mysql.sql"
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' -c 'CREATE DATABASE puricat_e2e'
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -v ON_ERROR_STOP=1 -f "$ROOT/e2e/fixtures/postgres.sql" >/dev/null
-# The "new database" stage creates this one through the app; it must not exist beforehand.
+# The "new database" and "restore" stages create these through the app; they must not exist
+# beforehand.
 drop_made() {
   "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e_made' 2>/dev/null || true
   "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_made WITH (FORCE)' >/dev/null 2>&1 || true
   "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_renamed WITH (FORCE)' >/dev/null 2>&1 || true
+  # The "restore" stage loads a backup into this one, on both servers.
+  "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e_restored' 2>/dev/null || true
+  "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_restored WITH (FORCE)' >/dev/null 2>&1 || true
 }
 drop_made
 
@@ -262,6 +266,15 @@ if [ "$last" = done ]; then
   grep -q 'TABLE DATA shop orders' "$WORK/backup.toc" || { echo "✗ backup check failed: no orders data in the PostgreSQL archive"; exit 1; }
   [ ! -e "$HOME/Library/LaunchAgents/com.purivaro.puricat.backups.dev.plist" ] || { echo "✗ backup check failed: the test installed a LaunchAgent"; exit 1; }
   echo "  · backups: MySQL dump and PostgreSQL archive verified, no background runner installed"
+fi
+if [ "$last" = done ]; then
+  # The two restores made through the window are on the servers: a database of their own,
+  # with the orders of the backup, MySQL's view, and — on MySQL — the source's character set.
+  restored=$("$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -Nse "SELECT CONCAT((SELECT COUNT(*) FROM puricat_e2e_restored.orders), ' ', (SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'puricat_e2e_restored' AND TABLE_NAME = 'order_totals'), ' ', (SELECT DEFAULT_CHARACTER_SET_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'puricat_e2e_restored'))")
+  [ "$restored" = "1250 1 utf8mb4" ] || { echo "✗ restore check failed: MySQL's restored database has '$restored', expected '1250 1 utf8mb4'"; exit 1; }
+  restored=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d puricat_e2e_restored -c 'SELECT COUNT(*) FROM shop.orders')
+  [ "$restored" = 1250 ] || { echo "✗ restore check failed: PostgreSQL's restored database has $restored orders, expected 1250"; exit 1; }
+  echo "  · restores: both backups loaded into a database of their own, verified on both servers"
 fi
 if [ "$last" = done ]; then
   # What looking for an update sent: a plain GET of the manifest, with nothing that says who

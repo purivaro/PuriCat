@@ -12,6 +12,7 @@ pub mod db;
 pub mod error;
 pub mod mcp;
 pub mod model;
+pub mod restore;
 pub mod secrets;
 pub mod store;
 pub mod table_file;

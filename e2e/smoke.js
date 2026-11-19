@@ -382,8 +382,50 @@
       await waitFor(() => !backupDialog(), "the backup dialog to close");
     };
 
+    // ---- restore: a backup of the history, into a database that is made for it
+    const restoreDialog = () => document.querySelector("[data-restore-dialog]");
+    const inRestore = (sel) => restoreDialog()?.querySelector(sel);
+    const ordersIn = async (connectionName, database, schema) => {
+      const id = (await invoke("list_connections")).find((c) => c.name === connectionName).id;
+      return (await invoke("count_rows", { id, table: { database, schema, name: "orders" }, filters: [], job: crypto.randomUUID() })).count;
+    };
+    const restoreInto = async (connectionName, schema, loader, shot) => {
+      await click(inBackup("[data-backup-restore]"), "restore…");
+      const nameField = await waitFor(() => inRestore("[data-restore-name]"), "the restore dialog");
+      // The name offered says where the data came from and when; it is never the source's own.
+      const offered = nameField.value;
+      if (!/^puricat_e2e_restored_\d{8}_\d{4}$/.test(offered)) throw new Error(`the name offered for the restored database is ${offered}`);
+      // A database that exists is refused before anything runs: nothing is ever replaced.
+      await type(nameField, "puricat_e2e");
+      const refusal = await waitFor(() => {
+        const said = inRestore("[data-restore-no-plan]")?.textContent ?? "";
+        return said.includes("already exists") && said;
+      }, "the refusal of a name that is taken", 20000);
+      if (!inRestore("[data-restore-run]").disabled) throw new Error("Restore was enabled for a database that exists");
+      await type(nameField, "puricat_e2e_restored");
+      const plan = await waitFor(() => {
+        const shown = inRestore("[data-restore-plan]");
+        return shown?.getAttribute("aria-busy") === "false" && shown.textContent.includes("puricat_e2e_restored") && shown.textContent.replace(/\s+/g, " ").trim();
+      }, "the plan of the restore", 20000);
+      if (!plan.includes("CREATE DATABASE") || !plan.includes(`Then ${loader} `)) throw new Error(`the restore plan of ${connectionName} is: ${plan}`);
+      if (shot) await stage("restore-plan", { offered, refusal, plan });
+      await click(inRestore("[data-restore-run]"), "restore");
+      const result = await waitFor(() => inRestore("[data-restore-result]"), "the restore to end", 60000);
+      const said = result.textContent.replace(/\s+/g, " ").trim();
+      if (result.dataset.restoreResult !== "ok" || !said.includes("Restored into “puricat_e2e_restored”")) throw new Error(`the restore on ${connectionName} ended with: ${said}`);
+      // The new database is in the explorer, and holds as many orders as the source has now.
+      await waitFor(() => dbRowOf(connectionName, "puricat_e2e_restored"), "the restored database in the explorer", 15000);
+      const orders = [await ordersIn(connectionName, "puricat_e2e", schema), await ordersIn(connectionName, "puricat_e2e_restored", schema)];
+      if (orders[0] !== 1250 || orders[1] !== orders[0]) throw new Error(`the restored database of ${connectionName} holds ${orders[1]} orders, the source ${orders[0]}`);
+      if (shot) await stage("restore-done", { said });
+      await click(inRestore("[data-restore-close]"), "close the restore dialog");
+      await waitFor(() => !restoreDialog(), "the restore dialog to close");
+      return { offered, refusal, plan, said, orders: orders[1] };
+    };
+
     const mysqlBackup = await backUp("Demo MySQL", "sql.gz");
     await stage("backup-done", { mysqlBackup });
+    const mysqlRestore = await restoreInto("Demo MySQL", null, "mysql", true);
     // A schedule: every day at 03:15, keeping three. A development build installs no
     // background runner, and the dialog says that the schedule will not run instead of
     // showing a next time.
@@ -406,12 +448,13 @@
 
     // PostgreSQL: its own archive by default, into the folder chosen for this database.
     const pgBackup = await backUp("Demo PostgreSQL", "dump");
+    const pgRestore = await restoreInto("Demo PostgreSQL", "shop", "pg_restore", false);
     await closeBackup();
     // Opened again, the dialog remembers the folder and shows the run.
     await dbMenu("Demo PostgreSQL", "puricat_e2e", "Back up…");
     await waitFor(() => inBackup("[data-backup-folder]")?.textContent.trim() === "__WORK__/backups" && all("[data-backup-run]").length === 1, "the remembered folder and the history", 20000);
     await closeBackup();
-    log.push({ stage: "backups", mysqlBackup, pgBackup });
+    log.push({ stage: "backups", mysqlBackup, pgBackup, mysqlRestore, pgRestore });
 
 
     // ---- editing: type, paste from a spreadsheet, undo, review, save ------------------

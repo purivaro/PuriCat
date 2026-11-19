@@ -32,6 +32,25 @@ export function sizeText(bytes: number): string {
 }
 
 /**
+ * The name offered for the database a backup is restored into: the source's name and when
+ * the backup was made, as `shop_restored_20261119_1405`. Never the source's own name, and
+ * within the 63 bytes PostgreSQL allows (MySQL: 64 characters) for a name in ASCII.
+ */
+export function restoredName(database: string, madeAt: Date): string {
+  const two = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${madeAt.getFullYear()}${two(madeAt.getMonth() + 1)}${two(madeAt.getDate())}_${two(madeAt.getHours())}${two(madeAt.getMinutes())}`;
+  const suffix = `_restored_${stamp}`;
+  // Cut by bytes, on a character boundary: Thai letters take three bytes each.
+  const encoder = new TextEncoder();
+  let base = "";
+  for (const c of database) {
+    if (encoder.encode(base + c).length > 63 - suffix.length) break;
+    base += c;
+  }
+  return base + suffix;
+}
+
+/**
  * The name a backup made at `at` gets. It mirrors `backup::file_name` of the backend, which
  * is the one that names the file: this is a preview.
  */
