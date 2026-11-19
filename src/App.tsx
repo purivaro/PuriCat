@@ -176,7 +176,8 @@ export default function App() {
           const open = Object.keys(sessions).filter((id) => sessions[id]?.status === "connected");
           const target = newQueryTarget(workspace.tabs, workspace.activeId, open);
           if (target) workspace.openSql(target.connectionId, target.database);
-          else toast.info(i18n.t("sql.needConnection"));
+          // Several are open and none is in front: the button at the end of the tabs asks which.
+          else toast.info(i18n.t(open.length > 1 ? "sql.chooseConnection" : "sql.needConnection"));
         },
       };
       const action = !e.shiftKey && actions[e.key.toLowerCase()];
