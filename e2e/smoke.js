@@ -280,6 +280,7 @@
     await click(await waitFor(() => menuItem("Flush"), "flush submenu"), "flush");
     await click(await waitFor(() => menuItem("Status"), "flush status"), "flush status");
     const flushPlan = await waitFor(() => dbDialog("flush") && dbPlan(), "flush statement");
+    if (flushPlan !== "FLUSH STATUS") throw new Error(`flush statement: ${flushPlan}`);
     await click(dbButton("Run"), "run flush");
     await waitFor(() => !dbDialog(), "flush dialog to close", 15000);
     const flushToast = (await waitFor(() => withText("[data-sonner-toast]", "FLUSH STATUS"), "flush toast")).textContent.replace(/\s+/g, " ").trim();
@@ -297,6 +298,7 @@
     // drop: only after the name was typed exactly
     await dbMenu("Demo PostgreSQL", "puricat_e2e_renamed", "Drop database…");
     const dropPlan = await waitFor(() => dbDialog("drop") && dbPlan(), "drop statement");
+    if (dropPlan !== 'DROP DATABASE "puricat_e2e_renamed"') throw new Error(`drop statement: ${dropPlan}`);
     const dropHolds = await waitFor(() => dbDialog().querySelector("[data-drop-contents]")?.textContent.trim(), "what the database holds");
     const dropName = dbDialog().querySelector("input");
     const dropStates = [dbButton("Drop database").disabled];
