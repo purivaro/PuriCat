@@ -1,6 +1,6 @@
-import { Eye, Home, Table2, TerminalSquare, X } from "lucide-react";
-import { AlertDialog, ContextMenu } from "radix-ui";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Eye, Home, Plus, Table2, TerminalSquare, X } from "lucide-react";
+import { AlertDialog, ContextMenu, DropdownMenu } from "radix-ui";
+import { type ButtonHTMLAttributes, lazy, type Ref, Suspense, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -8,10 +8,11 @@ import { TableTabView } from "../../features/table/TableTab";
 import { WelcomeTab } from "../../features/welcome/WelcomeTab";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
+import { newQueryTarget } from "../../lib/newQuery";
 import { useConnections } from "../../stores/connections";
 import { sqlEditors, type Tab, useWorkspace } from "../../stores/workspace";
-import { ENV_TONE } from "../Brand";
-import { Button, menuContentClass, menuItemClass, menuSeparatorClass } from "../ui/primitives";
+import { ENV_TONE, EngineTag } from "../Brand";
+import { Button, menuContentClass, menuItemClass, menuSeparatorClass, Tooltip } from "../ui/primitives";
 
 function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
   const { t } = useTranslation();
@@ -105,6 +106,64 @@ function TabButton({ tab, active }: { tab: Tab; active: boolean }) {
 
 const SqlTabView = lazy(() => import("../../features/sql/SqlTab"));
 
+function QueryButton({ ref, ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { ref?: Ref<HTMLButtonElement> }) {
+  const { t } = useTranslation();
+  return (
+    <Tooltip label={`${t("sql.newQuery")} (⌘T)`}>
+      <button
+        ref={ref}
+        type="button"
+        data-new-query
+        {...rest}
+        className="mb-1 ml-1 inline-flex h-7 shrink-0 items-center gap-1 rounded-md pr-2.5 pl-1.5 text-xs font-medium whitespace-nowrap text-fg-muted transition-colors outline-none hover:bg-sunken hover:text-fg focus-visible:ring-2 focus-visible:ring-(--ring) data-[state=open]:bg-sunken data-[state=open]:text-fg"
+      >
+        <Plus className="size-3.5" /> {t("sql.newQuery")}
+      </button>
+    </Tooltip>
+  );
+}
+
+/**
+ * "New query", always in view at the end of the tab strip. It opens on the connection of the
+ * tab in front (as ⌘T does); with several connections open and none in front, it asks which.
+ */
+function NewQueryButton() {
+  const { t } = useTranslation();
+  const tabs = useWorkspace((s) => s.tabs);
+  const activeId = useWorkspace((s) => s.activeId);
+  const sessions = useConnections((s) => s.sessions);
+  const connected = useConnections((s) => s.connections).filter((c) => sessions[c.id]?.status === "connected");
+  const target = newQueryTarget(
+    tabs,
+    activeId,
+    connected.map((c) => c.id),
+  );
+  const { openSql } = useWorkspace.getState();
+
+  if (target || connected.length === 0) {
+    return (
+      <QueryButton onClick={() => (target ? openSql(target.connectionId, target.database) : toast.info(t("sql.needConnection")))} />
+    );
+  }
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <QueryButton />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="start" sideOffset={4} className={menuContentClass}>
+          {connected.map((c) => (
+            <DropdownMenu.Item key={c.id} className={menuItemClass} onSelect={() => openSql(c.id, null)}>
+              <EngineTag engine={c.engine} className="size-4 rounded text-[9px]" />
+              {t("sql.newQueryHere", { name: c.name })}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 /**
  * Closing a tab with staged edits, a query tab with an open transaction, or a saved script
  * with changes that were not saved, asks first.
@@ -188,10 +247,14 @@ export function Workspace() {
 
   return (
     <div className="flex h-full min-w-0 flex-col">
-      <div role="tablist" className="flex h-9 shrink-0 items-end gap-0.5 overflow-x-auto px-1 [scrollbar-width:none]">
-        {tabs.map((tab) => (
-          <TabButton key={tab.id} tab={tab} active={tab.id === activeId} />
-        ))}
+      <div className="flex h-9 shrink-0 items-end">
+        <div role="tablist" className="flex h-9 min-w-0 items-end gap-0.5 overflow-x-auto px-1 [scrollbar-width:none]">
+          {tabs.map((tab) => (
+            <TabButton key={tab.id} tab={tab} active={tab.id === activeId} />
+          ))}
+        </div>
+        {/* Outside the scrolling strip, so it stays in view however many tabs are open. */}
+        <NewQueryButton />
       </div>
       {/* Panels stay mounted so scroll position, paging and sorting survive a tab switch. */}
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl rounded-tl-none border border-border bg-surface shadow-card">

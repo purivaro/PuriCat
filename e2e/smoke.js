@@ -766,6 +766,17 @@
 
     // 8c. SQL console (MySQL): run a script, confirmation for a destructive statement,
     //     the impact guard, an error, the history, and exports
+    // The "New query" button at the end of the tab strip opens on the connection and the
+    // database of the tab in front.
+    const frontTab = () => document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]');
+    const frontBefore = frontTab().title;
+    await click(document.querySelector("[data-new-query]"), "new query button");
+    const viaButton = (await waitFor(() => frontTab()?.title.startsWith("Query 1 — ") && frontTab(), "query tab from the button")).title;
+    if (viaButton !== "Query 1 — Demo MySQL › puricat_e2e") throw new Error(`the new query button opened “${viaButton}” from “${frontBefore}”`);
+    await click(frontTab().querySelector("button"), "close the button's query tab");
+    await waitFor(() => !all('[role="tab"]').some((t) => t.title.startsWith("Query 1")), "that tab to close");
+    log.push({ stage: "new-query-button", frontBefore, viaButton });
+
     await rightClick(treeRow("Demo MySQL"));
     await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
     const sqlTab = () => document.querySelector(`${panelSel} [data-sql-tab]`);
@@ -876,7 +887,6 @@
     const sqlSummary = () => document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim() ?? "";
     const sqlEdited = () => !!document.querySelector(`${panelSel} [data-sql-edited]`);
     const tabStrip = () => all('[role="tablist"] [role="tab"]');
-    const frontTab = () => document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]');
     const tabNamed = (name) => tabStrip().find((x) => x.querySelector(".truncate")?.textContent.trim() === name);
     // The editor's lines are 21px: which of them the margin marks as the statement at the cursor.
     const markedLines = () =>
