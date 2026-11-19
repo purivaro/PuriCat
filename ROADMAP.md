@@ -10,7 +10,7 @@ Status on 2026-11-17. Phases follow the delivery plan in the [product brief](doc
 | 3 | Flagship editing | Partial (grid editing, the row filter and the Smart Paste wizard done for MySQL and PostgreSQL; the leftovers are listed below) |
 | 4 | SQL and schema | Partial (the SQL console is done for MySQL and PostgreSQL; CSV and Excel files open in Smart Paste, up to 10,000 rows; a first slice of object editing — creating, editing and dropping a database from forms — is done; the rest of object editing, batched import and the other items are listed below) |
 | 5 | AI agent | Partial (CLI detection, an agent chat, and — off by default — database tools for the model: catalogue lookups, a read-only query, proposals the user approves, an activity log. Verified for Claude Code; no Codex turn with tools has been observed. Redaction, version checks and the gaps listed below remain) |
-| 6 | Backups | Partial (manual and scheduled backups of a MySQL or PostgreSQL database with the vendors' dump tools, into a folder of the user's choice, with retention and a history. No restore, no encryption, no SQL Server) |
+| 6 | Backups | Partial (manual and scheduled backups of a MySQL or PostgreSQL database with the vendors' dump tools, into a folder of the user's choice, with retention and a history; a restore of one of them into a new database. No restore over an existing database, no encryption, no SQL Server) |
 | 7 | Public beta | Not started |
 
 ## Phase 0 — Discovery and decisions: done
@@ -202,10 +202,14 @@ Done (2026-11-19, [ADR 0021](docs/adr/0021-backups-with-dump-tools.md)):
 - Scheduled backups, every day or on chosen days of the week: a per-user LaunchAgent starts the app's own executable as a runner (not a separate helper, see the ADR), also while the app is closed. A missed time is made up for once. The dialog shows a next time only when the runner is installed.
 - Retention by count for scheduled backups, the history of every run, a system notification when a scheduled run fails.
 
+Done (2026-11-19, [ADR 0022](docs/adr/0022-restore-into-a-new-database.md)):
+
+- Restore, first slice: a backup of the history is loaded into a database PuriCat creates for it on the same connection, with the vendor's client installed next to the dump tool. A name that is taken is refused, so nothing that exists is replaced. The file must still have the recorded size and be whole. PostgreSQL loads in one transaction; MySQL cannot, and the dialog says so before and after.
+
 Remaining:
 
-1. **Verification beyond one pair of versions**: MariaDB, MySQL 5.7 and 8.x servers, a server that needs a password or enforces TLS, a large database, a scheduled run from an installed release. None of these has been tried.
-2. Restore workflow with the safety rules in [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
+1. **Verification beyond one pair of versions**: MariaDB, MySQL 5.7 and 8.x servers, a server that needs a password or enforces TLS, a large database, a scheduled run from an installed release. None of these has been tried, for a backup or for a restore.
+2. The rest of the restore workflow with the safety rules in [BACKUP_RESTORE.md](BACKUP_RESTORE.md): over an existing database (the name typed; on Production a fresh backup first), onto another connection, a file PuriCat did not make. With it: a checksum of every backup in the history (today a changed file is known by its size only), a record of restores, and a stronger check of a PostgreSQL archive than `pg_restore --list`, which reads the table of contents at the front of the file and so accepts an archive whose data was cut (found while writing the restore tests; a load of such a file fails and loads nothing).
 3. Encryption of backup files.
 4. An overview of every database's backups and schedules (today each database has its own dialog), a time limit for a scheduled run, several databases in one job.
 5. SQL Server strategy, clearly labelled as server-side; SQLite files.
