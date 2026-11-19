@@ -55,7 +55,7 @@ Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose 
 
 ### A SQL console with guard rails
 
-Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Run the whole script, the selection, or only the statement the cursor is in (⇧⌘↵). Save a script under a name (⌘S) and open it again later from the connection's saved scripts. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
+Query tabs with syntax highlighting, completion, history and export to CSV, JSON or XLSX. Open one with the **+** button after the last tab, as in a browser, or with ⌘T: it starts on the connection and the database of the tab in front. Run the whole script, the selection, or only the statement the cursor is in (⇧⌘↵). Save a script under a name (⌘S) and open it again later from the connection's saved scripts. Each tab has its own connection. A statement that would change more rows than the connection's limit (10 by default) is **rolled back** and you are asked again; destructive statements are confirmed first; an open transaction is always visible.
 
 ![A query tab with two statements and one result tab for each](docs/images/sql-console.png)
 
@@ -73,6 +73,12 @@ PuriCat talks to the **Claude Code** or **Codex** command-line tool that you hav
 ![The activity log: the queries the AI ran, what it proposed and what was approved](docs/images/ai-activity-log.png)
 
 To use the agent, install [Claude Code](https://claude.com/claude-code) and sign in (`claude auth login`); PuriCat finds it by itself. Codex is supported the same way, but its tool calls have not been verified yet. What you send to the AI goes to that provider under your own account: [AI_INTEGRATION.md](AI_INTEGRATION.md) says exactly what is sent.
+
+### A new database, with its SQL in view
+
+Right-click a MySQL or PostgreSQL connection and choose *New database…*: give it a name, pick the character set and collation (MySQL) or the owner, template and encoding (PostgreSQL) from what that server offers, and read the exact `CREATE DATABASE` statement before it runs.
+
+The same right-click menus look after a database later on. *Edit database…* changes the default character set and collation (MySQL) or the name and the owner (PostgreSQL). *Drop database…* tells you how many tables and views are inside and stays locked until you type the database's name. *Open SQL file…* puts a `.sql` file into a new query tab without running it, and a MySQL connection has *Flush* (Privileges, Tables, Logs, Status). In each case you read the exact statement before it runs.
 
 ### SQLite files, opened carefully
 

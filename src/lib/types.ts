@@ -318,6 +318,59 @@ export interface TableColumns {
   primaryKey: string[];
 }
 
+/** A database to create. Only the fields of the connection's engine are sent. */
+export interface NewDatabase {
+  name: string;
+  charset?: string | null;
+  collation?: string | null;
+  owner?: string | null;
+  encoding?: string | null;
+  template?: string | null;
+}
+
+export interface DatabaseOptions {
+  charsets: { name: string; defaultCollation: string; description: string }[];
+  collations: { name: string; charset: string }[];
+  defaultCharset: string | null;
+  defaultCollation: string | null;
+  owners: string[];
+  currentUser: string | null;
+  templates: string[];
+  encodings: string[];
+  defaultEncoding: string | null;
+}
+
+/** Changes to a database. Only what differs from the database as it is now is sent. */
+export interface AlterDatabase {
+  /** The database as the server lists it now. */
+  name: string;
+  charset?: string | null;
+  collation?: string | null;
+  newName?: string | null;
+  owner?: string | null;
+}
+
+export interface DatabaseDetails {
+  name: string;
+  charset: string | null;
+  collation: string | null;
+  owner: string | null;
+  encoding: string | null;
+  /** The server's own database: shown, not changed. */
+  protected: boolean;
+  /** Tables and views it holds; `null` when they could not be counted. */
+  tables: number | null;
+}
+
+/** MySQL server maintenance offered in a connection's menu. */
+export type FlushKind = "privileges" | "tables" | "logs" | "status";
+
+/** A `.sql` file chosen in the native Open dialog. */
+export interface SqlFile {
+  name: string;
+  text: string;
+}
+
 export type AiProvider = "claude" | "codex";
 
 export interface CliStatus {

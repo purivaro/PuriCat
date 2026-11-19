@@ -13,8 +13,11 @@ import { TitleBar } from "./components/layout/TitleBar";
 import { Workspace } from "./components/layout/Workspace";
 import { Button, StateMessage } from "./components/ui/primitives";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
+import { DatabaseDialogs } from "./features/schema/DatabaseDialogs";
+import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
 import i18n from "./i18n";
 import { errorMessage, ipc } from "./lib/ipc";
+import { newQueryTarget } from "./lib/newQuery";
 import { useConnections } from "./stores/connections";
 import { resolveTheme, useSettings } from "./stores/settings";
 import { useUi } from "./stores/ui";
@@ -169,17 +172,12 @@ export default function App() {
         // New query on the connection of the tab in front, or the only one that is connected.
         t: () => {
           const workspace = useWorkspace.getState();
-          const current = workspace.tabs.find((x) => x.id === workspace.activeId);
           const sessions = useConnections.getState().sessions;
           const open = Object.keys(sessions).filter((id) => sessions[id]?.status === "connected");
-          const target =
-            current && current.kind !== "welcome" && sessions[current.connectionId]?.status === "connected"
-              ? current.connectionId
-              : open.length === 1
-                ? open[0]
-                : undefined;
-          if (target) workspace.openSql(target, current?.kind === "table" ? current.table.database : current?.kind === "sql" ? current.database : null);
-          else toast.info(i18n.t("sql.needConnection"));
+          const target = newQueryTarget(workspace.tabs, workspace.activeId, open);
+          if (target) workspace.openSql(target.connectionId, target.database);
+          // Several are open and none is in front: the button at the end of the tabs asks which.
+          else toast.info(i18n.t(open.length > 1 ? "sql.chooseConnection" : "sql.needConnection"));
         },
       };
       const action = !e.shiftKey && actions[e.key.toLowerCase()];
@@ -247,6 +245,8 @@ export default function App() {
 
       <ConnectionDialog />
       <DeleteConnectionDialog />
+      <NewDatabaseDialog />
+      <DatabaseDialogs />
       <CommandPalette />
       <Toaster
         theme={resolveTheme(theme)}

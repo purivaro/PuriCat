@@ -27,6 +27,13 @@ echo "› fixtures"
 "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 puricat_e2e <"$ROOT/e2e/fixtures/mysql.sql"
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' -c 'CREATE DATABASE puricat_e2e'
 "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -v ON_ERROR_STOP=1 -f "$ROOT/e2e/fixtures/postgres.sql" >/dev/null
+# The "new database" stage creates this one through the app; it must not exist beforehand.
+drop_made() {
+  "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e_made' 2>/dev/null || true
+  "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_made WITH (FORCE)' >/dev/null 2>&1 || true
+  "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_renamed WITH (FORCE)' >/dev/null 2>&1 || true
+}
+drop_made
 
 # SQLite needs no server: a throwaway file, made with the sqlite3 that ships with macOS.
 SQLITE3=${SQLITE3:-sqlite3}
@@ -40,6 +47,7 @@ fi
 
 cleanup() {
   rm -rf "$WORK"
+  drop_made
   if [ "${KEEP_DB:-0}" != 1 ]; then
     "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e' 2>/dev/null || true
     "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e WITH (FORCE)' 2>/dev/null || true
@@ -63,12 +71,14 @@ fi
 cd "$ROOT"
 export PATH="$ROOT/e2e/fixtures/bin:$PATH"
 export PURICAT_STAND_IN_DIR="$WORK"
-# Files for "Open a file…" in Smart Paste. A native Open dialog cannot be driven, so a debug
-# build answers each request with the next of these instead: the CSV and the workbook the test
-# exports itself, a Thai CSV that is not UTF-8, and a CSV with more rows than one run takes.
+# Files for the native Open dialogs. A native dialog cannot be driven, so a debug build answers
+# each request with the next of these instead, in the order the stages ask: a SQL file for
+# "Open SQL file…", then for Smart Paste the CSV and the workbook the test exports itself, a
+# Thai CSV that is not UTF-8, and a CSV with more rows than one run takes.
+printf 'SELECT 42 AS answer; -- เปิดจากไฟล์\n' >"$WORK/open.sql"
 printf 'id,name,city\n9001,ทดสอบภาษาไทย,ลำปาง\n' | iconv -f UTF-8 -t CP874 >"$WORK/thai874.csv"
 { echo "id,name,city"; seq 1 10001 | sed 's/$/,x,y/'; } >"$WORK/big.csv"
-export PURICAT_E2E_PICK="$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
+export PURICAT_E2E_PICK="$WORK/open.sql:$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"
 if [ -n "${APP:-}" ]; then
   echo "› launching $APP"
   PURICAT_DATA_DIR="$WORK/data" PURICAT_SECRET_STORE=memory \
@@ -82,14 +92,21 @@ else
     pnpm tauri dev >"$WORK/app.log" 2>&1 &
 fi
 
-# The app's main window: the largest one it owns. Not only "on screen" windows at layer 0:
-# the test keeps its window on top (another layer), and a window on another Space is not
-# listed as on screen but can still be captured by its number.
+# The test's own main window: the largest one owned by the test's process. Not only "on
+# screen" windows at layer 0: the test keeps its window on top (another layer), and a window
+# on another Space is not listed as on screen but can still be captured by its number.
+# A PuriCat the user has open for real work is another process: its window must never be
+# captured (it shows their databases), so windows are matched by process id, not by name.
 window_id() {
-  swift -e 'import CoreGraphics
+  local pids
+  if [ -n "${APP_PID:-}" ]; then pids=$APP_PID; else pids=$(pgrep -f "$ROOT/target/debug/puricat" | tr '\n' ' '); fi
+  [ -n "$pids" ] || return 0
+  PURICAT_E2E_PIDS="$pids" swift -e 'import CoreGraphics
+import Foundation
+let pids = Set((ProcessInfo.processInfo.environment["PURICAT_E2E_PIDS"] ?? "").split(separator: " ").compactMap { Int($0) })
 let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String: Any]]
 var best = (id: 0, area: 0.0)
-for w in list where (w[kCGWindowOwnerName as String] as? String)?.lowercased() == "puricat" {
+for w in list where pids.contains(w[kCGWindowOwnerPID as String] as? Int ?? -1) {
   let b = w[kCGWindowBounds as String] as? [String: Double] ?? [:]
   let area = (b["Width"] ?? 0) * (b["Height"] ?? 0)
   if area > best.area { best = (w[kCGWindowNumber as String] as! Int, area) }
@@ -124,6 +141,11 @@ if [ "${SHOTS:-0}" = 1 ] && ! ls "$ROOT"/screenshots/e2e/*.png >/dev/null 2>&1; 
 fi
 
 cp "$REPORT" "$ROOT/target/e2e-report.json" 2>/dev/null || true
+if [ "$last" = done ] && [ -n "${SMOKE:-}" ]; then
+  # A part of the script does not export the files or make the changes checked below.
+  echo "✓ partial script passed (the checks of a full run were not made) — report: target/e2e-report.json"
+  exit 0
+fi
 if [ "$last" = done ]; then
   # The files the app exported must hold exactly what the grid showed.
   check() { grep -q "$2" "$1" || { echo "✗ export check failed: $1 lacks $2"; exit 1; }; }
@@ -186,6 +208,15 @@ PY
   left=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d puricat_e2e -c 'SELECT COUNT(*) FROM shop.orders')
   [ "$left" = 1250 ] || { echo "✗ tools check failed: $left orders left, expected 1250"; exit 1; }
   echo "  · database tools: MCP hand-over, refusals and the data verified"
+fi
+if [ "$last" = done ]; then
+  # What the app said it did to databases is what the servers have: MySQL's was created and
+  # then given another collation; PostgreSQL's was created, renamed and dropped.
+  made=$("$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -Nse "SELECT CONCAT(DEFAULT_CHARACTER_SET_NAME, ' ', DEFAULT_COLLATION_NAME) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'puricat_e2e_made'")
+  [ "$made" = "utf8mb4 utf8mb4_unicode_ci" ] || { echo "✗ database check failed: MySQL has '$made', expected utf8mb4 utf8mb4_unicode_ci"; exit 1; }
+  made=$("$PSQL" -qXAt -h127.0.0.1 -U"$PG_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname IN ('puricat_e2e_made', 'puricat_e2e_renamed')")
+  [ "$made" = 0 ] || { echo "✗ database check failed: PostgreSQL still has $made of the created and renamed databases"; exit 1; }
+  echo "  · databases verified on both servers: created, altered, renamed, dropped"
 fi
 if [ "$last" = done ]; then
   echo "✓ end-to-end smoke test passed — report: target/e2e-report.json"

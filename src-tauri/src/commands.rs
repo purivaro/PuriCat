@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use puricat_core::db::console::{RunOptions, RunOutcome, Status};
+use puricat_core::db::ddl::{
+    self, AlterDatabase, DatabaseDetails, DatabaseOptions, Flush, NewDatabase,
+};
 use puricat_core::db::export::{self, Format};
 use puricat_core::db::filter::Filter;
 use puricat_core::db::script;
@@ -310,6 +313,132 @@ pub async fn plan_changes(
         .await?
         .plan_changes(&table, &changes)
         .await
+}
+
+// ---- schema changes through a form ------------------------------------------------------
+
+/// What the server offers for a new database (character sets, owners, encodings).
+#[tauri::command]
+pub async fn database_options(state: State<'_, AppState>, id: String) -> Result<DatabaseOptions> {
+    state.session(&id).await?.database_options().await
+}
+
+/// The exact `CREATE DATABASE` statement the form would run. Runs nothing.
+#[tauri::command]
+pub async fn plan_create_database(
+    state: State<'_, AppState>,
+    id: String,
+    spec: NewDatabase,
+) -> Result<String> {
+    state.session(&id).await?.create_database_sql(&spec)
+}
+
+/// Create a database. Returns the statement that ran.
+#[tauri::command]
+pub async fn create_database(
+    state: State<'_, AppState>,
+    id: String,
+    spec: NewDatabase,
+) -> Result<String> {
+    // Refuse early with a clear message; the server would reject it anyway.
+    if state.store.get_connection(&id).await?.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to create a database.".into(),
+        ));
+    }
+    state.session(&id).await?.create_database(&spec).await
+}
+
+async fn refuse_read_only(state: &AppState, id: &str, action: &str) -> Result<()> {
+    if state.store.get_connection(id).await?.read_only {
+        return Err(Error::Invalid(format!(
+            "This connection is read-only. Turn off the read-only session in its settings to {action}."
+        )));
+    }
+    Ok(())
+}
+
+/// What a database is set to now (and how much it holds), for the edit and drop forms.
+#[tauri::command]
+pub async fn database_details(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<DatabaseDetails> {
+    state.session(&id).await?.database_details(&name).await
+}
+
+/// The exact `ALTER DATABASE` statements the form would run, in order. Runs nothing.
+#[tauri::command]
+pub async fn plan_alter_database(
+    state: State<'_, AppState>,
+    id: String,
+    spec: AlterDatabase,
+) -> Result<Vec<String>> {
+    state.session(&id).await?.alter_database_sql(&spec)
+}
+
+/// Change a database. Returns the statements that ran.
+#[tauri::command]
+pub async fn alter_database(
+    state: State<'_, AppState>,
+    id: String,
+    spec: AlterDatabase,
+) -> Result<Vec<String>> {
+    refuse_read_only(&state, &id, "change a database").await?;
+    let session = state.session(&id).await?;
+    // The server renames a database only when nobody is connected to it: query tabs on it
+    // give their connections back first.
+    let plan = session.alter_database_sql(&spec)?;
+    if plan.iter().any(|sql| sql.contains(" RENAME TO ")) {
+        state.release_consoles(&id, &spec.name).await;
+    }
+    session.alter_database(&spec).await
+}
+
+/// The exact `DROP DATABASE` statement. Runs nothing.
+#[tauri::command]
+pub async fn plan_drop_database(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<String> {
+    state.session(&id).await?.drop_database_sql(&name)
+}
+
+/// Drop a database and everything in it. `typed` is what the user typed to confirm: it is
+/// checked here too, so nothing but that confirmation can reach the statement.
+#[tauri::command]
+pub async fn drop_database(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    typed: String,
+) -> Result<String> {
+    refuse_read_only(&state, &id, "drop a database").await?;
+    if typed != name {
+        return Err(Error::Invalid(
+            "Type the database's name exactly as it is shown to drop it.".into(),
+        ));
+    }
+    let session = state.session(&id).await?;
+    session.drop_database_sql(&name)?;
+    state.release_consoles(&id, &name).await;
+    session.drop_database(&name).await
+}
+
+/// The exact `FLUSH` statement of a MySQL connection's menu. Runs nothing.
+#[tauri::command]
+pub async fn plan_flush(state: State<'_, AppState>, id: String, what: Flush) -> Result<String> {
+    ddl::flush(state.session(&id).await?.engine(), what).map(str::to_string)
+}
+
+/// Run a `FLUSH` statement. Returns the statement that ran.
+#[tauri::command]
+pub async fn flush_server(state: State<'_, AppState>, id: String, what: Flush) -> Result<String> {
+    refuse_read_only(&state, &id, "run FLUSH").await?;
+    let sql = state.session(&id).await?.flush(what).await?;
+    Ok(sql.to_string())
 }
 
 /// Save staged edits in one transaction.
@@ -710,6 +839,66 @@ pub async fn pick_database_file(
         }
     };
     Ok(path.map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// The text of a `.sql` file chosen in the native Open dialog, for a new query tab.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFile {
+    name: String,
+    text: String,
+}
+
+/// A query tab keeps its text in the local settings, like a saved script: the same limit.
+const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Let the user choose a SQL file and read it. The file is opened in a query tab, where
+/// nothing runs until the user runs it. `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn pick_sql_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<SqlFile>> {
+    let path = match e2e_pick(&state) {
+        Some(answer) => answer,
+        None => {
+            use tauri_plugin_dialog::DialogExt;
+            let (chosen, answer) = tokio::sync::oneshot::channel();
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .add_filter("SQL", &["sql"])
+                .pick_file(move |file| {
+                    let _ = chosen.send(file);
+                });
+            match answer.await {
+                Ok(Some(file)) => Some(
+                    file.into_path()
+                        .map_err(|e| Error::Invalid(format!("This file cannot be opened: {e}")))?,
+                ),
+                _ => None,
+            }
+        }
+    };
+    let Some(path) = path else { return Ok(None) };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let unreadable = |e: std::io::Error| Error::Invalid(format!("“{name}” cannot be read: {e}"));
+    let size = tokio::fs::metadata(&path).await.map_err(unreadable)?.len();
+    if size > MAX_SQL_FILE_BYTES {
+        return Err(Error::Invalid(format!(
+            "“{name}” is {:.1} MB. A query tab opens SQL files of up to 1 MB.",
+            size as f64 / (1024.0 * 1024.0)
+        )));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(unreadable)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| Error::Invalid(format!("“{name}” is not UTF-8 text.")))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
+    Ok(Some(SqlFile { name, text }))
 }
 
 /// The end-to-end test cannot click in a native dialog. A debug build started with

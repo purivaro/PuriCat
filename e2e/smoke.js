@@ -177,6 +177,142 @@
       status: document.querySelector("footer")?.textContent.trim(),
     });
 
+    // ---- a new database from the connection's menu ------------------------------------
+    // The form only chooses; the statement shown is the backend's, and it is what runs.
+    const ddl = () => document.querySelector("[data-new-database]");
+    const ddlButton = (label) => all("[data-new-database] button").find((b) => b.textContent.trim() === label);
+    const ddlPlan = () => ddl()?.querySelector("[data-ddl-preview]")?.textContent.trim();
+    const setChoice = async (select, value) => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(60);
+    };
+    const newDatabase = async (connectionName) => {
+      await rightClick(treeRow(connectionName));
+      await click(await waitFor(() => menuItem("New database…"), `new database item of ${connectionName}`), "new database");
+      await waitFor(ddl, "new database dialog");
+    };
+
+    await newDatabase("Demo MySQL");
+    const ddlEmpty = {
+      hint: ddl().querySelector("[data-ddl-preview-empty]")?.textContent.trim(),
+      createDisabled: ddlButton("Create database").disabled,
+      defaults: await waitFor(() => /\(utf8/.test(field("Character set").selectedOptions[0].textContent) && [field("Character set"), field("Collation")].map((el) => el.selectedOptions[0].textContent), "server defaults"),
+    };
+    await type(field("Name"), "puricat_e2e_made");
+    await waitFor(() => ddlPlan() === "CREATE DATABASE `puricat_e2e_made`", "plain statement");
+    await setChoice(field("Character set"), "utf8mb4");
+    const collationsOffered = [...field("Collation").options].map((o) => o.value);
+    if (!collationsOffered.includes("utf8mb4_bin") || collationsOffered.some((c) => c && !c.startsWith("utf8mb4"))) {
+      throw new Error(`collations offered for utf8mb4: ${collationsOffered.slice(0, 8)}`);
+    }
+    await setChoice(field("Collation"), "utf8mb4_bin");
+    const mysqlPlan = await waitFor(() => ddlPlan()?.endsWith("COLLATE utf8mb4_bin") && ddlPlan(), "statement with a collation");
+    await stage("new-database", { ddlEmpty, mysqlPlan });
+    await click(ddlButton("Create database"), "create database");
+    await waitFor(() => !ddl(), "dialog to close after creating", 15000);
+    await waitFor(() => treeRows("puricat_e2e_made").length === 1, "the new database in the explorer");
+
+    // the same name again: the server's own refusal, shown in the dialog, which stays open
+    await newDatabase("Demo MySQL");
+    await type(field("Name"), "puricat_e2e_made");
+    await waitFor(() => ddlPlan() === "CREATE DATABASE `puricat_e2e_made`", "statement again");
+    await click(ddlButton("Create database"), "create again");
+    const ddlRefused = (await waitFor(() => ddl()?.querySelector("[data-ddl-error]"), "the server's refusal")).textContent.trim();
+    await click(ddlButton("Cancel"), "cancel new database");
+    await waitFor(() => !ddl(), "dialog closed");
+
+    // PostgreSQL has other choices: owner, template, encoding
+    await newDatabase("Demo PostgreSQL");
+    const pgChoices = {
+      owner: field("Owner").selectedOptions[0].textContent,
+      templates: [...field("Template").options].map((o) => o.textContent),
+      encodings: [...field("Encoding").options].map((o) => o.value).filter((v) => ["UTF8", "LATIN1", "SJIS"].includes(v)),
+    };
+    await type(field("Name"), "puricat_e2e_made");
+    await setChoice(field("Template"), "template0");
+    await setChoice(field("Encoding"), "UTF8");
+    const pgPlan = await waitFor(() => ddlPlan()?.endsWith("ENCODING 'UTF8'") && ddlPlan(), "postgres statement");
+    await click(ddlButton("Create database"), "create postgres database");
+    await waitFor(() => !ddl(), "dialog to close after creating", 15000);
+    await waitFor(() => treeRows("puricat_e2e_made").length === 2, "the new database under both servers");
+    log.push({ stage: "new-database-made", ddlRefused, pgChoices, pgPlan });
+
+    // ---- the database menu: edit, open a SQL file, flush, rename, drop ------------------
+    const dbDialog = (kind) => document.querySelector(kind ? `[data-database-dialog="${kind}"]` : "[data-database-dialog]");
+    const dbButton = (label) => all("[data-database-dialog] button").find((b) => b.textContent.trim() === label);
+    const dbPlan = () => dbDialog()?.querySelector("[data-ddl-preview]")?.textContent.trim();
+    // The same database name exists under both servers: take the row below its connection.
+    const dbRowOf = (connectionName, database) => {
+      const rows = all("[data-tree-row]");
+      return rows.slice(rows.indexOf(treeRow(connectionName)) + 1).find((r) => rowLabel(r) === database);
+    };
+    const dbMenu = async (connectionName, database, item) => {
+      await rightClick(dbRowOf(connectionName, database));
+      await click(await waitFor(() => menuItem(item), `${item} of ${database}`), item);
+    };
+
+    // MySQL: the form opens on what the server has, and sends only what was changed
+    await rightClick(dbRowOf("Demo MySQL", "puricat_e2e_made"));
+    const dbMenuItems = (await waitFor(() => menuItem("Edit database…") && all(`[role="menu"]${OPEN} [role="menuitem"]`), "database menu")).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    await click(menuItem("Edit database…"), "edit database");
+    await waitFor(() => dbDialog("edit") && field("Collation").value === "utf8mb4_bin", "the database as it is now");
+    const editBefore = {
+      charset: field("Character set").value,
+      saveDisabled: dbButton("Save changes").disabled,
+      empty: dbDialog().querySelector("[data-ddl-preview-empty]")?.textContent.trim(),
+    };
+    await setChoice(field("Collation"), "utf8mb4_unicode_ci");
+    const editPlan = await waitFor(() => dbPlan()?.includes("COLLATE") && dbPlan(), "alter statement");
+    if (editPlan !== "ALTER DATABASE `puricat_e2e_made` COLLATE utf8mb4_unicode_ci;") throw new Error(`alter statement: ${editPlan}`);
+    await stage("database-edit", { dbMenuItems, editBefore, editPlan });
+    await click(dbButton("Save changes"), "save database");
+    await waitFor(() => !dbDialog(), "edit dialog to close", 15000);
+
+    // a SQL file opens in a query tab on that database; nothing runs
+    await dbMenu("Demo MySQL", "puricat_e2e_made", "Open SQL file…");
+    const openedFile = await waitFor(() => document.querySelector(`${panelSel} [data-sql-tab]`)?.__editor?.getValue(), "the file in a query tab", 30000);
+    if (openedFile !== "SELECT 42 AS answer; -- เปิดจากไฟล์\n") throw new Error(`opened file: ${JSON.stringify(openedFile)}`);
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the file's tab");
+
+    // MySQL maintenance from the connection's menu: the statement is shown, then run
+    await rightClick(treeRow("Demo MySQL"));
+    await click(await waitFor(() => menuItem("Flush"), "flush submenu"), "flush");
+    await click(await waitFor(() => menuItem("Status"), "flush status"), "flush status");
+    const flushPlan = await waitFor(() => dbDialog("flush") && dbPlan(), "flush statement");
+    if (flushPlan !== "FLUSH STATUS") throw new Error(`flush statement: ${flushPlan}`);
+    await click(dbButton("Run"), "run flush");
+    await waitFor(() => !dbDialog(), "flush dialog to close", 15000);
+    const flushToast = (await waitFor(() => withText("[data-sonner-toast]", "FLUSH STATUS"), "flush toast")).textContent.replace(/\s+/g, " ").trim();
+
+    // PostgreSQL: the encoding read back from the server, then a new name
+    await dbMenu("Demo PostgreSQL", "puricat_e2e_made", "Edit database…");
+    await waitFor(() => dbDialog("edit") && field("Encoding").value === "UTF8", "the postgres database as it is now");
+    await type(field("Name"), "puricat_e2e_renamed");
+    const renamePlan = await waitFor(() => dbPlan()?.includes("RENAME TO") && dbPlan(), "rename statement");
+    if (renamePlan !== 'ALTER DATABASE "puricat_e2e_made" RENAME TO "puricat_e2e_renamed";') throw new Error(`rename statement: ${renamePlan}`);
+    await click(dbButton("Save changes"), "rename database");
+    await waitFor(() => !dbDialog(), "rename dialog to close", 15000);
+    await waitFor(() => dbRowOf("Demo PostgreSQL", "puricat_e2e_renamed") && treeRows("puricat_e2e_made").length === 1, "the new name in the explorer");
+
+    // drop: only after the name was typed exactly
+    await dbMenu("Demo PostgreSQL", "puricat_e2e_renamed", "Drop database…");
+    const dropPlan = await waitFor(() => dbDialog("drop") && dbPlan(), "drop statement");
+    if (dropPlan !== 'DROP DATABASE "puricat_e2e_renamed"') throw new Error(`drop statement: ${dropPlan}`);
+    const dropHolds = await waitFor(() => dbDialog().querySelector("[data-drop-contents]")?.textContent.trim(), "what the database holds");
+    const dropName = dbDialog().querySelector("input");
+    const dropStates = [dbButton("Drop database").disabled];
+    await type(dropName, "puricat_e2e_rename");
+    dropStates.push(dbButton("Drop database").disabled);
+    await type(dropName, "puricat_e2e_renamed");
+    await waitFor(() => !dbButton("Drop database").disabled, "drop button once the name is typed");
+    if (dropStates.some((disabled) => !disabled)) throw new Error("the drop button was enabled before the name was typed");
+    await stage("database-drop", { dropPlan, dropHolds });
+    await click(dbButton("Drop database"), "drop database");
+    await waitFor(() => !dbDialog(), "drop dialog to close", 15000);
+    await waitFor(() => !dbRowOf("Demo PostgreSQL", "puricat_e2e_renamed"), "the database gone from the explorer");
+    log.push({ stage: "database-menu", flushPlan, flushToast, renamePlan });
+
 
     // ---- editing: type, paste from a spreadsheet, undo, review, save ------------------
     const gridEl = () => document.querySelector(`${panelSel} [role="grid"]`);
@@ -630,6 +766,40 @@
 
     // 8c. SQL console (MySQL): run a script, confirmation for a destructive statement,
     //     the impact guard, an error, the history, and exports
+    // The "New query" button at the end of the tab strip opens on the connection and the
+    // database of the tab in front.
+    const frontTab = () => document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]');
+    const frontBefore = frontTab().title;
+    await click(document.querySelector("[data-new-query]"), "new query button");
+    const viaButton = (await waitFor(() => frontTab()?.title.startsWith("Query 1 — ") && frontTab(), "query tab from the button")).title;
+    if (viaButton !== "Query 1 — Demo MySQL › puricat_e2e") throw new Error(`the new query button opened “${viaButton}” from “${frontBefore}”`);
+    await click(frontTab().querySelector("button"), "close the button's query tab");
+    await waitFor(() => !all('[role="tab"]').some((t) => t.title.startsWith("Query 1")), "that tab to close");
+    // With two connections open and the welcome tab in front, it asks which one.
+    await click(all('[role="tab"]')[0], "welcome tab");
+    document.querySelector("[data-new-query]").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    await waitFor(() => menuItemWith("New query on "), "the connections under the new query button");
+    const asked = all(`[role="menu"]${OPEN} [role="menuitem"]`).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    if (asked.length !== 2 || !asked.some((x) => x.endsWith("New query on Demo MySQL")) || !asked.some((x) => x.endsWith("New query on Demo PostgreSQL")))
+      throw new Error(`the new query button offered ${JSON.stringify(asked)}`);
+    await stage("new-query-menu", { frontBefore, viaButton, asked });
+    // ⌘T cannot ask: with the menu closed again it says where to choose, and opens nothing.
+    await key("Escape");
+    await waitFor(() => !menuItemWith("New query on "), "the menu to close");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "t", metaKey: true, bubbles: true }));
+    const shortcutToast = (await waitFor(() => withText("[data-sonner-toast]", "Several connections are open"), "what ⌘T says with two connections")).textContent.replace(/\s+/g, " ").trim();
+    if (all('[role="tab"]').some((t) => t.title.startsWith("Query "))) throw new Error("⌘T opened a query tab without a connection to open it on");
+    document.querySelector("[data-new-query]").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    await waitFor(() => menuItemWith("New query on "), "the menu again");
+    await click(menuItemWith("New query on Demo PostgreSQL"), "new query on postgres");
+    const viaMenu = (await waitFor(() => frontTab()?.title.startsWith("Query 1 — ") && frontTab(), "query tab from the menu")).title;
+    if (viaMenu !== "Query 1 — Demo PostgreSQL") throw new Error(`the menu opened “${viaMenu}”`);
+    await click(frontTab().querySelector("button"), "close the menu's query tab");
+    await waitFor(() => !all('[role="tab"]').some((t) => t.title.startsWith("Query 1")), "that tab to close");
+    await click(all('[role="tab"]').find((t) => t.title === frontBefore), "back to the tab that was in front");
+    await waitFor(() => frontTab()?.title === frontBefore, "that tab in front again");
+    log.push({ stage: "new-query-button", frontBefore, viaButton, asked, shortcutToast, viaMenu });
+
     await rightClick(treeRow("Demo MySQL"));
     await click(await waitFor(() => menuItemWith("New query"), "new query menu"), "new query");
     const sqlTab = () => document.querySelector(`${panelSel} [data-sql-tab]`);
@@ -740,7 +910,6 @@
     const sqlSummary = () => document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim() ?? "";
     const sqlEdited = () => !!document.querySelector(`${panelSel} [data-sql-edited]`);
     const tabStrip = () => all('[role="tablist"] [role="tab"]');
-    const frontTab = () => document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]');
     const tabNamed = (name) => tabStrip().find((x) => x.querySelector(".truncate")?.textContent.trim() === name);
     // The editor's lines are 21px: which of them the margin marks as the statement at the cursor.
     const markedLines = () =>
