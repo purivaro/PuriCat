@@ -238,6 +238,79 @@
     await waitFor(() => treeRows("puricat_e2e_made").length === 2, "the new database under both servers");
     log.push({ stage: "new-database-made", ddlRefused, pgChoices, pgPlan });
 
+    // ---- the database menu: edit, open a SQL file, flush, rename, drop ------------------
+    const dbDialog = (kind) => document.querySelector(kind ? `[data-database-dialog="${kind}"]` : "[data-database-dialog]");
+    const dbButton = (label) => all("[data-database-dialog] button").find((b) => b.textContent.trim() === label);
+    const dbPlan = () => dbDialog()?.querySelector("[data-ddl-preview]")?.textContent.trim();
+    // The same database name exists under both servers: take the row below its connection.
+    const dbRowOf = (connectionName, database) => {
+      const rows = all("[data-tree-row]");
+      return rows.slice(rows.indexOf(treeRow(connectionName)) + 1).find((r) => rowLabel(r) === database);
+    };
+    const dbMenu = async (connectionName, database, item) => {
+      await rightClick(dbRowOf(connectionName, database));
+      await click(await waitFor(() => menuItem(item), `${item} of ${database}`), item);
+    };
+
+    // MySQL: the form opens on what the server has, and sends only what was changed
+    await rightClick(dbRowOf("Demo MySQL", "puricat_e2e_made"));
+    const dbMenuItems = (await waitFor(() => menuItem("Edit database…") && all(`[role="menu"]${OPEN} [role="menuitem"]`), "database menu")).map((e) => e.textContent.replace(/\s+/g, " ").trim());
+    await click(menuItem("Edit database…"), "edit database");
+    await waitFor(() => dbDialog("edit") && field("Collation").value === "utf8mb4_bin", "the database as it is now");
+    const editBefore = {
+      charset: field("Character set").value,
+      saveDisabled: dbButton("Save changes").disabled,
+      empty: dbDialog().querySelector("[data-ddl-preview-empty]")?.textContent.trim(),
+    };
+    await setChoice(field("Collation"), "utf8mb4_unicode_ci");
+    const editPlan = await waitFor(() => dbPlan()?.includes("COLLATE") && dbPlan(), "alter statement");
+    if (editPlan !== "ALTER DATABASE `puricat_e2e_made` COLLATE utf8mb4_unicode_ci;") throw new Error(`alter statement: ${editPlan}`);
+    await stage("database-edit", { dbMenuItems, editBefore, editPlan });
+    await click(dbButton("Save changes"), "save database");
+    await waitFor(() => !dbDialog(), "edit dialog to close", 15000);
+
+    // a SQL file opens in a query tab on that database; nothing runs
+    await dbMenu("Demo MySQL", "puricat_e2e_made", "Open SQL file…");
+    const openedFile = await waitFor(() => document.querySelector(`${panelSel} [data-sql-tab]`)?.__editor?.getValue(), "the file in a query tab", 30000);
+    if (openedFile !== "SELECT 42 AS answer; -- เปิดจากไฟล์\n") throw new Error(`opened file: ${JSON.stringify(openedFile)}`);
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the file's tab");
+
+    // MySQL maintenance from the connection's menu: the statement is shown, then run
+    await rightClick(treeRow("Demo MySQL"));
+    await click(await waitFor(() => menuItem("Flush"), "flush submenu"), "flush");
+    await click(await waitFor(() => menuItem("Status"), "flush status"), "flush status");
+    const flushPlan = await waitFor(() => dbDialog("flush") && dbPlan(), "flush statement");
+    await click(dbButton("Run"), "run flush");
+    await waitFor(() => !dbDialog(), "flush dialog to close", 15000);
+    const flushToast = (await waitFor(() => withText("[data-sonner-toast]", "FLUSH STATUS"), "flush toast")).textContent.replace(/\s+/g, " ").trim();
+
+    // PostgreSQL: the encoding read back from the server, then a new name
+    await dbMenu("Demo PostgreSQL", "puricat_e2e_made", "Edit database…");
+    await waitFor(() => dbDialog("edit") && field("Encoding").value === "UTF8", "the postgres database as it is now");
+    await type(field("Name"), "puricat_e2e_renamed");
+    const renamePlan = await waitFor(() => dbPlan()?.includes("RENAME TO") && dbPlan(), "rename statement");
+    if (renamePlan !== 'ALTER DATABASE "puricat_e2e_made" RENAME TO "puricat_e2e_renamed";') throw new Error(`rename statement: ${renamePlan}`);
+    await click(dbButton("Save changes"), "rename database");
+    await waitFor(() => !dbDialog(), "rename dialog to close", 15000);
+    await waitFor(() => dbRowOf("Demo PostgreSQL", "puricat_e2e_renamed") && treeRows("puricat_e2e_made").length === 1, "the new name in the explorer");
+
+    // drop: only after the name was typed exactly
+    await dbMenu("Demo PostgreSQL", "puricat_e2e_renamed", "Drop database…");
+    const dropPlan = await waitFor(() => dbDialog("drop") && dbPlan(), "drop statement");
+    const dropHolds = await waitFor(() => dbDialog().querySelector("[data-drop-contents]")?.textContent.trim(), "what the database holds");
+    const dropName = dbDialog().querySelector("input");
+    const dropStates = [dbButton("Drop database").disabled];
+    await type(dropName, "puricat_e2e_rename");
+    dropStates.push(dbButton("Drop database").disabled);
+    await type(dropName, "puricat_e2e_renamed");
+    await waitFor(() => !dbButton("Drop database").disabled, "drop button once the name is typed");
+    if (dropStates.some((disabled) => !disabled)) throw new Error("the drop button was enabled before the name was typed");
+    await stage("database-drop", { dropPlan, dropHolds });
+    await click(dbButton("Drop database"), "drop database");
+    await waitFor(() => !dbDialog(), "drop dialog to close", 15000);
+    await waitFor(() => !dbRowOf("Demo PostgreSQL", "puricat_e2e_renamed"), "the database gone from the explorer");
+    log.push({ stage: "database-menu", flushPlan, flushToast, renamePlan });
+
 
     // ---- editing: type, paste from a spreadsheet, undo, review, save ------------------
     const gridEl = () => document.querySelector(`${panelSel} [role="grid"]`);

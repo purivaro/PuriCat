@@ -431,6 +431,33 @@ impl Session {
             Session::MySql(_) => (details.charset, details.collation) = (cell(0), cell(1)),
             _ => (details.owner, details.encoding) = (cell(0), cell(1)),
         }
+        // What a drop would take with it. Best effort: a database that cannot be looked
+        // into (PostgreSQL's `template0`, no privilege) is still shown, without the number.
+        let counted = match self {
+            Session::MySql(s) => {
+                s.query_text(
+                    "SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = ?",
+                    &wanted,
+                )
+                .await
+            }
+            Session::Postgres(s) => {
+                s.query_text(
+                    name,
+                    "SELECT count(*)::text FROM pg_class c
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE c.relkind IN ('r', 'p', 'v', 'm')
+                       AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'",
+                    &[],
+                )
+                .await
+            }
+            Session::Sqlite(_) => return Ok(details),
+        };
+        details.tables = counted
+            .ok()
+            .and_then(|rows| rows.first()?.first()?.as_deref()?.parse().ok());
         Ok(details)
     }
 

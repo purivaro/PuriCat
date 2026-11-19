@@ -3,14 +3,17 @@ import {
   CircleAlert,
   Copy,
   Database,
+  DatabaseBackup,
   DatabaseZap,
   Eye,
+  FileCode2,
   FolderTree,
   Lock,
   Pencil,
   Plug,
   Plus,
   RefreshCw,
+  RotateCw,
   Search,
   Star,
   StarOff,
@@ -28,8 +31,8 @@ import { toast } from "sonner";
 import { clipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { fullPlace } from "../../lib/connection";
-import { errorMessage } from "../../lib/ipc";
-import type { ConnectionView, DbObject, Namespace } from "../../lib/types";
+import { errorMessage, ipc } from "../../lib/ipc";
+import type { ConnectionView, DbObject, FlushKind, Namespace } from "../../lib/types";
 import { type Loadable, nodeKey, sessionOf, useConnections } from "../../stores/connections";
 import { useUi } from "../../stores/ui";
 import { tableTabId, useWorkspace } from "../../stores/workspace";
@@ -45,6 +48,16 @@ import {
 } from "../ui/primitives";
 
 const lower = (s: string) => s.toLocaleLowerCase();
+
+const FLUSH_KINDS: FlushKind[] = ["privileges", "tables", "logs", "status"];
+
+/** Choose a SQL file and open its text in a new query tab. Nothing runs until the user runs it. */
+function openSqlFile(connectionId: string, database: string | null) {
+  void ipc
+    .pickSqlFile()
+    .then((file) => file && useWorkspace.getState().openSql(connectionId, database, file.text))
+    .catch((e: unknown) => toast.error(errorMessage(e)));
+}
 
 // ---- Row ---------------------------------------------------------------------------
 
@@ -318,6 +331,7 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
   const schemas = useConnections((s) => s.schemas);
   const { toggle, loadDatabases, loadSchemas, loadObjects } = useConnections.getState();
   const hasSchemas = session.status === "connected" && session.info.capabilities.schemas;
+  const manageable = connection.engine !== "sqlite";
 
   if (state?.status !== "ready" || state.items.length === 0) {
     return (
@@ -369,9 +383,48 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                   <ContextMenu.Item className={menuItemClass} onSelect={() => useWorkspace.getState().openSql(connection.id, db.name)}>
                     <TerminalSquare className="size-3.5" /> {t("sql.newQuery")}
                   </ContextMenu.Item>
+                  <ContextMenu.Item className={menuItemClass} onSelect={() => openSqlFile(connection.id, db.name)}>
+                    <FileCode2 className="size-3.5" /> {t("explorer.openSqlFile")}
+                  </ContextMenu.Item>
+                  {/* A SQLite connection is one file: there are no databases to manage inside it. */}
+                  {manageable && (
+                    <>
+                      <ContextMenu.Separator className={menuSeparatorClass} />
+                      <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewDatabase(connection)}>
+                        <DatabaseZap className="size-3.5" /> {t("schema.newDatabase")}
+                      </ContextMenu.Item>
+                      {/* The server's own databases are shown, not changed. */}
+                      {!db.system && (
+                        <ContextMenu.Item
+                          className={menuItemClass}
+                          onSelect={() => useUi.getState().askDatabaseTask({ kind: "edit", connection, database: db.name })}
+                        >
+                          <DatabaseBackup className="size-3.5" /> {t("schema.editDatabase")}
+                        </ContextMenu.Item>
+                      )}
+                    </>
+                  )}
+                  <ContextMenu.Separator className={menuSeparatorClass} />
+                  <ContextMenu.Item
+                    className={menuItemClass}
+                    onSelect={() => void clipboard.write(db.name).then(() => toast.success(t("common.copied")))}
+                  >
+                    <Copy className="size-3.5" /> {t("explorer.copyName")}
+                  </ContextMenu.Item>
                   <ContextMenu.Item className={menuItemClass} onSelect={() => void load()}>
                     <RefreshCw className="size-3.5" /> {t("common.refresh")}
                   </ContextMenu.Item>
+                  {manageable && !db.system && (
+                    <>
+                      <ContextMenu.Separator className={menuSeparatorClass} />
+                      <ContextMenu.Item
+                        className={cn(menuItemClass, menuDangerClass)}
+                        onSelect={() => useUi.getState().askDatabaseTask({ kind: "drop", connection, database: db.name })}
+                      >
+                        <Trash2 className="size-3.5" /> {t("schema.dropDatabase")}
+                      </ContextMenu.Item>
+                    </>
+                  )}
                 </>
               }
             />
@@ -459,11 +512,40 @@ function ConnectionNode({ connection, query }: { connection: ConnectionView; que
               </ContextMenu.Item>
             )}
             {connected && (
+              <ContextMenu.Item className={menuItemClass} onSelect={() => openSqlFile(connection.id, null)}>
+                <FileCode2 className="size-3.5" /> {t("explorer.openSqlFile")}
+              </ContextMenu.Item>
+            )}
+            {connected && connection.engine === "mysql" && (
+              <ContextMenu.Sub>
+                <ContextMenu.SubTrigger className={cn(menuItemClass, "data-[state=open]:bg-accent-soft data-[state=open]:text-accent-text")}>
+                  <RotateCw className="size-3.5" /> {t("schema.flush")}
+                  <ChevronRight className="ml-auto size-3.5 text-fg-subtle" />
+                </ContextMenu.SubTrigger>
+                <ContextMenu.Portal>
+                  <ContextMenu.SubContent className={menuContentClass} sideOffset={4}>
+                    {FLUSH_KINDS.map((what) => (
+                      <ContextMenu.Item
+                        key={what}
+                        className={menuItemClass}
+                        onSelect={() => useUi.getState().askDatabaseTask({ kind: "flush", connection, what })}
+                      >
+                        {t(`schema.flushKinds.${what}`)}
+                      </ContextMenu.Item>
+                    ))}
+                  </ContextMenu.SubContent>
+                </ContextMenu.Portal>
+              </ContextMenu.Sub>
+            )}
+            {connected && (
               <ContextMenu.Item className={menuItemClass} onSelect={() => void loadDatabases(connection.id)}>
                 <RefreshCw className="size-3.5" /> {t("common.refresh")}
               </ContextMenu.Item>
             )}
             <ContextMenu.Separator className={menuSeparatorClass} />
+            <ContextMenu.Item className={menuItemClass} onSelect={() => openConnectionDialog()}>
+              <Plus className="size-3.5" /> {t("explorer.new")}
+            </ContextMenu.Item>
             <ContextMenu.Item className={menuItemClass} onSelect={() => openConnectionDialog(connection)}>
               <Pencil className="size-3.5" /> {t("explorer.edit")}
             </ContextMenu.Item>

@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { closeTabIn, tableTabId, type Tab } from "./workspace";
+import { closeTabIn, databaseGoneIn, tableTabId, type Tab } from "./workspace";
 
-const tab = (name: string): Tab => ({
+const tab = (name: string, connectionId = "c1", database = "db"): Tab => ({
   id: name,
   kind: "table",
-  connectionId: "c1",
-  table: { database: "db", schema: null, name },
+  connectionId,
+  table: { database, schema: null, name },
   objectKind: "table",
 });
 
@@ -30,6 +30,38 @@ describe("closeTabIn", () => {
 
   it("ignores unknown ids", () => {
     expect(closeTabIn(tabs, "a", "zzz")).toEqual({ tabs, activeId: "a" });
+  });
+});
+
+describe("databaseGoneIn", () => {
+  const query = (id: string, connectionId: string, database: string | null): Tab => ({ id, kind: "sql", connectionId, database, title: id });
+  const elsewhere = tab("other", "c1", "db2");
+  const otherConnection = tab("far", "c2");
+  const tabs = [tab("a"), query("q1", "c1", "db"), elsewhere, otherConnection, query("q2", "c1", "db2"), query("q3", "c2", "db")];
+
+  it("closes the table tabs of a dropped database and moves its query tabs to the default database", () => {
+    const after = databaseGoneIn(tabs, "a", "c1", "db", null);
+    expect(after.tabs.map((t) => t.id)).toEqual(["q1", "other", "far", "q2", "q3"]);
+    expect(after.tabs[0]).toMatchObject({ id: "q1", database: null });
+    // the active tab went away: its right neighbour takes over
+    expect(after.activeId).toBe("q1");
+  });
+
+  it("leaves other databases and other connections alone", () => {
+    const after = databaseGoneIn(tabs, "other", "c1", "db", null);
+    expect(after.activeId).toBe("other");
+    expect(after.tabs.slice(1)).toEqual([elsewhere, otherConnection, tabs[4], tabs[5]]);
+  });
+
+  it("moves query tabs to the new name of a renamed database", () => {
+    const after = databaseGoneIn(tabs, "q1", "c1", "db", "db_new");
+    expect(after.tabs.find((t) => t.id === "q1")).toMatchObject({ database: "db_new" });
+    expect(after.tabs.some((t) => t.id === "a")).toBe(false);
+    expect(after.activeId).toBe("q1");
+  });
+
+  it("falls back to the welcome tab when nothing else is open", () => {
+    expect(databaseGoneIn([tab("a")], "a", "c1", "db", null)).toEqual({ tabs: [{ id: "welcome", kind: "welcome" }], activeId: "welcome" });
   });
 });
 

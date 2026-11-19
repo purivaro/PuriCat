@@ -291,6 +291,8 @@ pub struct DatabaseDetails {
     pub encoding: Option<String>,
     /// The server's own database: shown, not changed.
     pub protected: bool,
+    /// How many tables and views it holds, when that could be counted.
+    pub tables: Option<u64>,
 }
 
 /// Server maintenance a MySQL connection's menu offers. Fixed statements, nothing typed.

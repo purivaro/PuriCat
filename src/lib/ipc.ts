@@ -3,6 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AgentEvent,
   AiProvider,
+  AlterDatabase,
   AppError,
   ApplyResult,
   AuditEntry,
@@ -12,11 +13,13 @@ import type {
   CliStatus,
   ConnectionProfile,
   ConnectionView,
+  DatabaseDetails,
   DatabaseOptions,
   DbObject,
   ExportFormat,
   FileReadOptions,
   FileTable,
+  FlushKind,
   HistoryEntry,
   ModelChoice,
   Namespace,
@@ -32,6 +35,7 @@ import type {
   RunOutcome,
   ServerInfo,
   SortSpec,
+  SqlFile,
   SqlStatement,
   Statement,
   TableColumns,
@@ -122,6 +126,17 @@ export const ipc = {
   /** The exact statement `createDatabase` would run. Runs nothing. */
   planCreateDatabase: (id: string, spec: NewDatabase) => invoke<string>("plan_create_database", { id, spec }),
   createDatabase: (id: string, spec: NewDatabase) => invoke<string>("create_database", { id, spec }),
+  databaseDetails: (id: string, name: string) => invoke<DatabaseDetails>("database_details", { id, name }),
+  /** The exact statements `alterDatabase` would run, in order. Runs nothing. */
+  planAlterDatabase: (id: string, spec: AlterDatabase) => invoke<string[]>("plan_alter_database", { id, spec }),
+  alterDatabase: (id: string, spec: AlterDatabase) => invoke<string[]>("alter_database", { id, spec }),
+  planDropDatabase: (id: string, name: string) => invoke<string>("plan_drop_database", { id, name }),
+  /** `typed` is what the user typed to confirm; the backend checks it against `name`. */
+  dropDatabase: (id: string, name: string, typed: string) => invoke<string>("drop_database", { id, name, typed }),
+  planFlush: (id: string, what: FlushKind) => invoke<string>("plan_flush", { id, what }),
+  flushServer: (id: string, what: FlushKind) => invoke<string>("flush_server", { id, what }),
+  /** Shows the native Open dialog for a SQL file and gives its text. `null` when it was cancelled. */
+  pickSqlFile: () => invoke<SqlFile | null>("pick_sql_file"),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),

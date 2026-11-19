@@ -57,6 +57,30 @@ function released(before: Tab[], after: Tab[]) {
   }
 }
 
+const inDatabase = (t: Tab, connectionId: string, database: string) =>
+  t.kind !== "welcome" && t.connectionId === connectionId && (t.kind === "table" ? t.table.database : t.database) === database;
+
+/**
+ * A database was dropped (`to` is `null`) or renamed: its table tabs close, and its query
+ * tabs keep their text and move to `to` (`null`: the connection's default database).
+ */
+export function databaseGoneIn(
+  tabs: Tab[],
+  activeId: string,
+  connectionId: string,
+  database: string,
+  to: string | null,
+): { tabs: Tab[]; activeId: string } {
+  let next = { tabs, activeId };
+  for (const t of tabs) {
+    if (t.kind === "table" && inDatabase(t, connectionId, database)) next = closeTabIn(next.tabs, next.activeId, t.id);
+  }
+  return {
+    tabs: next.tabs.map((t) => (t.kind === "sql" && inDatabase(t, connectionId, database) ? { ...t, database: to } : t)),
+    activeId: next.activeId,
+  };
+}
+
 export function closeTabIn(tabs: Tab[], activeId: string, id: string): { tabs: Tab[]; activeId: string } {
   const index = tabs.findIndex((t) => t.id === id);
   if (index < 0) return { tabs, activeId };
@@ -79,6 +103,8 @@ interface WorkspaceState {
   setDirty: (id: string, dirty: boolean) => void;
   setEdited: (id: string, edited: boolean) => void;
   hasUnsavedFor: (connectionId: string) => boolean;
+  /** Unsaved edits in a table of this database, or an open transaction in a query tab on it. */
+  hasUnsavedInDatabase: (connectionId: string, database: string) => boolean;
   /** Close even if dirty (after the user confirmed). */
   forceClose: (id: string) => void;
   cancelClose: () => void;
@@ -101,6 +127,8 @@ interface WorkspaceState {
   closeOthers: (id: string) => void;
   closeAll: () => void;
   closeForConnection: (connectionId: string) => void;
+  /** See `databaseGoneIn`. */
+  databaseGone: (connectionId: string, database: string, to: string | null) => void;
 }
 
 function persist(state: Pick<WorkspaceState, "tabs" | "activeId">) {
@@ -241,6 +269,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       }),
     hasUnsavedFor: (connectionId) =>
       get().tabs.some((t) => t.kind !== "welcome" && t.connectionId === connectionId && get().dirty[t.id]),
+    hasUnsavedInDatabase: (connectionId, database) =>
+      get().tabs.some((t) => inDatabase(t, connectionId, database) && get().dirty[t.id]),
     cancelClose: () => set({ closing: null }),
     forceClose: (id) => {
       set({ closing: null });
@@ -269,5 +299,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       }
       commit(next);
     },
+    databaseGone: (connectionId, database, to) =>
+      commit(databaseGoneIn(get().tabs, get().activeId, connectionId, database, to)),
   };
 });
