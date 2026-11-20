@@ -8,6 +8,7 @@ pub mod ddl;
 pub mod export;
 pub mod filter;
 pub mod ident;
+pub mod monitor;
 mod mysql;
 mod postgres;
 pub mod script;
@@ -536,6 +537,28 @@ impl Session {
     }
 
     /// MySQL server maintenance from the connection's menu. Returns the statement that ran.
+    /// The sessions on the server. Not for SQLite, which has none.
+    pub async fn processes(&self) -> Result<Vec<monitor::Process>> {
+        match self {
+            Session::MySql(s) => s.processes().await,
+            Session::Postgres(s) => s.processes().await,
+            Session::Sqlite(_) => Err(Error::Unsupported(
+                "A SQLite file has no server sessions".into(),
+            )),
+        }
+    }
+
+    /// Stop session `id`'s query, or end the session. Returns the statement that ran.
+    pub async fn end_process(&self, id: u64, what: monitor::End) -> Result<String> {
+        let sql = monitor::end_sql(self.engine(), id, what)?;
+        match self {
+            Session::MySql(s) => s.execute_statement(&sql).await?,
+            Session::Postgres(s) => s.signal(&sql).await?,
+            Session::Sqlite(_) => unreachable!("refused by monitor::end_sql"),
+        }
+        Ok(sql)
+    }
+
     pub async fn flush(&self, what: ddl::Flush) -> Result<&'static str> {
         let sql = ddl::flush(self.engine(), what)?;
         match self {

@@ -18,6 +18,7 @@ import { ConnectionDialog } from "./features/connections/ConnectionDialog";
 import { DatabaseDialogs } from "./features/schema/DatabaseDialogs";
 import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
 import { TableDialogs } from "./features/schema/TableDialogs";
+import { SessionsDialog } from "./features/schema/SessionsDialog";
 import { UsersDialog } from "./features/schema/UsersDialog";
 import { ViewDialog } from "./features/schema/ViewDialog";
 import { UpdateDialog } from "./features/updates/UpdateDialog";
@@ -309,6 +310,7 @@ export default function App() {
       <TableDialogs />
       <ViewDialog />
       <UsersDialog />
+      <SessionsDialog />
       <BackupDialog />
       <UpdateDialog />
       <CommandPalette />

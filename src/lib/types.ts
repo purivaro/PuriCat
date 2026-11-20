@@ -648,6 +648,27 @@ export interface UpdateProgress {
   total: number | null;
 }
 
+/** One session on a server, as the server reports it. */
+export interface ServerProcess {
+  id: number;
+  user: string | null;
+  host: string | null;
+  database: string | null;
+  /** MySQL's COMMAND, PostgreSQL's state. */
+  command: string | null;
+  seconds: number | null;
+  /** MySQL's STATE, PostgreSQL's wait event. */
+  state: string | null;
+  query: string | null;
+  /** PostgreSQL's application_name. */
+  client: string | null;
+  /** The session that read the list. */
+  own: boolean;
+  idle: boolean;
+}
+
+export type EndProcess = "query" | "connection";
+
 export interface AppError {
   kind: "invalid" | "not_found" | "database" | "store" | "secret" | "unsupported" | "conflict" | "io" | "unknown";
   message: string;

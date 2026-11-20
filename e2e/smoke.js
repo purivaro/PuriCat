@@ -1530,6 +1530,53 @@
     await waitFor(() => frontTab()?.title === mysqlQueryTitle && sqlTab()?.__editor, "the MySQL query tab in front");
     log.push({ stage: "sql-ui-gaps", mysqlStop, mysqlLost, pgSql, pgStop, pgLost, prodText, history: [historyBefore, historyAfterCancel, historyAfterRun] });
 
+    // Server sessions: a statement of another connection is found, stopped, and its session ended.
+    const sessionsDialog = () => document.querySelector("[data-sessions-dialog]");
+    const sessionRows = () => all("[data-session-row]");
+    const mysqlConnId = (await invoke("list_connections")).find((c) => c.name === "Demo MySQL").id;
+    const sleeping = invoke("run_sql", { id: mysqlConnId, tab: "e2e-sleeper", database: "puricat_e2e", sql: "SELECT SLEEP(30) AS puricat_e2e_sleeper", options: { maxRows: 10, changeLimit: null } });
+    const sleepStarted = Date.now();
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await rightClick(treeRow("Demo MySQL"));
+    await click(await waitFor(() => menuItem("Server sessions…"), "the sessions item"), "server sessions");
+    await waitFor(() => sessionsDialog() && sessionRows().length > 0, "the sessions of the server", 20000);
+    const ownSessionRow = sessionRows().find((r) => r.textContent.includes("this window"));
+    if (!ownSessionRow) throw new Error("the session reading the list is not marked");
+    await type(sessionsDialog().querySelector("[data-sessions-search]"), "puricat_e2e_sleeper");
+    const sleeperRow = await waitFor(() => {
+      if (sessionRows().length === 0) click(sessionsDialog().querySelector('button[aria-label="Refresh"]'), "refresh");
+      return sessionRows().find((r) => r.textContent.includes("SLEEP(30)"));
+    }, "the sleeping statement in the list", 20000);
+    const sleeperId = Number(sleeperRow.dataset.sessionRow);
+    await click(sleeperRow, "pick the session");
+    await click(await waitFor(() => sessionsDialog().querySelector("[data-session-stop]:not([disabled])"), "the stop button"), "stop query");
+    const stopStatement = (await waitFor(() => sessionsDialog().querySelector("[data-session-statement]"), "the statement")).textContent.trim();
+    if (stopStatement !== `KILL QUERY ${sleeperId}`) throw new Error(`the stop statement is ${stopStatement}`);
+    await stage("sessions-stop", { sleeperId, stopStatement });
+    await click(sessionsDialog().querySelector("[data-session-run]"), "run the stop");
+    const sleptOutcome = await sleeping;
+    const sleptMs = Date.now() - sleepStarted;
+    if (sleptMs > 20000) throw new Error(`the stopped statement ran ${sleptMs} ms`);
+    // Now idle: it shows once idle sessions are shown, and ending it closes the connection.
+    // An idle session has no query to match: find it by its id.
+    await type(sessionsDialog().querySelector("[data-sessions-search]"), String(sleeperId));
+    await click(withText("[data-sessions-dialog] label", "Show idle sessions")?.querySelector('[role="switch"]'), "show idle sessions");
+    const idleRow = await waitFor(() => {
+      const row = all("[data-session-row]").find((r) => Number(r.dataset.sessionRow) === sleeperId);
+      if (!row || !/Sleep/.test(row.textContent)) click(sessionsDialog().querySelector('button[aria-label="Refresh"]'), "refresh");
+      return row && /Sleep/.test(row.textContent) && row;
+    }, "the session, now idle", 20000);
+    await click(idleRow, "pick it again");
+    await click(await waitFor(() => sessionsDialog().querySelector("[data-session-end]"), "the end button"), "end session");
+    const endStatement = (await waitFor(() => sessionsDialog().querySelector("[data-session-statement]"), "the end statement")).textContent.trim();
+    if (endStatement !== `KILL CONNECTION ${sleeperId}`) throw new Error(`the end statement is ${endStatement}`);
+    await click(sessionsDialog().querySelector("[data-session-run]"), "run the end");
+    await waitFor(() => !all("[data-session-row]").some((r) => Number(r.dataset.sessionRow) === sleeperId), "the ended session gone from the list", 20000);
+    await invoke("close_console", { tab: "e2e-sleeper" });
+    await click(sessionsDialog().querySelector('button[aria-label="Close"]'), "close the sessions dialog");
+    await waitFor(() => !sessionsDialog(), "the sessions dialog to close");
+    log.push({ stage: "sessions", sleeperId, stopStatement, endStatement, sleptMs, sleptStatus: sleptOutcome.statements?.[0]?.status });
+
     // 8d. SQL console: the statement at the cursor, and saved scripts
     const sqlEditor = () => sqlTab().__editor;
     const sqlTitle = () => document.querySelector(`${panelSel} [data-sql-title]`)?.textContent.trim();

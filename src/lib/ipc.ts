@@ -46,6 +46,8 @@ import type {
   RunOutcome,
   SavedScript,
   ServerInfo,
+  ServerProcess,
+  EndProcess,
   SortSpec,
   SqlFile,
   SqlStatement,
@@ -183,6 +185,10 @@ export const ipc = {
   flushServer: (id: string, what: FlushKind) => invoke<string>("flush_server", { id, what }),
   /** Shows the native Open dialog for a SQL file and gives its text. `null` when it was cancelled. */
   pickSqlFile: () => invoke<SqlFile | null>("pick_sql_file"),
+  listProcesses: (id: string) => invoke<ServerProcess[]>("list_processes", { id }),
+  /** The statement `endProcess` would run. Runs nothing. */
+  planEndProcess: (id: string, process: number, what: EndProcess) => invoke<string>("plan_end_process", { id, process, what }),
+  endProcess: (id: string, process: number, what: EndProcess) => invoke<string>("end_process", { id, process, what }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   detectAiClis: () => invoke<CliStatus[]>("detect_ai_clis"),

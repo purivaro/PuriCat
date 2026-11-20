@@ -1,4 +1,5 @@
 import {
+  Activity,
   ChevronRight,
   CircleAlert,
   Copy,
@@ -581,6 +582,11 @@ function ConnectionNode({ connection, query }: { connection: ConnectionView; que
             {connected && connection.engine !== "sqlite" && (
               <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askUsers(connection)}>
                 <UsersRound className="size-3.5" /> {t("users.menu")}
+              </ContextMenu.Item>
+            )}
+            {connected && connection.engine !== "sqlite" && (
+              <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askSessions(connection)}>
+                <Activity className="size-3.5" /> {t("sessions.menu")}
               </ContextMenu.Item>
             )}
             {connected && connection.engine === "mysql" && (
