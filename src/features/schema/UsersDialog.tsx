@@ -42,8 +42,10 @@ export function UsersDialog() {
   const connection = useUi((s) => s.usersOf);
   const close = () => useUi.getState().askUsers(null);
   const [busy, setBusy] = useState(false);
-  // Set while a form is open: Escape and a click outside then leave the form, not the dialog,
-  // so what was typed (a password, most of all) is not thrown away by a slip.
+  // Set while a form or a new password is on screen. A click outside then does nothing, and
+  // Escape does what the screen's own way back does: a form returns to the list (as its Back
+  // button does, leaving what was typed), but the screen that shows a new password, the one
+  // time it is shown, stays until "Done" — a slip of a key must not throw that away.
   const back = useRef<(() => void) | null>(null);
   return (
     <Dialog.Root open={connection !== null} onOpenChange={(open) => !open && !busy && close()}>
@@ -108,7 +110,7 @@ function Users({ connection, busy, onBusy, back }: UsersProps) {
   useEffect(() => void reload(), [reload]);
 
   useEffect(() => {
-    back.current = view.kind === "browse" ? null : browse;
+    back.current = view.kind === "browse" ? null : view.kind === "done" ? () => undefined : browse;
     return () => {
       back.current = null;
     };

@@ -583,6 +583,10 @@
     // the one chance to copy the password, then the new account in the list, selected
     const kept = (await waitFor(() => usersDialog().querySelector("[data-users-done] [data-password]"), "the password to copy", 15000)).value;
     if (kept !== generated) throw new Error("the password shown after creating is not the one that was set");
+    // shown this once: Escape must not throw it away; only "Done" leaves it. (Cancelable, as a
+    // real key press is: the dialog keeps its screen by cancelling the key.)
+    await key("Escape", { cancelable: true });
+    if (!usersDialog()?.querySelector("[data-users-done] [data-password]")) throw new Error("Escape threw away the password shown once");
     await click(usersButton("Done"), "done");
     await waitFor(() => usersView("browse") && accountRow("puricat_e2e_user@localhost")?.getAttribute("aria-selected") === "true", "the new account, selected");
     const userGrants = await waitFor(() => {
