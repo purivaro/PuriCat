@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::state::{AppState, ConsoleSlot, Proposal};
+use crate::state::{AppState, ConsoleSlot, FileRows, Proposal};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -893,6 +893,32 @@ pub async fn apply_paste(
     result
 }
 
+/// A large import, one batch: analysed and written in one transaction (rows that cannot be
+/// written are reported, see `Session::import_batch`). `cancel_job` stops it.
+#[tauri::command]
+pub async fn import_batch(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    request: PasteRequest,
+    on_problem: puricat_core::db::smart::OnProblem,
+    job: String,
+) -> Result<puricat_core::db::smart::BatchOutcome> {
+    if state.store.get_connection(&id).await?.read_only {
+        return Err(Error::Invalid(
+            "This connection is read-only. Turn off the read-only session in its settings to edit data.".into(),
+        ));
+    }
+    let session = state.session(&id).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = session
+        .import_batch(&table, &request, on_problem, &stop)
+        .await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
+}
+
 /// Ask a running job to stop. It rolls back at the next statement boundary.
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, job: String) {
@@ -1284,8 +1310,9 @@ pub(crate) fn e2e_pick(state: &AppState) -> Option<Option<std::path::PathBuf>> {
     None
 }
 
-/// Read the chosen file as rows of text, for Smart Paste. One more row than a run may hold
-/// is returned at most, so "too many" can be told from "exactly the limit".
+/// Read the chosen file as rows of text, for Smart Paste: at most the rows one run may hold,
+/// with the count of all of them. A file with more is kept here whole, for a large import to
+/// read a page at a time (`table_file_rows`).
 #[tauri::command]
 pub async fn read_table_file(
     state: State<'_, AppState>,
@@ -1296,10 +1323,55 @@ pub async fn read_table_file(
         Some((current, path)) if *current == token => path.clone(),
         _ => return Err(Error::NotFound("The chosen file (open it again)".into())),
     };
-    let max_rows = puricat_core::db::write::MAX_STATEMENTS + 1;
-    tokio::task::spawn_blocking(move || table_file::read(&path, &options, max_rows))
-        .await
-        .map_err(|e| Error::Invalid(e.to_string()))?
+    *state.file_rows.lock().unwrap() = None;
+    let read_with = options.clone();
+    let mut table =
+        tokio::task::spawn_blocking(move || table_file::read(&path, &read_with, usize::MAX))
+            .await
+            .map_err(|e| Error::Invalid(e.to_string()))??;
+    let limit = puricat_core::db::write::MAX_STATEMENTS;
+    if table.rows.len() > limit {
+        let all = std::mem::take(&mut table.rows);
+        table.rows = all[..limit].to_vec();
+        *state.file_rows.lock().unwrap() = Some(FileRows {
+            token,
+            options,
+            rows: Arc::new(all),
+        });
+    }
+    Ok(table)
+}
+
+/// The most rows `table_file_rows` hands out at once.
+const FILE_PAGE_MAX: usize = 5_000;
+
+/// Rows `offset..offset + limit` of a large file read by `read_table_file` (the same token and
+/// options), as the file has them: a header row is row 0.
+#[tauri::command]
+pub fn table_file_rows(
+    state: State<'_, AppState>,
+    token: String,
+    options: ReadOptions,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>> {
+    let guard = state.file_rows.lock().unwrap();
+    let Some(file) = guard
+        .as_ref()
+        .filter(|f| f.token == token && f.options == options)
+    else {
+        return Err(Error::NotFound(
+            "The rows of the chosen file (open it again)".into(),
+        ));
+    };
+    let end = offset
+        .saturating_add(limit.min(FILE_PAGE_MAX))
+        .min(file.rows.len());
+    Ok(file
+        .rows
+        .get(offset..end)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default())
 }
 
 #[tauri::command]

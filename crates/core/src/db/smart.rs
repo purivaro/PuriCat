@@ -77,7 +77,7 @@ pub enum RowStatus {
 }
 
 impl RowStatus {
-    fn is_problem(self) -> bool {
+    pub(crate) fn is_problem(self) -> bool {
         matches!(
             self,
             RowStatus::MissingKey | RowStatus::Duplicate | RowStatus::Exists | RowStatus::Invalid
@@ -142,6 +142,58 @@ pub struct Analysis {
     /// Problems with the set-up itself (mapping, key, required columns).
     pub problems: Vec<String>,
     pub elapsed_ms: u64,
+}
+
+/// A large import: what to do with a row that cannot be written.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OnProblem {
+    /// Write nothing of the batch it is in, and end the import there.
+    Stop,
+    /// Leave the row out, say why, and write the rest.
+    Skip,
+}
+
+/// A row of a batch that was not written.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedRow {
+    /// Index into the batch's rows.
+    pub row: usize,
+    /// What the analysis found; `None` when the server refused the row.
+    pub status: Option<RowStatus>,
+    pub message: Option<String>,
+}
+
+/// One batch of a large import: what was written, and what was not.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOutcome {
+    pub inserted: u32,
+    pub updated: u32,
+    pub unchanged: u32,
+    pub unmatched: u32,
+    pub failed: Vec<FailedRow>,
+    /// `OnProblem::Stop` met a row that cannot be written: nothing of this batch was.
+    pub stopped: bool,
+    /// Stopped by the user while rows were written one by one: those before stay written,
+    /// and the rest are in `failed`.
+    pub cancelled: bool,
+    pub elapsed_ms: u64,
+}
+
+/// The pasted row behind each statement `write::plan_keyed` makes from an analysis: the rows
+/// to update, in order, then the rows to insert.
+pub(crate) fn statement_rows(analysis: &Analysis) -> Vec<usize> {
+    let of = |status: RowStatus| {
+        analysis
+            .rows
+            .iter()
+            .enumerate()
+            .filter(move |(_, r)| r.status == status)
+            .map(|(i, _)| i)
+    };
+    of(RowStatus::Update).chain(of(RowStatus::Insert)).collect()
 }
 
 /// One lookup query: SQL, its parameters, and the pasted row indexes it covers.
@@ -1448,5 +1500,26 @@ mod tests {
 
         let ragged = request(Mode::Insert, &["sku", "name"], &[], &[], &[&[Some("a")]]);
         assert!(Draft::new(Engine::Mysql, &m, &keys(), &ragged).is_err());
+    }
+
+    #[test]
+    fn each_statement_is_traced_to_its_pasted_row() {
+        // plan_keyed writes the updates, then the inserts, each in pasted order.
+        let report = |status| RowReport::new(status, None);
+        let analysis = Analysis {
+            rows: vec![
+                report(RowStatus::Insert),
+                report(RowStatus::Update),
+                report(RowStatus::Unchanged),
+                report(RowStatus::Insert),
+                report(RowStatus::Invalid),
+                report(RowStatus::Update),
+            ],
+            counts: Counts::default(),
+            fingerprint: String::new(),
+            problems: Vec::new(),
+            elapsed_ms: 0,
+        };
+        assert_eq!(statement_rows(&analysis), [1, 5, 0, 3]);
     }
 }

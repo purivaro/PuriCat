@@ -85,10 +85,12 @@ export PURICAT_STAND_IN_DIR="$WORK"
 # Files for the native Open dialogs. A native dialog cannot be driven, so a debug build answers
 # each request with the next of these instead, in the order the stages ask: a SQL file for
 # "Open SQL file…", then for Smart Paste the CSV and the workbook the test exports itself, a
-# Thai CSV that is not UTF-8, and a CSV with more rows than one run takes.
+# Thai CSV that is not UTF-8, and a CSV with more rows than one run takes (imported in batches).
 printf 'SELECT 42 AS answer; -- เปิดจากไฟล์\n' >"$WORK/open.sql"
 printf 'id,name,city\n9001,ทดสอบภาษาไทย,ลำปาง\n' | iconv -f UTF-8 -t CP874 >"$WORK/thai874.csv"
-{ echo "id,name,city"; seq 1 10001 | sed 's/$/,x,y/'; } >"$WORK/big.csv"
+# New customers 101–10120 (more than one run takes), one of them (5050, line 4951) with a name
+# longer than the column holds.
+{ echo "id,name,city"; seq 101 10120 | awk '{ n = ($1 == 5050) ? sprintf("%0130d", 0) : "Big " $1; print $1 "," n ",y" }'; } >"$WORK/big.csv"
 # After the SQL file come the folder the backups go to, once for each of the two databases
 # backed up (a folder dialog is answered like a file dialog).
 export PURICAT_E2E_PICK="$WORK/open.sql:$WORK/backups:$WORK/backups:$WORK/export.csv:$WORK/export.xlsx:$WORK/thai874.csv:$WORK/big.csv"

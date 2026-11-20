@@ -240,6 +240,24 @@ export interface PasteRowReport {
   other: number | null;
 }
 
+/** A large import: what to do with a row that cannot be written. */
+export type OnProblem = "stop" | "skip";
+
+/** One batch of a large import. */
+export interface BatchOutcome {
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  unmatched: number;
+  /** Rows of the batch that were not written; `status` null: the server refused the row. */
+  failed: { row: number; status: PasteRowStatus | null; message: string | null }[];
+  /** "Stop" met a row that cannot be written: nothing of this batch was. */
+  stopped: boolean;
+  /** Stopped by the user while rows were written one by one: the rest are in `failed`. */
+  cancelled: boolean;
+  elapsedMs: number;
+}
+
 export interface PasteAnalysis {
   rows: PasteRowReport[];
   counts: PasteCounts;

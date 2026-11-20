@@ -1317,15 +1317,147 @@ impl Session {
         if statements.is_empty() {
             return Err(Error::Invalid("There is nothing to save".into()));
         }
-        match self {
-            Session::MySql(s) => s.apply(&statements, keep_going).await?,
-            Session::Postgres(s) => s.apply(&table.database, &statements, keep_going).await?,
-            Session::Sqlite(s) => s.apply(&statements, keep_going).await?,
-        }
+        self.run_statements(&table.database, &statements, keep_going)
+            .await?;
         Ok(write::tally(
             &statements,
             started.elapsed().as_millis() as u64,
         ))
+    }
+
+    /// Statements in one transaction: all of them, or none.
+    async fn run_statements(
+        &self,
+        database: &str,
+        statements: &[write::Statement],
+        keep_going: &(dyn Fn(usize) -> bool + Send + Sync),
+    ) -> Result<()> {
+        match self {
+            Session::MySql(s) => s.apply(statements, keep_going).await,
+            Session::Postgres(s) => s.apply(database, statements, keep_going).await,
+            Session::Sqlite(s) => s.apply(statements, keep_going).await,
+        }
+    }
+
+    /// A large import, one batch: the rows are analysed as a paste is, and what can be written
+    /// is, in one transaction. A row the analysis finds a problem with is reported; so is a row
+    /// the server refuses, which `OnProblem::Skip` finds by writing the batch again one row per
+    /// transaction. `OnProblem::Stop` writes nothing of a batch with such a row. Batches
+    /// already written stay: each is its own transaction. Setting `stop` rolls this batch
+    /// back (the call then fails with `Conflict`).
+    pub async fn import_batch(
+        &self,
+        table: &TableRef,
+        request: &smart::PasteRequest,
+        on_problem: smart::OnProblem,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<smart::BatchOutcome> {
+        use std::sync::atomic::Ordering;
+        let started = Instant::now();
+        let request = smart::PasteRequest {
+            skip_problems: true,
+            ..request.clone()
+        };
+        let (analysis, statements) = self.prepare_paste(table, &request).await?;
+        if let Some(problem) = analysis.problems.first() {
+            return Err(Error::Invalid(problem.clone()));
+        }
+        let mut out = smart::BatchOutcome {
+            unchanged: analysis.counts.unchanged,
+            unmatched: analysis.counts.unmatched,
+            failed: analysis
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.status.is_problem())
+                .map(|(row, r)| smart::FailedRow {
+                    row,
+                    status: Some(r.status),
+                    message: r.message.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let finish = |mut out: smart::BatchOutcome| {
+            out.elapsed_ms = started.elapsed().as_millis() as u64;
+            Ok(out)
+        };
+        if on_problem == smart::OnProblem::Stop && !out.failed.is_empty() {
+            out.stopped = true;
+            return finish(out);
+        }
+        if statements.is_empty() {
+            return finish(out);
+        }
+        let owners = smart::statement_rows(&analysis);
+        if owners.len() != statements.len() {
+            return Err(Error::Database(
+                "The import could not tell which row each statement writes".into(),
+            ));
+        }
+        let keep_going = |_: usize| !stop.load(Ordering::Relaxed);
+        let cancelled = || {
+            Err(Error::Conflict(
+                "Stopped. This batch was rolled back.".into(),
+            ))
+        };
+        let count = |out: &mut smart::BatchOutcome, done: &[write::Statement]| {
+            for s in done {
+                match s.kind {
+                    write::StatementKind::Insert => out.inserted += 1,
+                    write::StatementKind::Update => out.updated += 1,
+                    write::StatementKind::Delete => {}
+                }
+            }
+        };
+        match self
+            .run_statements(&table.database, &statements, &keep_going)
+            .await
+        {
+            Ok(()) => count(&mut out, &statements),
+            Err(_) if stop.load(Ordering::Relaxed) => return cancelled(),
+            Err(e) if on_problem == smart::OnProblem::Stop => return Err(e),
+            Err(_) => {
+                // Which rows the server refuses: each on its own. A stop now leaves the rows
+                // already written; the others are reported as not written.
+                let unwritten = |row: usize| smart::FailedRow {
+                    row,
+                    status: None,
+                    message: Some(STOPPED_ROW.into()),
+                };
+                let mut rest = statements.iter().zip(&owners);
+                while let Some((statement, &row)) = rest.next() {
+                    let result = if stop.load(Ordering::Relaxed) {
+                        None
+                    } else {
+                        Some(
+                            self.run_statements(
+                                &table.database,
+                                std::slice::from_ref(statement),
+                                &keep_going,
+                            )
+                            .await,
+                        )
+                    };
+                    match result {
+                        Some(Ok(())) => count(&mut out, std::slice::from_ref(statement)),
+                        Some(Err(_)) | None if stop.load(Ordering::Relaxed) => {
+                            out.cancelled = true;
+                            out.failed.push(unwritten(row));
+                            out.failed.extend(rest.by_ref().map(|(_, &r)| unwritten(r)));
+                        }
+                        Some(Err(e)) => out.failed.push(smart::FailedRow {
+                            row,
+                            status: None,
+                            message: Some(e.to_string()),
+                        }),
+                        None => unreachable!("only a stop skips a row"),
+                    }
+                }
+                out.failed.sort_by_key(|f| f.row);
+            }
+        }
+        finish(out)
     }
 
     pub async fn close(&self) {
@@ -1336,6 +1468,9 @@ impl Session {
         }
     }
 }
+
+/// Why a row of a large import's batch was not written when the import was stopped part-way.
+const STOPPED_ROW: &str = "Not written: the import was stopped";
 
 /// Open one connection within `timeout`, report the driver's own error, and close it.
 async fn probe<C, F>(timeout: std::time::Duration, connecting: F) -> Result<()>

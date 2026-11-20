@@ -2000,20 +2000,53 @@
     const thai = { notUtf8, source: smartSource(), bar: fileBar() };
     await stage("smart-file-encoding", { thai });
 
-    // More rows than one run takes: nothing is offered for mapping.
+    // More rows than one run takes: the first rows are previewed, and the whole file is
+    // imported in batches. The runner's file holds new customers 101–10120, one of them (line
+    // 4951) with a name longer than the column holds.
     await openFile();
-    const tooMany = (await waitFor(() => smart().querySelector("[data-smart-too-many]"), "too-many state", 15000)).textContent.replace(/\s+/g, " ").trim();
+    const large = (await waitFor(() => smart().querySelector("[data-smart-large]"), "the large-file notice", 30000)).textContent.replace(/\s+/g, " ").trim();
+    const largeSource = smartSource();
     // A cancelled dialog changes nothing.
     await openFile();
     await sleep(400);
-    const afterCancel = !!smart().querySelector("[data-smart-too-many]");
+    const afterCancel = !!smart().querySelector("[data-smart-large]");
     // The runner's list is used up: a request must come back as cancelled, at once. A native
     // dialog would leave it unanswered (and open on the screen for the rest of the run).
     const pastTheList = await Promise.race([invoke("pick_table_file"), sleep(3000).then(() => "no answer")]);
     if (pastTheList !== null) throw new Error(`a file request past the runner's list was not a cancelled dialog: ${JSON.stringify(pastTheList)}`);
-    await stage("smart-file-limit", { tooMany, afterCancel });
-    await click(smart().querySelector('button[aria-label="Close"]'), "close smart paste");
-    await waitFor(() => !smart(), "smart paste closed");
+    await click(smartButton("Preview"), "preview the first rows");
+    await waitFor(() => document.querySelector("[data-smart-preview]") && smartCounts().insert !== undefined, "the first rows previewed", 30000);
+    const largePreview = smartCounts();
+    const importBefore = smart().querySelector("[data-smart-import]").textContent.trim();
+    await click(exact('[data-smart-large] [role="radio"]', "Leave it out and go on"), "skip rows that cannot be written");
+    await click(smart().querySelector("[data-smart-import]"), "import the whole file");
+    await waitFor(() => smart().querySelector("[data-smart-import-progress]"), "the import under way");
+    await waitFor(() => smart().querySelector('[data-smart-import-report="done"]'), "the import to finish", 180000);
+    const imported = Object.fromEntries(all("[data-smart-import-count]").map((e) => [e.dataset.smartImportCount, e.querySelector("b").textContent]));
+    const notWritten = all("[data-smart-failed]").map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    const importDone = smart().querySelector('[data-smart-import-report="done"] p').textContent.trim();
+    const bigMysql = (await invoke("list_connections")).find((c) => c.name === "Demo MySQL").id;
+    const bigSql = async (sql, tab) => {
+      const outcome = await invoke("run_sql", { id: bigMysql, tab, database: "puricat_e2e", sql, options: { maxRows: 10, changeLimit: null } });
+      await invoke("close_console", { tab });
+      return outcome.statements[0];
+    };
+    const onServer = (await bigSql("SELECT COUNT(*), MIN(id), MAX(id), SUM(id = 5050) FROM customers WHERE id > 100", "e2e-big-count")).results[0].rows[0].join(" ");
+    await stage("smart-file-large", { large, largeSource, afterCancel, largePreview, importBefore, imported, notWritten, importDone, onServer });
+    if (!afterCancel) throw new Error("a cancelled Open dialog dropped the large file");
+    if (largePreview.insert !== 9998 || largePreview.problems !== 1) throw new Error(`the first rows previewed as ${JSON.stringify(largePreview)}`);
+    if (imported.inserted !== "10,019" || imported.failed !== "1" || notWritten.length !== 1 || !notWritten[0].startsWith("4951")) {
+      throw new Error(`the import reports ${JSON.stringify(imported)} / ${notWritten}`);
+    }
+    if (onServer !== "10019 101 10120 0") throw new Error(`the server has ${onServer}`);
+    // Closing reads the table again; then the rows go, for the stages after this one.
+    await click(smart().querySelector("[data-smart-import-close]"), "close the import report");
+    await waitFor(() => !smart(), "smart paste closed after the import");
+    await bigSql("DELETE FROM customers WHERE id > 100", "e2e-big-delete");
+    await bigSql("ALTER TABLE customers AUTO_INCREMENT = 1", "e2e-big-reset");
+    await click(panelButton("Refresh (⌘R)"), "read customers again");
+    await waitFor(() => dataRows().length === customerRows && cellText(0, 1) === "สมชาย ใจดี", "customers as they were", 20000);
+    log.push({ stage: "smart-file-large-done", imported, onServer });
 
     // 9. PostgreSQL: the server refuses a bad number (the edit stays staged), then a valid save
     await click(all('[role="tab"]').find((x) => x.textContent.includes("Demo Postgr")), "postgres tab");
