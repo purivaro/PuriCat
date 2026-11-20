@@ -644,6 +644,38 @@ pub async fn plan_flush(state: State<'_, AppState>, id: String, what: Flush) -> 
     ddl::flush(state.session(&id).await?.engine(), what).map(str::to_string)
 }
 
+/// The column types the table form offers for a connection's engine.
+#[tauri::command]
+pub async fn column_types(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<puricat_core::db::table_design::TypeChoice>> {
+    let engine = state.store.get_connection(&id).await?.engine;
+    puricat_core::db::table_design::types(engine)
+}
+
+/// The statements the table form would run, in order. Runs nothing.
+#[tauri::command]
+pub async fn plan_create_table(
+    state: State<'_, AppState>,
+    id: String,
+    spec: puricat_core::db::table_design::NewTable,
+) -> Result<Vec<String>> {
+    let engine = state.store.get_connection(&id).await?.engine;
+    puricat_core::db::table_design::create_table(engine, &spec)
+}
+
+/// Create a table from the table form. Returns the statements that ran.
+#[tauri::command]
+pub async fn create_table(
+    state: State<'_, AppState>,
+    id: String,
+    spec: puricat_core::db::table_design::NewTable,
+) -> Result<Vec<String>> {
+    refuse_read_only(&state, &id, "create a table").await?;
+    state.session(&id).await?.create_table(&spec).await
+}
+
 /// The sessions on the server of a connection ([ADR 0024](../../docs/adr/0024-server-sessions.md)).
 #[tauri::command]
 pub async fn list_processes(

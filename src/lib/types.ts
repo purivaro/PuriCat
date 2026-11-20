@@ -648,6 +648,40 @@ export interface UpdateProgress {
   total: number | null;
 }
 
+export type TypeParams =
+  | { kind: "none" }
+  | { kind: "length"; required: boolean; default: number; max: number }
+  | { kind: "precision"; defaultPrecision: number; defaultScale: number; max: number };
+
+export interface TypeChoice {
+  name: string;
+  params: TypeParams;
+  family: "integer" | "number" | "text" | "time" | "other";
+  /** DEFAULT CURRENT_TIMESTAMP is allowed. */
+  timestamp: boolean;
+}
+
+export type ColumnDefault = { kind: "none" } | { kind: "null" } | { kind: "value"; value: string } | { kind: "currentTimestamp" };
+
+export interface ColumnSpec {
+  name: string;
+  type: string;
+  length: number | null;
+  scale: number | null;
+  unsigned: boolean;
+  nullable: boolean;
+  default: ColumnDefault;
+  auto: boolean;
+  key: boolean;
+  comment: string | null;
+}
+
+export interface NewTable {
+  table: TableRef;
+  columns: ColumnSpec[];
+  comment: string | null;
+}
+
 /** One session on a server, as the server reports it. */
 export interface ServerProcess {
   id: number;

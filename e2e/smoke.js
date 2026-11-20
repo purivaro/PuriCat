@@ -1577,6 +1577,49 @@
     await waitFor(() => !sessionsDialog(), "the sessions dialog to close");
     log.push({ stage: "sessions", sleeperId, stopStatement, endStatement, sleptMs, sleptStatus: sleptOutcome.statements?.[0]?.status });
 
+    // New table: a form of columns, the statement shown before it runs, the table opened after.
+    const newTableDialog = () => document.querySelector("[data-new-table]");
+    const columnRow = (i) => newTableDialog().querySelector(`[data-new-table-column="${i}"]`);
+    const inRow = (i, label) => columnRow(i).querySelector(`[aria-label="${label}"]`);
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await dbMenu("Demo MySQL", "puricat_e2e", "New table…");
+    await waitFor(() => newTableDialog() && columnRow(1), "the table form with its first columns", 20000);
+    const formStart = { id: inRow(0, "Column").value, type: inRow(0, "Type").value, key: inRow(0, "Primary key").checked, auto: inRow(0, "Auto").checked };
+    if (JSON.stringify(formStart) !== '{"id":"id","type":"INT","key":true,"auto":true}') throw new Error(`the form starts with ${JSON.stringify(formStart)}`);
+    await type(newTableDialog().querySelector("[data-new-table-name]"), "e2e_new_table");
+    await type(inRow(1, "Column"), "ชื่อสินค้า");
+    await type(inRow(1, "Length"), "120");
+    await click(newTableDialog().querySelector("[data-new-table-add]"), "add a column");
+    await setChoice(inRow(2, "Type"), "DECIMAL");
+    await type(inRow(2, "Column"), "price");
+    await setChoice(inRow(2, "Default"), "value");
+    await type(await waitFor(() => columnRow(2).querySelector('input[aria-label="Value"]'), "the default value field"), "0");
+    await click(newTableDialog().querySelector("[data-new-table-add]"), "add another column");
+    await setChoice(inRow(3, "Type"), "DATETIME");
+    await type(inRow(3, "Column"), "placed");
+    await setChoice(inRow(3, "Default"), "currentTimestamp");
+    const expectedTable = "CREATE TABLE `puricat_e2e`.`e2e_new_table` (\n  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,\n  `ชื่อสินค้า` VARCHAR(120) NOT NULL,\n  `price` DECIMAL(12, 2) NOT NULL DEFAULT '0',\n  `placed` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (`id`)\n)";
+    const newTablePlan = await waitFor(() => newTableDialog().querySelector("[data-ddl-preview]:not([aria-busy=true])")?.textContent === expectedTable && expectedTable, "the CREATE TABLE statement", 15000).catch(() => {
+      throw new Error(`the table form shows: ${newTableDialog().querySelector("[data-ddl-preview], [data-ddl-preview-empty]")?.textContent}`);
+    });
+    await stage("new-table", { formStart, newTablePlan });
+    await click(newTableDialog().querySelector("[data-new-table-create]"), "create the table");
+    await waitFor(() => !newTableDialog(), "the table form to close", 15000);
+    await waitFor(() => frontTab()?.title.startsWith("e2e_new_table") && activePanel()?.querySelector('[role="grid"]'), "the new table opened", 20000);
+    const createdTable = await invoke("describe_table", { id: mysqlConnId, table: { database: "puricat_e2e", schema: null, name: "e2e_new_table" } });
+    const createdColumns = createdTable.columns.map((c) => c.name).join(",");
+    if (createdColumns !== "id,ชื่อสินค้า,price,placed" || createdTable.primaryKey.join() !== "id") throw new Error(`the server has ${createdColumns} / ${createdTable.primaryKey}`);
+    // Put things back for the later stages: the table goes, and so does its tab.
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the new table's tab");
+    await invoke("run_sql", { id: mysqlConnId, tab: "e2e-drop-new", database: "puricat_e2e", sql: "DROP TABLE puricat_e2e.e2e_new_table", options: { maxRows: 10, changeLimit: null } });
+    await invoke("close_console", { tab: "e2e-drop-new" });
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await dbMenu("Demo MySQL", "puricat_e2e", "Refresh");
+    await waitFor(() => !treeRow("e2e_new_table"), "the dropped table gone from the explorer", 15000);
+    await click(all('[role="tab"]').find((t) => t.title === mysqlQueryTitle), "back to the MySQL query tab");
+    await waitFor(() => frontTab()?.title === mysqlQueryTitle && sqlTab()?.__editor, "the MySQL query tab in front");
+    log.push({ stage: "new-table-done", createdColumns });
+
     // 8d. SQL console: the statement at the cursor, and saved scripts
     const sqlEditor = () => sqlTab().__editor;
     const sqlTitle = () => document.querySelector(`${panelSel} [data-sql-title]`)?.textContent.trim();

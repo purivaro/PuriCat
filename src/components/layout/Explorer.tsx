@@ -18,6 +18,7 @@ import {
   Plus,
   RefreshCw,
   RotateCw,
+  Grid2x2Plus,
   Search,
   SquarePen,
   Star,
@@ -230,6 +231,10 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                   <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askViewTask({ kind: "new", connection, database, schema })}>
                     <Eye className="size-3.5" /> {t("schema.newView")}
                   </ContextMenu.Item>
+                ) : g.id === "tables" && connection.engine !== "sqlite" ? (
+                  <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewTable({ connection, database, schema })}>
+                    <Grid2x2Plus className="size-3.5" /> {t("schema.newTable")}
+                  </ContextMenu.Item>
                 ) : undefined
               }
             />
@@ -343,6 +348,11 @@ function Schemas({ connection, database, depth, query }: Omit<ObjectsProps, "sch
                 <>
                   {/* The server's own schemas are shown, not added to. */}
                   {!schema.system && (
+                    <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewTable({ connection, database, schema: schema.name })}>
+                      <Grid2x2Plus className="size-3.5" /> {t("schema.newTable")}
+                    </ContextMenu.Item>
+                  )}
+                  {!schema.system && (
                     <ContextMenu.Item
                       className={menuItemClass}
                       onSelect={() => useUi.getState().askViewTask({ kind: "new", connection, database, schema: schema.name })}
@@ -434,6 +444,11 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                     <FileCode2 className="size-3.5" /> {t("explorer.openSqlFile")}
                   </ContextMenu.Item>
                   {/* Where a database holds its views itself; on PostgreSQL a schema does. */}
+                  {!hasSchemas && !db.system && connection.engine !== "sqlite" && (
+                    <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewTable({ connection, database: db.name, schema: null })}>
+                      <Grid2x2Plus className="size-3.5" /> {t("schema.newTable")}
+                    </ContextMenu.Item>
+                  )}
                   {!hasSchemas && !db.system && (
                     <ContextMenu.Item
                       className={menuItemClass}

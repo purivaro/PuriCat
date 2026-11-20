@@ -140,6 +140,9 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `plan_drop_user` | `id`, `account` | The exact `DROP USER` / `DROP ROLE` statement, as text. Runs nothing; the same refusals as `plan_password` |
 | `drop_user` | `id`, `account`, `typed` (what the user typed to confirm) | The statement that ran. Refused up front when the saved profile is read-only, and unless `typed` equals the account as it is written (`user@host` on MySQL, the name on PostgreSQL); then the plan's refusals. Run on a pooled connection (on PostgreSQL to `home`). A PostgreSQL role that owns objects or holds privileges is refused by the server (`database`) |
 | `plan_flush` | `id`, `what` (`privileges`, `tables`, `logs` or `status`) | The `FLUSH` statement for `what`, as text. Nothing is sent. `unsupported` for an engine other than MySQL |
+| `column_types` | `id` | The column types the table form offers for the connection's engine, with what each takes in parentheses |
+| `plan_create_table` | `id`, `spec` (table, columns, comment) | The statements `create_table` would run, in order. Runs nothing |
+| `create_table` | `id`, `spec` | The statements that ran. Refused on a read-only connection |
 | `list_processes` | `id` | The server's sessions (`Process`: id, user, host, database, command, seconds, state, statement up to 4,000 characters, client, own, idle) |
 | `plan_end_process` | `id`, `process` (a number), `what` (`query` / `connection`) | The statement `end_process` would run. Runs nothing |
 | `end_process` | `id`, `process`, `what` | The statement that ran. Refused on a read-only connection |
