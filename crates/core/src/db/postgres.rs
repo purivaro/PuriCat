@@ -98,6 +98,52 @@ impl PgSession {
         Ok(pool)
     }
 
+    /// The client sessions on the server ([`super::monitor`]).
+    pub async fn processes(&self) -> Result<Vec<super::monitor::Process>> {
+        use super::monitor::{postgres_list_sql, process};
+        let rows = sqlx::query(&postgres_list_sql())
+            .fetch_all(&self.pool(&self.home).await?)
+            .await
+            .map_err(Error::database)?;
+        let text = |r: &sqlx::postgres::PgRow, i: usize| -> Option<String> {
+            r.try_get::<Option<String>, _>(i).ok().flatten()
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                process(
+                    crate::model::Engine::Postgres,
+                    text(r, 0),
+                    text(r, 1),
+                    text(r, 2),
+                    text(r, 3),
+                    text(r, 4),
+                    text(r, 5),
+                    text(r, 6),
+                    text(r, 7),
+                    text(r, 8),
+                    r.try_get::<Option<bool>, _>(9).ok().flatten() == Some(true),
+                )
+            })
+            .collect())
+    }
+
+    /// `pg_cancel_backend` / `pg_terminate_backend`: `false` means no such session, or not
+    /// one this account may signal.
+    pub async fn signal(&self, sql: &str) -> Result<()> {
+        let row = sqlx::query(sql)
+            .fetch_one(&self.pool(&self.home).await?)
+            .await
+            .map_err(Error::database)?;
+        if row.try_get::<Option<bool>, _>(0).map_err(Error::database)? == Some(true) {
+            Ok(())
+        } else {
+            Err(Error::Database(
+                "The server did not signal that session: it has ended, or this account may not signal it.".into(),
+            ))
+        }
+    }
+
     pub async fn version(&self) -> Result<String> {
         let row = sqlx::query("SELECT current_setting('server_version')")
             .fetch_one(&self.pool(&self.home).await?)

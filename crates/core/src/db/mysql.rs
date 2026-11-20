@@ -358,6 +358,43 @@ impl MySqlSession {
     }
 
     /// Run one statement that is not a query and has no parameters (DDL from a form).
+    /// The sessions on the server ([`super::monitor`]).
+    pub async fn processes(&self) -> Result<Vec<super::monitor::Process>> {
+        use super::monitor::{mysql_list_sql, process};
+        let mut rows = sqlx::query(&mysql_list_sql("performance_schema.processlist"))
+            .fetch_all(&self.pool)
+            .await;
+        if rows.is_err() {
+            // MariaDB, MySQL before 8.0.22, or the performance schema switched off.
+            rows = sqlx::query(&mysql_list_sql("information_schema.PROCESSLIST"))
+                .fetch_all(&self.pool)
+                .await;
+        }
+        let text = |r: &MySqlRow, i: usize| -> Option<String> {
+            r.try_get::<Option<String>, _>(i).ok().flatten()
+        };
+        Ok(rows
+            .map_err(Error::database)?
+            .iter()
+            .filter_map(|r| {
+                let own = r.try_get::<Option<i64>, _>(8).ok().flatten() == Some(1);
+                process(
+                    crate::model::Engine::Mysql,
+                    text(r, 0),
+                    text(r, 1),
+                    text(r, 2),
+                    text(r, 3),
+                    text(r, 4),
+                    text(r, 5),
+                    text(r, 6),
+                    text(r, 7),
+                    None,
+                    own,
+                )
+            })
+            .collect())
+    }
+
     pub async fn execute_statement(&self, sql: &str) -> Result<()> {
         sqlx::raw_sql(sql)
             .execute(&self.pool)

@@ -644,6 +644,39 @@ pub async fn plan_flush(state: State<'_, AppState>, id: String, what: Flush) -> 
     ddl::flush(state.session(&id).await?.engine(), what).map(str::to_string)
 }
 
+/// The sessions on the server of a connection ([ADR 0024](../../docs/adr/0024-server-sessions.md)).
+#[tauri::command]
+pub async fn list_processes(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<puricat_core::db::monitor::Process>> {
+    state.session(&id).await?.processes().await
+}
+
+/// The statement `end_process` would run. Runs nothing.
+#[tauri::command]
+pub async fn plan_end_process(
+    state: State<'_, AppState>,
+    id: String,
+    process: u64,
+    what: puricat_core::db::monitor::End,
+) -> Result<String> {
+    let engine = state.store.get_connection(&id).await?.engine;
+    puricat_core::db::monitor::end_sql(engine, process, what)
+}
+
+/// Stop a session's query, or end the session. Returns the statement that ran.
+#[tauri::command]
+pub async fn end_process(
+    state: State<'_, AppState>,
+    id: String,
+    process: u64,
+    what: puricat_core::db::monitor::End,
+) -> Result<String> {
+    refuse_read_only(&state, &id, "stop or end sessions").await?;
+    state.session(&id).await?.end_process(process, what).await
+}
+
 /// Run a `FLUSH` statement. Returns the statement that ran.
 #[tauri::command]
 pub async fn flush_server(state: State<'_, AppState>, id: String, what: Flush) -> Result<String> {
