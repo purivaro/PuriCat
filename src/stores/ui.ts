@@ -32,6 +32,8 @@ interface UiState {
   viewTask: ViewTask | null;
   /** The connection whose users and privileges are open. */
   usersOf: ConnectionView | null;
+  /** The table whose columns and indexes the change form is changing. */
+  alterOf: { connection: ConnectionView; table: TableRef } | null;
   /** Where the table form makes a new table. */
   newTableIn: { connection: ConnectionView; database: string; schema: string | null } | null;
   /** The connection whose server sessions are open. */
@@ -48,6 +50,7 @@ interface UiState {
   askViewTask: (task: ViewTask | null) => void;
   askUsers: (connection: ConnectionView | null) => void;
   askSessions: (connection: ConnectionView | null) => void;
+  askAlterTable: (target: { connection: ConnectionView; table: TableRef } | null) => void;
   askNewTable: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -63,6 +66,7 @@ export const useUi = create<UiState>((set) => ({
   usersOf: null,
   sessionsOf: null,
   newTableIn: null,
+  alterOf: null,
   backupOf: null,
   paletteOpen: false,
   openConnectionDialog: (target) => set({ connectionDialog: target ?? "new" }),
@@ -75,6 +79,7 @@ export const useUi = create<UiState>((set) => ({
   askUsers: (usersOf) => set({ usersOf }),
   askSessions: (sessionsOf) => set({ sessionsOf }),
   askNewTable: (newTableIn) => set({ newTableIn }),
+  askAlterTable: (alterOf) => set({ alterOf }),
   askBackup: (backupOf) => set({ backupOf }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));

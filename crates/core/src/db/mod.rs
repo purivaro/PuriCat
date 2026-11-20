@@ -554,6 +554,76 @@ impl Session {
         Ok(statements)
     }
 
+    /// The indexes of a table, the primary key first.
+    pub async fn indexes(&self, table: &TableRef) -> Result<Vec<table_design::IndexInfo>> {
+        let rows = match self {
+            Session::MySql(s) => {
+                s.query_text(
+                    "SELECT INDEX_NAME, CAST(MIN(NON_UNIQUE) AS CHAR), \
+                       GROUP_CONCAT(COALESCE(COLUMN_NAME, '(expression)') ORDER BY SEQ_IN_INDEX SEPARATOR '\n') \
+                     FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                     GROUP BY INDEX_NAME ORDER BY INDEX_NAME = 'PRIMARY' DESC, INDEX_NAME",
+                    &[Some(table.database.clone()), Some(table.name.clone())],
+                )
+                .await?
+            }
+            Session::Postgres(s) => {
+                s.query_text(
+                    &table.database,
+                    "SELECT i.relname::text, CASE WHEN ix.indisunique THEN '0' ELSE '1' END, \
+                       array_to_string(ARRAY(SELECT pg_get_indexdef(ix.indexrelid, k + 1, true) \
+                         FROM generate_subscripts(ix.indkey, 1) k WHERE k < ix.indnkeyatts ORDER BY k), E'\n'), \
+                       CASE WHEN ix.indisprimary THEN '1' ELSE '0' END \
+                     FROM pg_index ix JOIN pg_class i ON i.oid = ix.indexrelid \
+                       JOIN pg_class t ON t.oid = ix.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+                     WHERE n.nspname = $1 AND t.relname = $2 ORDER BY ix.indisprimary DESC, i.relname",
+                    &[Some(require_schema(table.schema.as_deref())?.to_string()), Some(table.name.clone())],
+                )
+                .await?
+            }
+            Session::Sqlite(_) => return Err(Error::Unsupported("The table form is for MySQL and PostgreSQL".into())),
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let name = r.first().cloned().flatten()?;
+                let unique = r.get(1).cloned().flatten().as_deref() == Some("0");
+                let columns = r
+                    .get(2)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_default()
+                    .split('\n')
+                    .map(str::to_string)
+                    .collect();
+                let primary = match self {
+                    Session::MySql(_) => name == "PRIMARY",
+                    _ => r.get(3).cloned().flatten().as_deref() == Some("1"),
+                };
+                Some(table_design::IndexInfo {
+                    name,
+                    columns,
+                    unique,
+                    primary,
+                })
+            })
+            .collect())
+    }
+
+    /// Change a table from the table form. Returns the statements that ran.
+    pub async fn alter_table(&self, spec: &table_design::AlterTable) -> Result<Vec<String>> {
+        let statements = table_design::alter_table(self.engine(), spec)?;
+        match self {
+            Session::MySql(s) => s.execute_statement(&statements[0]).await?,
+            Session::Postgres(s) => {
+                s.execute_on(&spec.table.database, &statements.join(";\n"))
+                    .await?
+            }
+            Session::Sqlite(_) => unreachable!("refused by table_design::alter_table"),
+        }
+        Ok(statements)
+    }
+
     /// The sessions on the server. Not for SQLite, which has none.
     pub async fn processes(&self) -> Result<Vec<monitor::Process>> {
         match self {

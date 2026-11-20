@@ -2,7 +2,7 @@
 //! the server then describes. Every database created here is named `puricat_it_<random>` and
 //! dropped again.
 
-use puricat_core::db::table_design::NewTable;
+use puricat_core::db::table_design::{AlterTable, NewTable};
 use puricat_core::db::{Session, TableRef};
 use puricat_core::model::{ConnectionProfile, Engine};
 use serde_json::json;
@@ -161,6 +161,160 @@ async fn postgres_new_table() {
         // A schema that does not exist: the server's refusal.
         let bad = spec(&d, Some("no_such_schema"), "t2", json!([{ "name": "a", "type": "text" }]), None);
         assert!(session.create_table(&bad).await.unwrap_err().to_string().contains("no_such_schema"));
+        session.close().await;
+    })
+    .await;
+    admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)").as_str())
+        .await
+        .unwrap();
+    outcome.unwrap();
+}
+
+fn change(
+    database: &str,
+    schema: Option<&str>,
+    name: &str,
+    edits: serde_json::Value,
+) -> AlterTable {
+    serde_json::from_value(json!({
+        "table": { "database": database, "schema": schema, "name": name },
+        "edits": edits,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn mysql_table_changes() {
+    let Some((profile, password)) = target(Engine::Mysql, "PURICAT_TEST_MYSQL") else {
+        eprintln!("skipped: PURICAT_TEST_MYSQL is not set");
+        return;
+    };
+    let mut opts = sqlx::mysql::MySqlConnectOptions::new()
+        .host(&profile.host)
+        .port(profile.port)
+        .username(&profile.username);
+    if let Some(pw) = &password {
+        opts = opts.password(pw);
+    }
+    let mut admin = sqlx::MySqlConnection::connect_with(&opts).await.unwrap();
+    let db = scratch_name();
+    admin
+        .execute(format!("CREATE DATABASE `{db}` CHARACTER SET utf8mb4").as_str())
+        .await
+        .unwrap();
+    let d = db.clone();
+
+    let outcome = tokio::spawn(async move {
+        let session = Session::connect(&profile, password.as_deref()).await.unwrap();
+        let mut conn = sqlx::MySqlConnection::connect_with(&opts.database(&d)).await.unwrap();
+        conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT, old TEXT, KEY ix_old (a)); INSERT INTO t VALUES (1, 10, 'x')").await.unwrap();
+        let table = TableRef { database: d.clone(), schema: None, name: "t".into() };
+        let before = session.indexes(&table).await.unwrap();
+        assert_eq!(before.iter().map(|i| (i.name.as_str(), i.primary, i.unique)).collect::<Vec<_>>(), [("PRIMARY", true, true), ("ix_old", false, false)]);
+
+        let ran = session
+            .alter_table(&change(&d, None, "t", json!([
+                { "kind": "addColumn", "column": { "name": "หมายเหตุ", "type": "VARCHAR", "length": 50, "default": { "kind": "value", "value": "ไม่มี" } } },
+                { "kind": "dropColumn", "name": "old" },
+                { "kind": "renameColumn", "from": "a", "to": "amount" },
+                { "kind": "dropIndex", "name": "ix_old" },
+                { "kind": "addIndex", "name": "ux_amount", "columns": ["amount", "หมายเหตุ"], "unique": true }
+            ])))
+            .await
+            .unwrap();
+        assert_eq!(ran.len(), 1);
+        let meta = session.describe_table(&table).await.unwrap();
+        assert_eq!(meta.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "amount", "หมายเหตุ"]);
+        let row = sqlx::query("SELECT amount, `หมายเหตุ` FROM t").fetch_one(&mut conn).await.unwrap();
+        assert_eq!((row.get::<i32, _>(0), row.get::<String, _>(1)), (10, "ไม่มี".to_string()));
+        let after = session.indexes(&table).await.unwrap();
+        assert_eq!(after.iter().map(|i| (i.name.clone(), i.unique, i.columns.join(","))).collect::<Vec<_>>(), [("PRIMARY".to_string(), true, "id".to_string()), ("ux_amount".to_string(), true, "amount,หมายเหตุ".to_string())]);
+
+        // One statement: when a clause fails, none of the others is applied.
+        let failed = session
+            .alter_table(&change(&d, None, "t", json!([
+                { "kind": "addColumn", "column": { "name": "added", "type": "INT", "nullable": true } },
+                { "kind": "dropColumn", "name": "no_such_column" }
+            ])))
+            .await
+            .unwrap_err();
+        assert!(failed.to_string().contains("no_such_column"), "{failed}");
+        let meta = session.describe_table(&table).await.unwrap();
+        assert!(!meta.columns.iter().any(|c| c.name == "added"));
+        session.close().await;
+    })
+    .await;
+    admin
+        .execute(format!("DROP DATABASE IF EXISTS `{db}`").as_str())
+        .await
+        .unwrap();
+    outcome.unwrap();
+}
+
+#[tokio::test]
+async fn postgres_table_changes() {
+    let Some((profile, password)) = target(Engine::Postgres, "PURICAT_TEST_POSTGRES") else {
+        eprintln!("skipped: PURICAT_TEST_POSTGRES is not set");
+        return;
+    };
+    let opts = |database: &str| {
+        let mut o = sqlx::postgres::PgConnectOptions::new()
+            .host(&profile.host)
+            .port(profile.port)
+            .username(&profile.username)
+            .database(database);
+        if let Some(pw) = &password {
+            o = o.password(pw);
+        }
+        o
+    };
+    let mut admin = sqlx::PgConnection::connect_with(&opts("postgres"))
+        .await
+        .unwrap();
+    let db = scratch_name();
+    admin
+        .execute(format!("CREATE DATABASE \"{db}\"").as_str())
+        .await
+        .unwrap();
+    let (d, o) = (db.clone(), opts(&db));
+    let (p, pw) = (profile.clone(), password.clone());
+
+    let outcome = tokio::spawn(async move {
+        let session = Session::connect(&p, pw.as_deref()).await.unwrap();
+        let mut conn = sqlx::PgConnection::connect_with(&o).await.unwrap();
+        conn.execute("CREATE TABLE t (id int PRIMARY KEY, a int, old text); CREATE INDEX ix_old ON t (a); INSERT INTO t VALUES (1, 10, 'x')").await.unwrap();
+        let table = TableRef { database: d.clone(), schema: Some("public".into()), name: "t".into() };
+        let before = session.indexes(&table).await.unwrap();
+        assert_eq!(before.iter().map(|i| (i.name.as_str(), i.primary)).collect::<Vec<_>>(), [("t_pkey", true), ("ix_old", false)]);
+
+        let ran = session
+            .alter_table(&change(&d, Some("public"), "t", json!([
+                { "kind": "addColumn", "column": { "name": "note", "type": "text", "default": { "kind": "value", "value": "none" }, "comment": "หมายเหตุ" } },
+                { "kind": "dropColumn", "name": "old" },
+                { "kind": "renameColumn", "from": "a", "to": "amount" },
+                { "kind": "dropIndex", "name": "ix_old" },
+                { "kind": "addIndex", "name": "ux_amount", "columns": ["amount"], "unique": true }
+            ])))
+            .await
+            .unwrap();
+        assert_eq!(ran.len(), 6, "{ran:?}");
+        let row = sqlx::query("SELECT amount, note, col_description('public.t'::regclass, 4) FROM t").fetch_one(&mut conn).await.unwrap();
+        assert_eq!((row.get::<i32, _>(0), row.get::<String, _>(1), row.get::<String, _>(2)), (10, "none".into(), "หมายเหตุ".into()));
+        let after = session.indexes(&table).await.unwrap();
+        assert_eq!(after.iter().map(|i| (i.name.clone(), i.unique, i.columns.join(","))).collect::<Vec<_>>(), [("t_pkey".to_string(), true, "id".to_string()), ("ux_amount".to_string(), true, "amount".to_string())]);
+
+        // One transaction: when a later statement fails, the earlier ones are undone.
+        let failed = session
+            .alter_table(&change(&d, Some("public"), "t", json!([
+                { "kind": "addColumn", "column": { "name": "added", "type": "integer", "nullable": true } },
+                { "kind": "dropColumn", "name": "no_such_column" }
+            ])))
+            .await
+            .unwrap_err();
+        assert!(failed.to_string().contains("no_such_column"), "{failed}");
+        let meta = session.describe_table(&table).await.unwrap();
+        assert!(!meta.columns.iter().any(|c| c.name == "added"), "the first change outlived the failed one");
         session.close().await;
     })
     .await;
