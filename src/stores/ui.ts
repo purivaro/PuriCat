@@ -34,6 +34,8 @@ interface UiState {
   usersOf: ConnectionView | null;
   /** The table whose columns and indexes the change form is changing. */
   alterOf: { connection: ConnectionView; table: TableRef } | null;
+  /** Copy rows of this table into a table of any connection. */
+  copyOf: { connection: ConnectionView; table: TableRef } | null;
   /** Where the table form makes a new table. */
   newTableIn: { connection: ConnectionView; database: string; schema: string | null } | null;
   /** The connection whose server sessions are open. */
@@ -54,6 +56,7 @@ interface UiState {
   askSessions: (connection: ConnectionView | null) => void;
   askFind: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askAlterTable: (target: { connection: ConnectionView; table: TableRef } | null) => void;
+  askCopy: (source: { connection: ConnectionView; table: TableRef } | null) => void;
   askNewTable: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -71,6 +74,7 @@ export const useUi = create<UiState>((set) => ({
   findIn: null,
   newTableIn: null,
   alterOf: null,
+  copyOf: null,
   backupOf: null,
   paletteOpen: false,
   openConnectionDialog: (target) => set({ connectionDialog: target ?? "new" }),
@@ -85,6 +89,7 @@ export const useUi = create<UiState>((set) => ({
   askFind: (findIn) => set({ findIn }),
   askNewTable: (newTableIn) => set({ newTableIn }),
   askAlterTable: (alterOf) => set({ alterOf }),
+  askCopy: (copyOf) => set({ copyOf }),
   askBackup: (backupOf) => set({ backupOf }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));

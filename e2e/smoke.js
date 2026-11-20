@@ -1751,6 +1751,44 @@
     await waitFor(() => !findDialog() && frontTab()?.title.startsWith("orders"), "the orders tab in front");
     log.push({ stage: "find-done", foundTables, findOpened, exactColumns, nameRows });
 
+    // Copy rows to another connection: MySQL's customers into a PostgreSQL table made for the
+    // test; the columns pair by name (the ones it lacks are not copied), the first rows are
+    // checked, then copied; PostgreSQL then holds as many rows as MySQL.
+    const pgConn = (await invoke("list_connections")).find((c) => c.name === "Demo PostgreSQL").id;
+    const sqlOn = async (id, sql, tab) => {
+      const outcome = await invoke("run_sql", { id, tab, database: "puricat_e2e", sql, options: { maxRows: 10, changeLimit: null } });
+      await invoke("close_console", { tab });
+      return outcome.statements[0];
+    };
+    await sqlOn(pgConn, "CREATE TABLE shop.copied (id integer PRIMARY KEY, name text NOT NULL, city text)", "e2e-copy-make");
+    const mysqlCustomers = (await sqlOn(mysqlConnId, "SELECT COUNT(*) FROM customers", "e2e-copy-source")).results[0].rows[0][0];
+    const copyDialog = () => document.querySelector("[data-copy-rows]");
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await rightClick(await waitFor(() => treeRow("customers"), "customers in the explorer"));
+    await click(await waitFor(() => menuItem("Copy rows to…"), "the copy item"), "copy rows to");
+    await setChoice(await waitFor(() => copyDialog()?.querySelector("[data-copy-connection]"), "the copy dialog"), pgConn);
+    await setChoice(await waitFor(() => copyDialog().querySelector('[data-copy-database] option[value="puricat_e2e"]') && copyDialog().querySelector("[data-copy-database]"), "the PostgreSQL databases", 20000), "puricat_e2e");
+    await setChoice(await waitFor(() => copyDialog().querySelector('[data-copy-schema] option[value="shop"]') && copyDialog().querySelector("[data-copy-schema]"), "its schemas", 20000), "shop");
+    await setChoice(await waitFor(() => copyDialog().querySelector('[data-copy-table] option[value="copied"]') && copyDialog().querySelector("[data-copy-table]"), "its tables", 20000), "copied");
+    await waitFor(() => copyDialog().querySelector('[data-copy-column="email"] select'), "the columns paired", 20000);
+    const paired = all("[data-copy-column]").map((r) => `${r.dataset.copyColumn}>${r.querySelector("select")?.value || "-"}`).join(" ");
+    await click(exact('[data-copy-rows] [role="radio"]', "Upsert"), "upsert on the key");
+    await click(copyDialog().querySelector("[data-copy-check]"), "check the first rows");
+    await waitFor(() => copyDialog().querySelector("[data-copy-preview]"), "the first rows checked", 20000);
+    const copyCheck = Object.fromEntries(all("[data-copy-count]").map((e) => [e.dataset.copyCount, e.querySelector("b").textContent]));
+    await click(copyDialog().querySelector("[data-copy-run]"), "copy the rows");
+    await waitFor(() => copyDialog().querySelector('[data-copy-report="done"]'), "the copy to finish", 30000);
+    const copied = Object.fromEntries(all("[data-copy-written]").map((e) => [e.dataset.copyWritten, e.querySelector("b").textContent]));
+    const inPostgres = (await sqlOn(pgConn, "SELECT count(*), count(*) FILTER (WHERE name = 'สมชาย ใจดี') FROM shop.copied", "e2e-copy-count")).results[0].rows[0].join(" ");
+    await stage("copy-rows", { paired, mysqlCustomers, copyCheck, copied, inPostgres });
+    if (paired !== "id>id name>name city>city email>- created_at>-") throw new Error(`the columns paired as ${paired}`);
+    if (copyCheck.insert !== mysqlCustomers || copied.inserted !== mysqlCustomers || copied.failed !== "0") throw new Error(`checked ${JSON.stringify(copyCheck)}, copied ${JSON.stringify(copied)}, of ${mysqlCustomers}`);
+    if (inPostgres !== `${mysqlCustomers} 1`) throw new Error(`PostgreSQL holds ${inPostgres}`);
+    await click(copyDialog().querySelector("[data-copy-close]"), "close the copy report");
+    await waitFor(() => !copyDialog(), "the copy dialog closed");
+    await sqlOn(pgConn, "DROP TABLE shop.copied", "e2e-copy-drop");
+    log.push({ stage: "copy-rows-done", copied, inPostgres });
+
     await click(all('[role="tab"]').find((t) => t.title === mysqlQueryTitle), "back to the MySQL query tab");
     await waitFor(() => frontTab()?.title === mysqlQueryTitle && sqlTab()?.__editor, "the MySQL query tab in front");
     log.push({ stage: "new-table-done", createdColumns });

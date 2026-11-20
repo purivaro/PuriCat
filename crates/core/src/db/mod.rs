@@ -4,6 +4,7 @@
 //! into another. `Session` is a plain enum so adding an engine is a compile-time checklist.
 
 pub mod console;
+pub mod copy;
 pub mod ddl;
 pub mod export;
 pub mod filter;
@@ -1232,6 +1233,25 @@ impl Session {
             Session::Postgres(s) => s.unique_keys(table).await,
             Session::Sqlite(s) => s.unique_keys(table).await,
         }
+    }
+
+    /// Copying rows, the reading half: rows `offset..offset + limit` of `table`, the given
+    /// columns as the server renders them as text (NULL stays NULL), whole — not shortened as a
+    /// grid page is. In the order of the primary key, or of every column read when there is
+    /// none, so that one page follows the other.
+    pub async fn read_text_page(
+        &self,
+        table: &TableRef,
+        columns: &[String],
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<Option<String>>>> {
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let sql = copy::page_sql(self.engine(), table, &meta, columns, offset, limit)?;
+        self.query_text(&table.database, &sql, &[]).await
     }
 
     async fn query_text(

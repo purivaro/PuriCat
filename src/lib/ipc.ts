@@ -28,6 +28,8 @@ import type {
   ExportFormat,
   FileReadOptions,
   BatchOutcome,
+  CopyBatch,
+  CopyPreview,
   FileTable,
   FlushKind,
   HistoryEntry,
@@ -165,6 +167,22 @@ export const ipc = {
   /** One batch of a large import, in one transaction; `cancelJob(job)` stops it. */
   importBatch: (id: string, table: TableRef, request: PasteRequest, onProblem: OnProblem, job: string) =>
     invoke<BatchOutcome>("import_batch", { id, table, request, onProblem, job }),
+  /** The first `limit` rows of `from`, analysed against `to` as a paste. Writes nothing. */
+  copyPreview: (sourceId: string, from: TableRef, columns: string[], targetId: string, to: TableRef, request: PasteRequest, limit: number) =>
+    invoke<CopyPreview>("copy_preview", { sourceId, from, columns, targetId, to, request, limit }),
+  /** Rows `offset..offset + limit` of `from`, written to `to` as a batch; `cancelJob(job)` stops it. */
+  copyRows: (
+    sourceId: string,
+    from: TableRef,
+    columns: string[],
+    targetId: string,
+    to: TableRef,
+    request: PasteRequest,
+    onProblem: OnProblem,
+    offset: number,
+    limit: number,
+    job: string,
+  ) => invoke<CopyBatch>("copy_rows", { sourceId, from, columns, targetId, to, request, onProblem, offset, limit, job }),
   databaseOptions: (id: string) => invoke<DatabaseOptions>("database_options", { id }),
   /** The exact statement `createDatabase` would run. Runs nothing. */
   planCreateDatabase: (id: string, spec: NewDatabase) => invoke<string>("plan_create_database", { id, spec }),

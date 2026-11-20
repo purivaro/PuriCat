@@ -19,6 +19,7 @@ import { DatabaseDialogs } from "./features/schema/DatabaseDialogs";
 import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
 import { TableDialogs } from "./features/schema/TableDialogs";
 import { AlterTableDialog } from "./features/schema/AlterTableDialog";
+import { CopyRowsDialog } from "./features/schema/CopyRowsDialog";
 import { FindDialog } from "./features/schema/FindDialog";
 import { NewTableDialog } from "./features/schema/NewTableDialog";
 import { SessionsDialog } from "./features/schema/SessionsDialog";
@@ -317,6 +318,7 @@ export default function App() {
       <NewTableDialog />
       <AlterTableDialog />
       <FindDialog />
+      <CopyRowsDialog />
       <BackupDialog />
       <UpdateDialog />
       <CommandPalette />
