@@ -63,12 +63,22 @@ pub struct AppState {
     /// The file last chosen in the native Open dialog, under the token the web view was
     /// given for it. The web view never names a path to read.
     pub picked_file: std::sync::Mutex<Option<(String, std::path::PathBuf)>>,
+    /// Every row of the chosen file when it holds more than one run takes: a large import
+    /// reads them from here a page at a time, and the file is parsed once.
+    pub file_rows: std::sync::Mutex<Option<FileRows>>,
     /// The update the last check found. What is installed is this, not something the web
     /// view names.
     pub update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
     /// How many files the end-to-end test has been handed in place of the dialog.
     #[cfg(debug_assertions)]
     pub e2e_picks: std::sync::atomic::AtomicUsize,
+}
+
+/// The rows of a file read for a large import, and how it was read.
+pub struct FileRows {
+    pub token: String,
+    pub options: puricat_core::table_file::ReadOptions,
+    pub rows: Arc<Vec<Vec<String>>>,
 }
 
 impl AppState {
@@ -83,6 +93,7 @@ impl AppState {
             agent_scratch: data_dir.join("agent-scratch"),
             proposals: Default::default(),
             picked_file: Default::default(),
+            file_rows: Default::default(),
             update: Default::default(),
             #[cfg(debug_assertions)]
             e2e_picks: Default::default(),

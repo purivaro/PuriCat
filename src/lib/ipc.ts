@@ -27,6 +27,7 @@ import type {
   DbObject,
   ExportFormat,
   FileReadOptions,
+  BatchOutcome,
   FileTable,
   FlushKind,
   HistoryEntry,
@@ -36,6 +37,7 @@ import type {
   ObjectKind,
   PasswordChange,
   PasteAnalysis,
+  OnProblem,
   PasteRequest,
   PickedFile,
   QueryPreview,
@@ -157,6 +159,12 @@ export const ipc = {
   /** Shows the native Open dialog for a SQLite file and gives its path. `null` when it was cancelled. */
   pickDatabaseFile: () => invoke<string | null>("pick_database_file"),
   readTableFile: (token: string, options: FileReadOptions) => invoke<FileTable>("read_table_file", { token, options }),
+  /** Rows `offset..offset + limit` of a file too large for one run, as read by `readTableFile`. */
+  tableFileRows: (token: string, options: FileReadOptions, offset: number, limit: number) =>
+    invoke<string[][]>("table_file_rows", { token, options, offset, limit }),
+  /** One batch of a large import, in one transaction; `cancelJob(job)` stops it. */
+  importBatch: (id: string, table: TableRef, request: PasteRequest, onProblem: OnProblem, job: string) =>
+    invoke<BatchOutcome>("import_batch", { id, table, request, onProblem, job }),
   databaseOptions: (id: string) => invoke<DatabaseOptions>("database_options", { id }),
   /** The exact statement `createDatabase` would run. Runs nothing. */
   planCreateDatabase: (id: string, spec: NewDatabase) => invoke<string>("plan_create_database", { id, spec }),

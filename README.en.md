@@ -51,7 +51,7 @@ Type in cells, add and delete rows, paste a block copied from Excel or Google Sh
 
 ### Smart Paste: update a table from a spreadsheet or a file
 
-Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs. Rows with a problem can be left out and copied back to the spreadsheet to be fixed.
+Copy rows from a spreadsheet — or open a **CSV or Excel file** — and choose INSERT, UPDATE or UPSERT. PuriCat matches the rows on a unique key and shows what will happen to each one — insert, update, already identical, or a problem — before anything runs. Rows with a problem can be left out and copied back to the spreadsheet to be fixed. A file of more than 10,000 rows is imported in batches of 1,000 rows: you choose whether a row that cannot be written stops the import or is left out, and afterwards the lines that were not written are listed and can be copied back to be fixed.
 
 ![Smart Paste: columns mapped to the table, and a preview of which rows will be inserted or updated](docs/images/smart-paste.png)
 
@@ -118,7 +118,7 @@ The threat model, and the limits of each of these, are in [SECURITY.md](SECURITY
 
 ## Not there yet
 
-SQL Server, SSH tunnels, creating and altering tables, imports of more than 10,000 rows, restoring a backup over an existing database, encrypted backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
+SQL Server, SSH tunnels, restoring a backup over an existing database, encrypted backups, and Windows or Linux builds are planned but not built. The [roadmap](ROADMAP.md) has the order.
 
 ## Build from source
 

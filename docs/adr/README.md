@@ -34,4 +34,6 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 
 | [0026](0026-find-in-database.md) | Find in database — a value in every table, one statement per table that reads it once and counts the rows per column with the row filter's own tests (so a result opens its table filtered to exactly those rows); columns that cannot hold the value left out instead of failing the table (an exact value only in integer columns whose range holds it); stoppable on the server; names from one catalogue query | Accepted | MySQL 9.3.0, PostgreSQL 16.13 and SQLite (live tests); through the window on MySQL |
 
+| [0027](0027-large-imports-in-batches.md) | Files larger than one run: imported in batches of 1,000 rows from the Smart Paste wizard (the first 10,000 previewed), each batch analysed as a paste and written in one transaction; a row that cannot be written stops the import or is left out, a refused batch written again row by row to find it; a report of the lines not written | Accepted | MySQL 9.3.0 and PostgreSQL 16.13 (live tests); through the window on MySQL |
+
 To add a record: copy the section layout of an existing one, use the next number, and add a row here. Do not rewrite an accepted record; supersede it with a new one.

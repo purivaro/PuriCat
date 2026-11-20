@@ -57,7 +57,7 @@ pub fn kind_of(path: &Path) -> Result<FileKind> {
     }
 }
 
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadOptions {
     /// Workbooks: the sheet to read. The first one when absent.

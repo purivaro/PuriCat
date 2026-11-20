@@ -720,6 +720,21 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-20 (large imports)
+
+macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0027](docs/adr/0027-large-imports-in-batches.md).
+
+| Check | Result |
+|---|---|
+| `live_import`: `mysql_import_batches`, `postgres_import_batches` | Pass on the first run, on both engines. "Leave it out": a name longer than the column (found by the analysis) and a value a CHECK constraint refuses (found by the server, the batch then written row by row) are reported with their row and reason, and the other three rows are written. "Stop": a batch with a refused row is rolled back, and a batch with a row the analysis rejects is not run; nothing of either is in the table. Rows that exist are updated or left as they are. A batch stopped before it runs is rolled back with a `Conflict`. A refused first row is reported and the row after it written |
+| Unit tests | `smart::tests::each_statement_is_traced_to_its_pasted_row` (the order `plan_keyed` writes in). `largeImport.test.ts` (3): the counts added up, a failed row's line in the file (header and blank rows counted), the lines copied back with or without the header and reason |
+| End-to-end stage `smart-file-large` (MySQL), full run | Pass, with an empty `problems` list and screenshots. A CSV of 10,020 customers (names and cities) opens with the notice and the choice; a cancelled Open dialog keeps it; the first 10,000 lines preview as 9,998 to insert and 1 problem; imported with "leave it out": 10,019 inserted, line 4951 (a 130-character name) listed with its reason; the server holds the 10,019 rows and not the long one; Close reads the table again; the rows are then deleted. The stage first used ids for a table whose id the server assigns: Smart Paste rightly reported every row as "no match" (ADR 0014 never writes a server-assigned key), and the test file was changed to names only |
+| Screenshot | Looked at by hand (English, light). It showed the note under the columns still saying "in one transaction" for a large file; it now says how many rows go in each, and the stage checks it |
+| Earlier full runs | Two stopped at a context-menu step of the table filter, while another program kept the Mac's load average near 54; a probe showed the menu opens with the right item, later than the step waits. Runs since wait for an idle Mac with a load below 12 |
+| `pnpm check` | Pass (Vitest 129, core unit 157) |
+
+Not verified: SQLite, a remote server's timing, a stop while a batch is written row by row (no test can set the flag at that moment), "Stop the import" through the window, Thai and dark, Production.
+
 ## Results — 2026-11-20 (find in database)
 
 macOS, local MySQL 9.3.0, PostgreSQL 16.13 and SQLite. Design: [ADR 0026](docs/adr/0026-find-in-database.md).

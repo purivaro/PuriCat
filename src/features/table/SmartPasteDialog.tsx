@@ -1,4 +1,4 @@
-import { ArrowRight, CircleAlert, ClipboardPaste, Copy, FileSpreadsheet, FolderOpen, TriangleAlert, X } from "lucide-react";
+import { ArrowRight, CircleAlert, CircleCheck, ClipboardPaste, Copy, FileSpreadsheet, FolderOpen, Layers, TriangleAlert, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -15,6 +15,7 @@ import type {
   ConnectionView,
   FileReadOptions,
   FileTable,
+  OnProblem,
   PasteAnalysis,
   PasteMode,
   PasteRowReport,
@@ -35,6 +36,7 @@ import {
   updatableColumns,
   usableKeys,
 } from "./smartPaste";
+import { addUp, BATCH_ROWS, type FailedLine, failedLines, failedTable, nothingWritten, type Written } from "./largeImport";
 
 /** Rows one run may hold (`db::write::MAX_STATEMENTS`). */
 const RUN_LIMIT = 10_000;
@@ -42,6 +44,19 @@ const RUN_LIMIT = 10_000;
 const ENCODINGS = ["windows-874", "windows-1252", "windows-1251", "shift_jis", "gbk", "big5", "euc-kr", "utf-16le"];
 const SEPARATORS = [",", ";", "\t", "|"];
 const SEPARATOR_NAME: Record<string, string> = { ",": "comma", ";": "semicolon", "\t": "tab", "|": "pipe" };
+
+/**
+ * A large import as it goes: lines read so far, what was written, the lines that were not.
+ * `end` says how it ended, once it has.
+ */
+interface BigRun {
+  done: number;
+  total: number;
+  written: Written;
+  failed: FailedLine[];
+  started: number;
+  end: null | { how: "done" | "stopped" | "problem" | "error"; ms: number; line?: number; from?: number; to?: number; error?: string };
+}
 
 /** Rows listed in the preview. Every row is analysed; this only bounds what is drawn. */
 const ROWS_SHOWN = 200;
@@ -125,10 +140,16 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const [skip, setSkip] = useState(false);
   const [onlyProblems, setOnlyProblems] = useState(false);
   const analysing = useRef(0);
+  // A file larger than one run: imported in batches, each its own transaction.
+  const [onProblem, setOnProblem] = useState<OnProblem>("stop");
+  const [big, setBig] = useState<BigRun | null>(null);
+  const bigJob = useRef<string | null>(null);
+  const stopping = useRef(false);
+  const importing = !!big && big.end === null;
   useEffect(() => {
-    onBusy(!!run);
+    onBusy(!!run || importing);
     return () => onBusy(false);
-  }, [run, onBusy]);
+  }, [run, importing, onBusy]);
   const previewRef = useRef<HTMLElement>(null);
 
   const take = useCallback(
@@ -166,8 +187,9 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
         const table = await ipc.readTableFile(picked.token, options);
         if (id !== reading.current) return;
         setFile({ picked, options, table });
-        // More rows than one run may hold: nothing is offered for mapping, the wizard says why.
-        take(table.totalRows > table.rows.length ? [] : table.rows);
+        // More rows than one run may hold: the first ones are mapped and previewed, and the
+        // whole file is imported in batches.
+        take(table.rows);
       } catch (e) {
         if (id !== reading.current) return;
         setSourceError(errorMessage(e));
@@ -223,7 +245,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   const stale = !!analysis && !current;
   const dataRows = built?.request.rows.length ?? 0;
   const mappedCount = mapping.filter(Boolean).length;
-  const canPreview = !!built && dataRows > 0 && mappedCount > 0 && !checking && !run;
+  const canPreview = !!built && dataRows > 0 && mappedCount > 0 && !checking && !run && !big;
   const toRun = current ? current.counts.insert + current.counts.update : 0;
   const problemRows = current?.counts.problems ?? 0;
   // Rows with problems are never written. They stop the run unless the user leaves them out.
@@ -262,6 +284,82 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
       setError(errorMessage(e));
       setRun(null);
       setAnalysis(null); // whatever happened, the next run needs a fresh look at the table
+    }
+  };
+
+  /**
+   * The whole file, a batch of lines at a time: each batch is read from the backend, made into
+   * a request exactly as the preview's rows were, then analysed and written in one transaction.
+   */
+  const startLarge = async () => {
+    if (!file?.table || !current || current.problems.length > 0 || big) return;
+    const total = file.table.totalRows;
+    const started = Date.now();
+    stopping.current = false;
+    let written = nothingWritten;
+    const failed: FailedLine[] = [];
+    const end = (how: NonNullable<BigRun["end"]>["how"], more: Partial<NonNullable<BigRun["end"]>> = {}) =>
+      setBig((b) => b && { ...b, end: { how, ms: Date.now() - started, ...more } });
+    setBig({ done: 0, total, written, failed: [], started, end: null });
+    setError(null);
+    for (let offset = 0; offset < total; offset += BATCH_ROWS) {
+      if (stopping.current) return end("stopped", { line: offset });
+      let page: string[][];
+      try {
+        page = await ipc.tableFileRows(file.picked.token, file.options, offset, BATCH_ROWS);
+      } catch (e) {
+        return end("error", { from: offset + 1, to: Math.min(total, offset + BATCH_ROWS), error: errorMessage(e) });
+      }
+      const batch = buildRequest({
+        mode,
+        matrix: page,
+        hasHeaders: hasHeaders && offset === 0,
+        mapping,
+        key,
+        update: updatable.filter((c) => !skipUpdate[c]),
+        columns,
+        nullText,
+      });
+      const to = offset + page.length;
+      if (batch.request.rows.length > 0) {
+        const job = crypto.randomUUID();
+        bigJob.current = job;
+        try {
+          const outcome = await ipc.importBatch(connection.id, table, batch.request, onProblem, job);
+          written = addUp(written, outcome);
+          const here = failedLines(outcome, page, offset, batch.sourceRows);
+          failed.push(...here);
+          setBig((b) => b && { ...b, done: to, written, failed: [...failed] });
+          if (outcome.stopped) return end("problem", { line: here[0]?.line, from: offset + 1, to });
+          if (outcome.cancelled) return end("stopped", { line: to });
+        } catch (e) {
+          return stopping.current ? end("stopped", { line: offset, from: offset + 1, to }) : end("error", { from: offset + 1, to, error: errorMessage(e) });
+        } finally {
+          bigJob.current = null;
+        }
+      } else {
+        setBig((b) => b && { ...b, done: to });
+      }
+    }
+    end("done");
+  };
+
+  const stopLarge = () => {
+    stopping.current = true;
+    if (bigJob.current) void ipc.cancelJob(bigJob.current);
+  };
+
+  const reasonOf = (f: FailedLine) => [f.status ? t(`smart.status.${f.status}`) : t("smart.refused"), f.message].filter(Boolean).join(": ");
+
+  /** The lines that were not written go back to the clipboard, to be fixed and imported again. */
+  const copyFailed = async () => {
+    if (!big || !matrix) return;
+    const rows = failedTable(big.failed, hasHeaders ? (matrix[0] ?? []) : null, t("smart.problemColumn"), reasonOf);
+    try {
+      await clipboard.write(toClipboardTable(rows));
+      toast.success(t("smart.failedCopied", { count: big.failed.length }), { id: "smart-failed", duration: 2500 });
+    } catch (e) {
+      toast.error(errorMessage(e));
     }
   };
 
@@ -307,7 +405,9 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   // The rows the preview lists, each with its place among the analysed rows.
   const listed = (current?.rows ?? []).map((r, i) => ({ r, i })).filter(({ r }) => !onlyProblems || isProblem(r.status));
   const number = new Intl.NumberFormat(i18n.language);
-  const tooMany = !!file?.table && file.table.totalRows > file.table.rows.length;
+  // More rows than one run takes: the preview looks at the first ones, the import at all.
+  const large = !!file?.table && file.table.totalRows > file.table.rows.length;
+  const fileDataRows = file?.table ? file.table.totalRows - (hasHeaders ? 1 : 0) : 0;
   // The two places rows can come from, offered wherever there are none to work with.
   const sources = (
     <div className="flex items-center gap-2">
@@ -330,7 +430,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
           <span className="truncate font-medium">{connection.name}</span>
           <EnvBadge environment={connection.environment} long />
         </div>
-        <IconButton label={t("common.close")} disabled={!!run} onClick={onClose}>
+        <IconButton label={t("common.close")} disabled={!!run || !!big} onClick={onClose}>
           <X className="size-4" />
         </IconButton>
       </div>
@@ -349,7 +449,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
               <select
                 data-smart-sheet
                 value={file.table.sheet ?? ""}
-                disabled={!!run}
+                disabled={!!run || !!big}
                 onChange={(e) => void loadFile(file.picked, { ...file.options, sheet: e.target.value })}
                 className={cn(selectClass, "max-w-56")}
               >
@@ -368,7 +468,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                 <select
                   data-smart-encoding
                   value={file.options.encoding ?? ""}
-                  disabled={!!run}
+                  disabled={!!run || !!big}
                   onChange={(e) => void loadFile(file.picked, { ...file.options, encoding: e.target.value || undefined })}
                   className={selectClass}
                 >
@@ -385,7 +485,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                 <select
                   data-smart-separator
                   value={file.options.delimiter ?? ""}
-                  disabled={!!run}
+                  disabled={!!run || !!big}
                   onChange={(e) => void loadFile(file.picked, { ...file.options, delimiter: e.target.value || undefined })}
                   className={selectClass}
                 >
@@ -415,15 +515,6 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
         <div data-smart-file-error className="flex-1">
           <StateMessage tone="danger" icon={<CircleAlert className="size-5" />} title={t("smart.fileFailed")} body={sourceError} action={sources} />
         </div>
-      ) : tooMany ? (
-        <div data-smart-too-many className="flex-1">
-          <StateMessage
-            icon={<TriangleAlert className="size-5" />}
-            title={t("smart.tooManyTitle")}
-            body={t("smart.tooManyBody", { total: number.format(file?.table?.totalRows ?? 0), limit: number.format(RUN_LIMIT) })}
-            action={sources}
-          />
-        </div>
       ) : matrix.length === 0 ? (
         <div className="flex-1">
           <StateMessage
@@ -439,34 +530,53 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
           <section className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <span data-smart-source className="text-[13px] font-medium">
               {file
-                ? t("smart.sourceFile", {
-                    rows: dataRows,
+                ? t(large ? "smart.sourceLarge" : "smart.sourceFile", {
+                    rows: large ? number.format(fileDataRows) : dataRows,
                     columns: matrix[0]!.length,
                     name: file.table?.sheet ? `${file.picked.name} › ${file.table.sheet}` : file.picked.name,
                   })
                 : t("smart.source", { rows: dataRows, columns: matrix[0]!.length })}
-              {built && built.blankRows > 0 && (
-                <span className="ml-2 font-normal text-fg-subtle">{t("smart.blankRows", { count: built.blankRows })}</span>
-              )}
+              {built && built.blankRows > 0 && <span className="ml-2 font-normal text-fg-subtle">{t("smart.blankRows", { count: built.blankRows })}</span>}
             </span>
             <Check
               label={t("smart.headers")}
               checked={hasHeaders}
-              disabled={!!run}
+              disabled={!!run || !!big}
               onChange={(v) => {
                 setHasHeaders(v);
                 setMapping(autoMap(matrix, v, columns));
               }}
             />
-            <Check label={t("smart.nullText")} checked={nullText} disabled={!!run} onChange={setNullText} />
+            <Check label={t("smart.nullText")} checked={nullText} disabled={!!run || !!big} onChange={setNullText} />
             <span className="flex-1" />
-            <Button size="sm" disabled={!!run} icon={<ClipboardPaste className="size-3.5" />} onClick={() => void read()}>
+            <Button size="sm" disabled={!!run || !!big} icon={<ClipboardPaste className="size-3.5" />} onClick={() => void read()}>
               {t("smart.reread")}
             </Button>
-            <Button size="sm" data-smart-open-file disabled={!!run} icon={<FolderOpen className="size-3.5" />} onClick={() => void openFile()}>
+            <Button size="sm" data-smart-open-file disabled={!!run || !!big} icon={<FolderOpen className="size-3.5" />} onClick={() => void openFile()}>
               {t("smart.openFile")}
             </Button>
           </section>
+
+          {large && (
+            <section data-smart-large className="flex flex-col gap-2 rounded-lg bg-info-soft px-3 py-2.5 text-[13px] leading-relaxed text-fg">
+              <p className="flex items-start gap-2">
+                <Layers className="mt-0.5 size-4 shrink-0 text-info" />
+                <span>{t("smart.large", { total: number.format(fileDataRows), limit: number.format(RUN_LIMIT), batch: number.format(BATCH_ROWS) })}</span>
+              </p>
+              <div className="flex flex-wrap items-center gap-2 pl-6">
+                <span className="text-fg-muted">{t("smart.onProblem")}</span>
+                <Segmented<OnProblem>
+                  label={t("smart.onProblem")}
+                  value={onProblem}
+                  onChange={(v) => !big && setOnProblem(v)}
+                  options={[
+                    { value: "stop", label: t("smart.onProblemStop") },
+                    { value: "skip", label: t("smart.onProblemSkip") },
+                  ]}
+                />
+              </div>
+            </section>
+          )}
 
           {/* 2 — what to do with it */}
           <section className="flex flex-col gap-2">
@@ -474,7 +584,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
               <Segmented
                 label="Mode"
                 value={mode}
-                onChange={(m) => !run && setMode(m)}
+                onChange={(m) => !run && !big && setMode(m)}
                 options={(["insert", "update", "upsert"] as const).map((m) => ({ value: m, label: t(`smart.mode.${m}`) }))}
               />
               <span className="min-w-0 flex-1 text-[13px] text-fg-muted">{t(`smart.modeHint.${mode}`)}</span>
@@ -484,7 +594,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
               <select
                 data-smart-key
                 value={chosen?.name ?? ""}
-                disabled={!!run || (mode !== "insert" && available.length === 0)}
+                disabled={!!run || !!big || (mode !== "insert" && available.length === 0)}
                 onChange={(e) => setKeyName(e.target.value)}
                 className={cn(selectClass, "h-8 max-w-full min-w-56 text-[13px]")}
               >
@@ -521,7 +631,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                     <select
                       aria-label={`${t("smart.tableColumn")}: ${header(i)}`}
                       value={target ?? ""}
-                      disabled={!!run}
+                      disabled={!!run || !!big}
                       onChange={(e) => setTarget(i, e.target.value || null)}
                       className={cn(selectClass, "w-56 shrink-0", !target && "text-fg-subtle")}
                     >
@@ -540,7 +650,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                         <Check
                           label={t("smart.updateIt")}
                           checked={!skipUpdate[col.name]}
-                          disabled={!!run}
+                          disabled={!!run || !!big}
                           onChange={(v) =>
                             setSkipUpdate((s) => {
                               const next = { ...s };
@@ -556,11 +666,15 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                 );
               })}
             </div>
-            <p className="mt-2 text-xs leading-relaxed text-fg-subtle">{t("smart.semantics")}</p>
+            <p className="mt-2 text-xs leading-relaxed text-fg-subtle">
+              {t(large ? "smart.semanticsLarge" : "smart.semantics", { batch: number.format(BATCH_ROWS) })}
+            </p>
           </section>
 
-          {/* 4 — exactly what would happen */}
-          {current && (
+          {big && <ImportReport big={big} number={number} reasonOf={reasonOf} onCopy={() => void copyFailed()} />}
+
+          {/* 4 — exactly what would happen (for a large file: its first rows) */}
+          {current && !big && (
             <section ref={previewRef} data-smart-preview className="flex scroll-mb-2 flex-col gap-2">
               {current.problems.length > 0 ? (
                 <ul className="flex flex-col gap-1 rounded-lg bg-danger-soft px-3 py-2 text-[13px] text-danger">
@@ -592,7 +706,12 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                       </p>
                       <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 pl-6">
                         {toRun > 0 && (
-                          <Check name="skip" label={t("smart.skipProblems", { count: problemRows, rest: number.format(toRun) })} checked={skip} onChange={setSkip} />
+                          <Check
+                            name="skip"
+                            label={t("smart.skipProblems", { count: problemRows, rest: number.format(toRun) })}
+                            checked={skip}
+                            onChange={setSkip}
+                          />
                         )}
                         <Check name="only-problems" label={t("smart.onlyProblems")} checked={onlyProblems} onChange={setOnlyProblems} />
                         <span className="flex-1" />
@@ -622,7 +741,10 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                               key={i}
                               data-smart-row={r.status}
                               // Left out of the run by choice: still listed, plainly not part of it.
-                              className={cn("[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top", skipping && isProblem(r.status) && "opacity-55")}
+                              className={cn(
+                                "[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top",
+                                skipping && isProblem(r.status) && "opacity-55",
+                              )}
                             >
                               <td className="font-mono text-fg-subtle tabular-nums">{(built!.sourceRows[i] ?? i) + 1}</td>
                               <td>
@@ -631,9 +753,7 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                                 </span>
                               </td>
                               <td className="max-w-56 truncate font-mono">{label}</td>
-                              <td className="break-words text-fg-muted">
-                                {detail(r)}
-                              </td>
+                              <td className="break-words text-fg-muted">{detail(r)}</td>
                             </tr>
                           );
                         })}
@@ -659,7 +779,34 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
       )}
 
       <div className="flex shrink-0 items-center gap-2 border-t border-border px-5 py-3">
-        {run ? (
+        {big ? (
+          big.end === null ? (
+            <>
+              <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-sunken">
+                <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${(big.done / Math.max(1, big.total)) * 100}%` }} />
+              </div>
+              <span data-smart-import-progress className="shrink-0 text-xs text-fg-muted tabular-nums">
+                {t("smart.importing", { done: number.format(big.done), total: number.format(big.total) })}
+              </span>
+              <Button variant="danger" size="sm" data-smart-import-stop onClick={stopLarge}>
+                {t("smart.importStop")}
+              </Button>
+            </>
+          ) : (
+            <>
+              <span className="flex-1" />
+              <Button
+                variant="primary"
+                data-smart-import-close
+                onClick={() =>
+                  onDone({ inserted: big.written.inserted, updated: big.written.updated, deleted: 0, elapsedMs: big.end?.ms ?? 0 }, big.failed.length)
+                }
+              >
+                {t("common.close")}
+              </Button>
+            </>
+          )
+        ) : run ? (
           <>
             <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-sunken">
               <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${(run.done / Math.max(1, run.total)) * 100}%` }} />
@@ -683,15 +830,27 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
             <Button loading={checking} disabled={!canPreview} onClick={() => void preview()}>
               {checking ? t("smart.previewing") : t("smart.preview")}
             </Button>
-            <Button
-              variant={production ? "danger" : "primary"}
-              disabled={!current || blocked || toRun === 0}
-              title={current ? undefined : t("smart.previewFirst")}
-              onClick={() => void start()}
-            >
-              {production ? t("smart.runProd") : t("smart.run")}
-              {current && toRun > 0 && !blocked && <span className="tabular-nums opacity-85">· {toRun}</span>}
-            </Button>
+            {large ? (
+              <Button
+                variant={production ? "danger" : "primary"}
+                data-smart-import
+                disabled={!current || current.problems.length > 0}
+                title={current ? undefined : t("smart.previewFirst")}
+                onClick={() => void startLarge()}
+              >
+                {t(production ? "smart.importRunProd" : "smart.importRun", { count: number.format(fileDataRows) })}
+              </Button>
+            ) : (
+              <Button
+                variant={production ? "danger" : "primary"}
+                disabled={!current || blocked || toRun === 0}
+                title={current ? undefined : t("smart.previewFirst")}
+                onClick={() => void start()}
+              >
+                {production ? t("smart.runProd") : t("smart.run")}
+                {current && toRun > 0 && !blocked && <span className="tabular-nums opacity-85">· {toRun}</span>}
+              </Button>
+            )}
           </>
         )}
       </div>
@@ -699,7 +858,93 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
   );
 }
 
-function Check({ label, checked, disabled, name, onChange }: { label: string; checked: boolean; disabled?: boolean; name?: string; onChange: (v: boolean) => void }) {
+/** What a large import did: how it ended, what it wrote, and the lines it did not. */
+function ImportReport({ big, number, reasonOf, onCopy }: { big: BigRun; number: Intl.NumberFormat; reasonOf: (f: FailedLine) => string; onCopy: () => void }) {
+  const { t } = useTranslation();
+  const end = big.end;
+  const counts: [keyof Written | "failed", number, string][] = [
+    ["inserted", big.written.inserted, "text-ok"],
+    ["updated", big.written.updated, "text-warn"],
+    ["unchanged", big.written.unchanged, "text-fg-muted"],
+    ["unmatched", big.written.unmatched, "text-info"],
+    ["failed", big.failed.length, "text-danger"],
+  ];
+  const seconds = end ? Math.max(1, Math.round(end.ms / 1000)) : 0;
+  return (
+    <section data-smart-import-report={end?.how ?? "running"} className="flex flex-col gap-2">
+      {end && (
+        <p
+          className={cn(
+            "flex items-start gap-2 rounded-lg px-3 py-2 text-[13px] leading-relaxed",
+            end.how === "done" ? "bg-ok-soft text-ok" : end.how === "stopped" ? "bg-warn-soft text-warn" : "bg-danger-soft text-danger",
+          )}
+        >
+          {end.how === "done" ? <CircleCheck className="mt-0.5 size-4 shrink-0" /> : <CircleAlert className="mt-0.5 size-4 shrink-0" />}
+          <span data-selectable>
+            {end.how === "done" && t("smart.importDone", { total: number.format(big.total), seconds })}
+            {end.how === "stopped" && t("smart.importStopped", { line: number.format(end.line ?? big.done) })}
+            {end.how === "problem" &&
+              t("smart.importProblem", { line: number.format(end.line ?? 0), from: number.format(end.from ?? 0), to: number.format(end.to ?? 0) })}
+            {end.how === "error" && t("smart.importError", { from: number.format(end.from ?? 0), to: number.format(end.to ?? 0), error: end.error ?? "" })}
+          </span>
+        </p>
+      )}
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[13px]">
+        {counts.map(([k, n, tone]) => (
+          <span key={k} data-smart-import-count={k} className={cn(n === 0 && "opacity-45")}>
+            <b className={cn("text-[15px] tabular-nums", tone)}>{number.format(n)}</b> <span className="text-fg-muted">{t(`smart.imported.${k}`)}</span>
+          </span>
+        ))}
+      </div>
+      {big.failed.length > 0 && (
+        <>
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-semibold tracking-wide text-fg-subtle uppercase">{t("smart.failedTitle")}</h3>
+            <span className="flex-1" />
+            <Button size="sm" data-smart-copy-failed icon={<Copy className="size-3.5" />} disabled={!end} onClick={onCopy}>
+              {t("smart.copyFailed")}
+            </Button>
+          </div>
+          <div className="max-h-56 overflow-auto rounded-xl border border-border">
+            <table className="w-full border-separate border-spacing-0 text-xs">
+              <thead>
+                <tr className="[&>th]:sticky [&>th]:top-0 [&>th]:border-b [&>th]:border-border [&>th]:bg-sunken [&>th]:px-2.5 [&>th]:py-1.5 [&>th]:text-left [&>th]:font-semibold">
+                  <th className="w-16">{t("smart.line")}</th>
+                  <th>{t("smart.detail")}</th>
+                </tr>
+              </thead>
+              <tbody data-selectable>
+                {big.failed.slice(0, ROWS_SHOWN).map((f) => (
+                  <tr key={f.line} data-smart-failed={f.line} className="[&>td]:border-b [&>td]:border-border [&>td]:px-2.5 [&>td]:py-1 [&>td]:align-top">
+                    <td className="font-mono text-fg-subtle tabular-nums">{f.line}</td>
+                    <td className="break-words text-fg-muted">{reasonOf(f)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {big.failed.length > ROWS_SHOWN && (
+            <p className="text-xs text-fg-subtle">{t("smart.rowsShown", { shown: ROWS_SHOWN, total: number.format(big.failed.length) })}</p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function Check({
+  label,
+  checked,
+  disabled,
+  name,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  name?: string;
+  onChange: (v: boolean) => void;
+}) {
   return (
     <label className={cn("flex items-center gap-1.5 text-[13px] text-fg-muted", disabled && "opacity-50")}>
       <input
