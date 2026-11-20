@@ -14,6 +14,7 @@ mod postgres;
 pub mod script;
 pub mod smart;
 mod sqlite;
+pub mod table_design;
 pub mod users;
 pub mod write;
 
@@ -537,6 +538,22 @@ impl Session {
     }
 
     /// MySQL server maintenance from the connection's menu. Returns the statement that ran.
+    /// Create a table from the table form. Returns the statements that ran: on MySQL one; on
+    /// PostgreSQL the `CREATE TABLE` and its comments, sent as one simple query, which the
+    /// server runs as one transaction.
+    pub async fn create_table(&self, spec: &table_design::NewTable) -> Result<Vec<String>> {
+        let statements = table_design::create_table(self.engine(), spec)?;
+        match self {
+            Session::MySql(s) => s.execute_statement(&statements[0]).await?,
+            Session::Postgres(s) => {
+                s.execute_on(&spec.table.database, &statements.join(";\n"))
+                    .await?
+            }
+            Session::Sqlite(_) => unreachable!("refused by table_design::create_table"),
+        }
+        Ok(statements)
+    }
+
     /// The sessions on the server. Not for SQLite, which has none.
     pub async fn processes(&self) -> Result<Vec<monitor::Process>> {
         match self {

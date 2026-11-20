@@ -32,6 +32,8 @@ interface UiState {
   viewTask: ViewTask | null;
   /** The connection whose users and privileges are open. */
   usersOf: ConnectionView | null;
+  /** Where the table form makes a new table. */
+  newTableIn: { connection: ConnectionView; database: string; schema: string | null } | null;
   /** The connection whose server sessions are open. */
   sessionsOf: ConnectionView | null;
   /** The database whose backup dialog is open. */
@@ -46,6 +48,7 @@ interface UiState {
   askViewTask: (task: ViewTask | null) => void;
   askUsers: (connection: ConnectionView | null) => void;
   askSessions: (connection: ConnectionView | null) => void;
+  askNewTable: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
   setPaletteOpen: (open: boolean) => void;
 }
@@ -59,6 +62,7 @@ export const useUi = create<UiState>((set) => ({
   viewTask: null,
   usersOf: null,
   sessionsOf: null,
+  newTableIn: null,
   backupOf: null,
   paletteOpen: false,
   openConnectionDialog: (target) => set({ connectionDialog: target ?? "new" }),
@@ -70,6 +74,7 @@ export const useUi = create<UiState>((set) => ({
   askViewTask: (viewTask) => set({ viewTask }),
   askUsers: (usersOf) => set({ usersOf }),
   askSessions: (sessionsOf) => set({ sessionsOf }),
+  askNewTable: (newTableIn) => set({ newTableIn }),
   askBackup: (backupOf) => set({ backupOf }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));

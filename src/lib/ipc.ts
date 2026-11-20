@@ -47,6 +47,8 @@ import type {
   SavedScript,
   ServerInfo,
   ServerProcess,
+  TypeChoice,
+  NewTable,
   EndProcess,
   SortSpec,
   SqlFile,
@@ -185,6 +187,10 @@ export const ipc = {
   flushServer: (id: string, what: FlushKind) => invoke<string>("flush_server", { id, what }),
   /** Shows the native Open dialog for a SQL file and gives its text. `null` when it was cancelled. */
   pickSqlFile: () => invoke<SqlFile | null>("pick_sql_file"),
+  columnTypes: (id: string) => invoke<TypeChoice[]>("column_types", { id }),
+  /** The statements `createTable` would run, in order. Runs nothing. */
+  planCreateTable: (id: string, spec: NewTable) => invoke<string[]>("plan_create_table", { id, spec }),
+  createTable: (id: string, spec: NewTable) => invoke<string[]>("create_table", { id, spec }),
   listProcesses: (id: string) => invoke<ServerProcess[]>("list_processes", { id }),
   /** The statement `endProcess` would run. Runs nothing. */
   planEndProcess: (id: string, process: number, what: EndProcess) => invoke<string>("plan_end_process", { id, process, what }),
