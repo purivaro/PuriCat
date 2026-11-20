@@ -666,7 +666,9 @@ function Wizard({ onClose, connection, table, columns, onDone, onBusy }: Props &
                 );
               })}
             </div>
-            <p className="mt-2 text-xs leading-relaxed text-fg-subtle">{t("smart.semantics")}</p>
+            <p className="mt-2 text-xs leading-relaxed text-fg-subtle">
+              {t(large ? "smart.semanticsLarge" : "smart.semantics", { batch: number.format(BATCH_ROWS) })}
+            </p>
           </section>
 
           {big && <ImportReport big={big} number={number} reasonOf={reasonOf} onCopy={() => void copyFailed()} />}

@@ -2001,11 +2001,13 @@
     await stage("smart-file-encoding", { thai });
 
     // More rows than one run takes: the first rows are previewed, and the whole file is
-    // imported in batches. The runner's file holds new customers 101–10120, one of them (line
-    // 4951) with a name longer than the column holds.
+    // imported in batches. The runner's file holds 10,020 new customers (names and cities; the
+    // server numbers them), one of them (line 4951) with a name longer than the column holds.
     await openFile();
     const large = (await waitFor(() => smart().querySelector("[data-smart-large]"), "the large-file notice", 30000)).textContent.replace(/\s+/g, " ").trim();
     const largeSource = smartSource();
+    // The mapping's note says how a large file is written, not "in one transaction".
+    if (!withText("[data-smart-paste] p", "1,000 rows per transaction") || withText("[data-smart-paste] p", "statements in one transaction")) throw new Error("the note under the columns does not say a large file goes in batches");
     // A cancelled dialog changes nothing.
     await openFile();
     await sleep(400);
@@ -2014,6 +2016,7 @@
     // dialog would leave it unanswered (and open on the screen for the rest of the run).
     const pastTheList = await Promise.race([invoke("pick_table_file"), sleep(3000).then(() => "no answer")]);
     if (pastTheList !== null) throw new Error(`a file request past the runner's list was not a cancelled dialog: ${JSON.stringify(pastTheList)}`);
+    await click(exact('[data-smart-paste] [role="radio"]', "Insert"), "insert mode");
     await click(smartButton("Preview"), "preview the first rows");
     await waitFor(() => document.querySelector("[data-smart-preview]") && smartCounts().insert !== undefined, "the first rows previewed", 30000);
     const largePreview = smartCounts();
@@ -2031,18 +2034,18 @@
       await invoke("close_console", { tab });
       return outcome.statements[0];
     };
-    const onServer = (await bigSql("SELECT COUNT(*), MIN(id), MAX(id), SUM(id = 5050) FROM customers WHERE id > 100", "e2e-big-count")).results[0].rows[0].join(" ");
+    const onServer = (await bigSql("SELECT COUNT(*), MIN(name), (SELECT COUNT(*) FROM customers WHERE LENGTH(name) > 120) FROM customers WHERE name LIKE 'Big %'", "e2e-big-count")).results[0].rows[0].join(" ");
     await stage("smart-file-large", { large, largeSource, afterCancel, largePreview, importBefore, imported, notWritten, importDone, onServer });
     if (!afterCancel) throw new Error("a cancelled Open dialog dropped the large file");
     if (largePreview.insert !== 9998 || largePreview.problems !== 1) throw new Error(`the first rows previewed as ${JSON.stringify(largePreview)}`);
     if (imported.inserted !== "10,019" || imported.failed !== "1" || notWritten.length !== 1 || !notWritten[0].startsWith("4951")) {
       throw new Error(`the import reports ${JSON.stringify(imported)} / ${notWritten}`);
     }
-    if (onServer !== "10019 101 10120 0") throw new Error(`the server has ${onServer}`);
+    if (onServer !== "10019 Big 1 0") throw new Error(`the server has ${onServer}`);
     // Closing reads the table again; then the rows go, for the stages after this one.
     await click(smart().querySelector("[data-smart-import-close]"), "close the import report");
     await waitFor(() => !smart(), "smart paste closed after the import");
-    await bigSql("DELETE FROM customers WHERE id > 100", "e2e-big-delete");
+    await bigSql("DELETE FROM customers WHERE name LIKE 'Big %'", "e2e-big-delete");
     await bigSql("ALTER TABLE customers AUTO_INCREMENT = 1", "e2e-big-reset");
     await click(panelButton("Refresh (⌘R)"), "read customers again");
     await waitFor(() => dataRows().length === customerRows && cellText(0, 1) === "สมชาย ใจดี", "customers as they were", 20000);

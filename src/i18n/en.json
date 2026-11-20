@@ -756,6 +756,7 @@
     "noKey": "To match existing rows, map every column of the primary key or of a unique index.",
     "generatedKey": "Rows with an empty key are added as new rows; rows whose key is not found are skipped.",
     "semantics": "PuriCat matches the rows itself, then runs plain INSERT and UPDATE statements in one transaction. It does not use ON DUPLICATE KEY UPDATE, ON CONFLICT or MERGE, so only the key chosen here decides which row is the same.",
+    "semanticsLarge": "PuriCat matches the rows itself, then runs plain INSERT and UPDATE statements, {{batch}} rows per transaction. It does not use ON DUPLICATE KEY UPDATE, ON CONFLICT or MERGE, so only the key chosen here decides which row is the same.",
     "preview": "Preview",
     "previewing": "Checking…",
     "stale": "The set-up changed. Preview again before running.",

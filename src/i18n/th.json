@@ -733,6 +733,7 @@
     "noKey": "ถ้าจะจับคู่กับแถวเดิม ต้องจับคู่คอลัมน์ของ primary key หรือ unique index ให้ครบ",
     "generatedKey": "แถวที่คีย์ว่างจะถูกเพิ่มเป็นแถวใหม่ ส่วนแถวที่หาคีย์ไม่เจอจะถูกข้าม",
     "semantics": "PuriCat จับคู่แถวเอง แล้วรันคำสั่ง INSERT และ UPDATE ธรรมดาใน transaction เดียว ไม่ใช้ ON DUPLICATE KEY UPDATE, ON CONFLICT หรือ MERGE ดังนั้นคีย์ที่เลือกตรงนี้เท่านั้นที่ตัดสินว่าแถวไหนคือแถวเดียวกัน",
+    "semanticsLarge": "PuriCat จับคู่แถวเอง แล้วรันคำสั่ง INSERT และ UPDATE ธรรมดา ทีละ {{batch}} แถวต่อ transaction ไม่ใช้ ON DUPLICATE KEY UPDATE, ON CONFLICT หรือ MERGE ดังนั้นคีย์ที่เลือกตรงนี้เท่านั้นที่ตัดสินว่าแถวไหนคือแถวเดียวกัน",
     "preview": "พรีวิว",
     "previewing": "กำลังตรวจ…",
     "stale": "การตั้งค่าเปลี่ยนไปแล้ว กรุณาพรีวิวใหม่ก่อนรัน",
