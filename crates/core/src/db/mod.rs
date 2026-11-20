@@ -3,6 +3,7 @@
 //! Each engine gets its own module with its own SQL; nothing here rewrites one dialect
 //! into another. `Session` is a plain enum so adding an engine is a compile-time checklist.
 
+pub mod compare;
 pub mod console;
 pub mod copy;
 pub mod ddl;
@@ -664,6 +665,199 @@ impl Session {
                 })
             })
             .collect())
+    }
+
+    /// Structure compare, one side: every base table of `database` (on PostgreSQL of
+    /// `schema`) with its columns, indexes and foreign keys, and the names of its views — four
+    /// catalogue queries, whatever the number of tables.
+    pub async fn structure(&self, database: &str, schema: Option<&str>) -> Result<compare::Shape> {
+        let (objects, columns, indexes, keys) = match self {
+            Session::MySql(s) => {
+                let db = || vec![Some(database.to_string())];
+                (
+                    s.query_text(
+                        "SELECT TABLE_NAME, CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 't' ELSE 'v' END \
+                         FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
+                        &db(),
+                    )
+                    .await?,
+                    s.query_text(
+                        "SELECT c.TABLE_NAME, c.COLUMN_NAME, CONVERT(c.COLUMN_TYPE USING utf8mb4), c.IS_NULLABLE, \
+                           CONVERT(c.COLUMN_DEFAULT USING utf8mb4), CONVERT(c.EXTRA USING utf8mb4), \
+                           CONVERT(c.COLUMN_COMMENT USING utf8mb4), c.COLLATION_NAME \
+                         FROM information_schema.COLUMNS c JOIN information_schema.TABLES t \
+                           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+                         WHERE c.TABLE_SCHEMA = ? AND t.TABLE_TYPE = 'BASE TABLE' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION",
+                        &db(),
+                    )
+                    .await?,
+                    s.query_text(
+                        "SELECT TABLE_NAME, INDEX_NAME, CAST(MIN(NON_UNIQUE) AS CHAR), \
+                           GROUP_CONCAT(COALESCE(COLUMN_NAME, '(expression)') ORDER BY SEQ_IN_INDEX SEPARATOR '\n'), \
+                           CASE WHEN INDEX_NAME = 'PRIMARY' THEN '1' ELSE '0' END, NULL \
+                         FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? \
+                         GROUP BY TABLE_NAME, INDEX_NAME ORDER BY TABLE_NAME, INDEX_NAME = 'PRIMARY' DESC, INDEX_NAME",
+                        &db(),
+                    )
+                    .await?,
+                    s.query_text(
+                        "SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, GROUP_CONCAT(k.COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\n'), \
+                           CASE WHEN k.REFERENCED_TABLE_SCHEMA = k.TABLE_SCHEMA THEN k.REFERENCED_TABLE_NAME \
+                             ELSE CONCAT(k.REFERENCED_TABLE_SCHEMA, '.', k.REFERENCED_TABLE_NAME) END, \
+                           GROUP_CONCAT(k.REFERENCED_COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\n'), r.DELETE_RULE, r.UPDATE_RULE \
+                         FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+                           ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME \
+                         WHERE k.TABLE_SCHEMA = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL \
+                         GROUP BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.TABLE_SCHEMA, k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, r.DELETE_RULE, r.UPDATE_RULE \
+                         ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME",
+                        &db(),
+                    )
+                    .await?,
+                )
+            }
+            Session::Postgres(s) => {
+                let ns = vec![Some(require_schema(schema)?.to_string())];
+                (
+                    s.query_text(
+                        database,
+                        "SELECT c.relname::text, CASE WHEN c.relkind IN ('r', 'p') THEN 't' ELSE 'v' END \
+                         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                         WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm') AND NOT c.relispartition ORDER BY 1",
+                        &ns,
+                    )
+                    .await?,
+                    s.query_text(
+                        database,
+                        "SELECT c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod), \
+                           CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END, pg_get_expr(d.adbin, d.adrelid), \
+                           CASE a.attidentity WHEN 'a' THEN 'identity always' WHEN 'd' THEN 'identity by default' \
+                             ELSE CASE WHEN a.attgenerated = 's' THEN 'generated' ELSE '' END END, \
+                           col_description(a.attrelid, a.attnum), NULL \
+                         FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                           LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                         WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND NOT c.relispartition AND a.attnum > 0 AND NOT a.attisdropped \
+                         ORDER BY c.relname, a.attnum",
+                        &ns,
+                    )
+                    .await?,
+                    s.query_text(
+                        database,
+                        "SELECT t.relname::text, i.relname::text, CASE WHEN ix.indisunique THEN '0' ELSE '1' END, \
+                           array_to_string(ARRAY(SELECT pg_get_indexdef(ix.indexrelid, k + 1, true) \
+                             FROM generate_subscripts(ix.indkey, 1) k WHERE k < ix.indnkeyatts ORDER BY k), E'\n'), \
+                           CASE WHEN ix.indisprimary THEN '1' ELSE '0' END, pg_get_expr(ix.indpred, ix.indrelid) \
+                         FROM pg_index ix JOIN pg_class i ON i.oid = ix.indexrelid \
+                           JOIN pg_class t ON t.oid = ix.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+                         WHERE n.nspname = $1 AND t.relkind IN ('r', 'p') AND NOT t.relispartition \
+                         ORDER BY t.relname, ix.indisprimary DESC, i.relname",
+                        &ns,
+                    )
+                    .await?,
+                    s.query_text(
+                        database,
+                        "SELECT t.relname::text, c.conname::text, \
+                           array_to_string(ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(n, o) \
+                             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.o), E'\n'), \
+                           CASE WHEN fn.nspname = n.nspname THEN ft.relname::text ELSE fn.nspname || '.' || ft.relname END, \
+                           array_to_string(ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY k(n, o) \
+                             JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.n ORDER BY k.o), E'\n'), \
+                           c.confdeltype::text, c.confupdtype::text \
+                         FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+                           JOIN pg_class ft ON ft.oid = c.confrelid JOIN pg_namespace fn ON fn.oid = ft.relnamespace \
+                         WHERE c.contype = 'f' AND n.nspname = $1 ORDER BY 1, 2",
+                        &ns,
+                    )
+                    .await?,
+                )
+            }
+            Session::Sqlite(_) => {
+                return Err(Error::Unsupported(
+                    "Structure compare is for MySQL and PostgreSQL".into(),
+                ))
+            }
+        };
+        let at = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten();
+        let list = |r: &Vec<Option<String>>, i: usize| -> Vec<String> {
+            at(r, i)
+                .unwrap_or_default()
+                .split('\n')
+                .map(str::to_string)
+                .collect()
+        };
+        let action = |code: Option<String>| -> String {
+            match code.unwrap_or_default().as_str() {
+                "a" => "NO ACTION".into(),
+                "r" => "RESTRICT".into(),
+                "c" => "CASCADE".into(),
+                "n" => "SET NULL".into(),
+                "d" => "SET DEFAULT".into(),
+                other => other.to_ascii_uppercase(),
+            }
+        };
+        let mut shape = compare::Shape::default();
+        for r in &objects {
+            let Some(name) = at(r, 0) else { continue };
+            if at(r, 1).as_deref() == Some("t") {
+                shape.tables.push(compare::TableShape {
+                    name,
+                    ..Default::default()
+                });
+            } else {
+                shape.views.push(name);
+            }
+        }
+        fn table<'a>(
+            tables: &'a mut [compare::TableShape],
+            name: &str,
+        ) -> Option<&'a mut compare::TableShape> {
+            tables.iter_mut().find(|t| t.name == name)
+        }
+        for r in &columns {
+            let (Some(t), Some(name)) = (at(r, 0), at(r, 1)) else {
+                continue;
+            };
+            if let Some(t) = table(&mut shape.tables, &t) {
+                t.columns.push(compare::ColumnShape {
+                    name,
+                    column_type: at(r, 2).unwrap_or_default(),
+                    nullable: at(r, 3).as_deref() == Some("YES"),
+                    default: at(r, 4),
+                    extra: at(r, 5).unwrap_or_default(),
+                    comment: at(r, 6).filter(|c| !c.is_empty()),
+                    collation: at(r, 7),
+                });
+            }
+        }
+        for r in &indexes {
+            let (Some(t), Some(name)) = (at(r, 0), at(r, 1)) else {
+                continue;
+            };
+            if let Some(t) = table(&mut shape.tables, &t) {
+                t.indexes.push(compare::IndexShape {
+                    name,
+                    columns: list(r, 3),
+                    unique: at(r, 2).as_deref() == Some("0"),
+                    primary: at(r, 4).as_deref() == Some("1"),
+                    predicate: at(r, 5),
+                });
+            }
+        }
+        for r in &keys {
+            let (Some(t), Some(name)) = (at(r, 0), at(r, 1)) else {
+                continue;
+            };
+            if let Some(t) = table(&mut shape.tables, &t) {
+                t.foreign_keys.push(compare::KeyShape {
+                    name,
+                    columns: list(r, 2),
+                    references: at(r, 3).unwrap_or_default(),
+                    ref_columns: list(r, 4),
+                    on_delete: action(at(r, 5)),
+                    on_update: action(at(r, 6)),
+                });
+            }
+        }
+        Ok(shape)
     }
 
     /// The foreign keys of a table.

@@ -42,6 +42,8 @@ interface UiState {
   sessionsOf: ConnectionView | null;
   /** Find in database: where to look (on PostgreSQL a schema, or `null` for every schema of the database). */
   findIn: { connection: ConnectionView; database: string; schema: string | null } | null;
+  /** Structure compare: side A, this database (on PostgreSQL, this schema). */
+  compareOf: { connection: ConnectionView; database: string; schema: string | null } | null;
   /** The database whose backup dialog is open. */
   backupOf: { connection: ConnectionView; database: string } | null;
   paletteOpen: boolean;
@@ -55,6 +57,7 @@ interface UiState {
   askUsers: (connection: ConnectionView | null) => void;
   askSessions: (connection: ConnectionView | null) => void;
   askFind: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
+  askCompare: (side: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askAlterTable: (target: { connection: ConnectionView; table: TableRef } | null) => void;
   askCopy: (source: { connection: ConnectionView; table: TableRef } | null) => void;
   askNewTable: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
@@ -72,6 +75,7 @@ export const useUi = create<UiState>((set) => ({
   usersOf: null,
   sessionsOf: null,
   findIn: null,
+  compareOf: null,
   newTableIn: null,
   alterOf: null,
   copyOf: null,
@@ -87,6 +91,7 @@ export const useUi = create<UiState>((set) => ({
   askUsers: (usersOf) => set({ usersOf }),
   askSessions: (sessionsOf) => set({ sessionsOf }),
   askFind: (findIn) => set({ findIn }),
+  askCompare: (compareOf) => set({ compareOf }),
   askNewTable: (newTableIn) => set({ newTableIn }),
   askAlterTable: (alterOf) => set({ alterOf }),
   askCopy: (copyOf) => set({ copyOf }),

@@ -273,6 +273,49 @@ export interface CopyBatch {
   failedRows: (string | null)[][];
 }
 
+/** Structure compare: one column as a side has it. */
+export interface ColumnShape {
+  name: string;
+  columnType: string;
+  nullable: boolean;
+  default: string | null;
+  extra: string;
+  comment: string | null;
+  collation: string | null;
+}
+
+export interface IndexShape {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+  predicate: string | null;
+}
+
+export interface KeyShape {
+  name: string;
+  columns: string[];
+  references: string;
+  refColumns: string[];
+  onDelete: string;
+  onUpdate: string;
+}
+
+/** What differs between side A and side B. */
+export interface Comparison {
+  onlyA: string[];
+  onlyB: string[];
+  same: string[];
+  changed: {
+    name: string;
+    columns: { name: string; a: ColumnShape | null; b: ColumnShape | null; fields: string[] }[];
+    indexes: { a: IndexShape | null; b: IndexShape | null }[];
+    foreignKeys: { a: KeyShape | null; b: KeyShape | null }[];
+  }[];
+  viewsOnlyA: string[];
+  viewsOnlyB: string[];
+}
+
 export interface PasteAnalysis {
   rows: PasteRowReport[];
   counts: PasteCounts;

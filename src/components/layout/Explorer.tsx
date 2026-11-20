@@ -12,6 +12,7 @@ import {
   Eye,
   FileCode2,
   FolderTree,
+  GitCompareArrows,
   HardDriveDownload,
   Lock,
   Pencil,
@@ -367,6 +368,14 @@ function Schemas({ connection, database, depth, query }: Omit<ObjectsProps, "sch
                       <TextSearch className="size-3.5" /> {t("find.menu")}
                     </ContextMenu.Item>
                   )}
+                  {!schema.system && (
+                    <ContextMenu.Item
+                      className={menuItemClass}
+                      onSelect={() => useUi.getState().askCompare({ connection, database, schema: schema.name })}
+                    >
+                      <GitCompareArrows className="size-3.5" /> {t("compare.menu")}
+                    </ContextMenu.Item>
+                  )}
                   {/* The server's own schemas are shown, not added to. */}
                   {!schema.system && (
                     <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewTable({ connection, database, schema: schema.name })}>
@@ -467,6 +476,12 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                   {!db.system && (
                     <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askFind({ connection, database: db.name, schema: null })}>
                       <TextSearch className="size-3.5" /> {t("find.menu")}
+                    </ContextMenu.Item>
+                  )}
+                  {/* On PostgreSQL a schema is compared: its menu offers it. */}
+                  {!db.system && connection.engine === "mysql" && (
+                    <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askCompare({ connection, database: db.name, schema: null })}>
+                      <GitCompareArrows className="size-3.5" /> {t("compare.menu")}
                     </ContextMenu.Item>
                   )}
                   {/* Where a database holds its views itself; on PostgreSQL a schema does. */}
