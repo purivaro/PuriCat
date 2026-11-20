@@ -1709,6 +1709,8 @@
     await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
     await dbMenu("Demo MySQL", "puricat_e2e", "Find in database…");
     await waitFor(() => findDialog()?.querySelector("[data-find-text]"), "the find dialog");
+    // The text box has the focus: one can type at once.
+    await waitFor(() => document.activeElement?.hasAttribute("data-find-text"), "the focus in the text box");
     await type(findDialog().querySelector("[data-find-text]"), "ข้าวหอม");
     await click(findDialog().querySelector("[data-find-start]"), "find");
     await waitFor(findDone, "the search to finish", 30000);

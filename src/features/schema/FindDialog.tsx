@@ -46,6 +46,11 @@ export function FindDialog() {
         <Dialog.Content
           aria-describedby={undefined}
           data-find-dialog
+          // The text box, not the header's close button: the first thing to do is type.
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            (e.currentTarget as HTMLElement).querySelector<HTMLInputElement>("[data-find-text]")?.focus();
+          }}
           className="animate-pop fixed top-1/2 left-1/2 z-50 flex h-[min(88vh,760px)] w-[min(94vw,900px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-raised shadow-pop outline-none"
         >
           {target && <Finder key={placeKey(target)} {...target} onDone={close} />}
@@ -168,7 +173,6 @@ function Finder({ connection, database, schema, onDone }: { connection: Connecti
           />
           <span className="min-w-56 flex-1">
             <Input
-              autoFocus
               data-find-text
               aria-label={t("find.textLabel")}
               placeholder={scope === "data" ? t("find.dataPlaceholder") : t("find.namesPlaceholder")}
