@@ -243,8 +243,13 @@ fn connection_ended(e: &sqlx::Error) -> bool {
 fn message_of(e: &sqlx::Error) -> String {
     match e {
         sqlx::Error::Database(db) => db.message().to_string(),
-        other => other.to_string(),
+        other => without_link(&other.to_string()).to_string(),
     }
+}
+
+/// rustls ends some I/O errors with a link to its manual, which tells the user nothing.
+fn without_link(text: &str) -> &str {
+    text.find(": https://").map_or(text, |at| &text[..at])
 }
 
 /// Collect one statement's rows and counts from the driver's stream, generically.
@@ -933,6 +938,18 @@ pub(crate) fn preview(id: usize, set: &ResultSet, capped: bool) -> ResultPreview
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_io_error_loses_the_link_to_a_manual() {
+        assert_eq!(
+            without_link("error communicating with database: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"),
+            "error communicating with database: peer closed connection without sending TLS close_notify"
+        );
+        assert_eq!(
+            without_link("Table 'x.y' doesn't exist"),
+            "Table 'x.y' doesn't exist"
+        );
+    }
 
     #[test]
     fn classifies_driver_type_names() {
