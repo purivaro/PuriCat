@@ -1021,7 +1021,8 @@ async fn console_slot(
     Ok(slot)
 }
 
-/// Run a script on the tab's own connection and record it in the local history.
+/// Run a script on the tab's own connection and record it in the local history. `params`:
+/// the values of its named parameters (`:name`), written into it as literals first.
 #[tauri::command]
 pub async fn run_sql(
     state: State<'_, AppState>,
@@ -1030,8 +1031,51 @@ pub async fn run_sql(
     database: Option<String>,
     sql: String,
     options: RunOptions,
+    params: Option<HashMap<String, script::ParamValue>>,
 ) -> Result<RunOutcome> {
+    let sql = match params {
+        Some(values) if !values.is_empty() => {
+            script::bind(state.session(&id).await?.engine(), &sql, &values)?
+        }
+        _ => sql,
+    };
     run_on_console(&state, &id, &tab, database, &sql, &options).await
+}
+
+/// The named parameters (`:name`) of a script, each once, in order.
+#[tauri::command]
+pub async fn sql_parameters(
+    state: State<'_, AppState>,
+    id: String,
+    sql: String,
+) -> Result<Vec<String>> {
+    Ok(script::parameters(state.session(&id).await?.engine(), &sql))
+}
+
+/// EXPLAIN for one statement, on a connection of its own on `database`; `analyze` runs it
+/// (a statement that reads only). `cancel_job` stops it.
+#[tauri::command]
+pub async fn explain_sql(
+    state: State<'_, AppState>,
+    id: String,
+    database: Option<String>,
+    sql: String,
+    params: Option<HashMap<String, script::ParamValue>>,
+    analyze: bool,
+    job: String,
+) -> Result<puricat_core::db::explain::Plan> {
+    let session = state.session(&id).await?;
+    let sql = match params {
+        Some(values) if !values.is_empty() => script::bind(session.engine(), &sql, &values)?,
+        _ => sql,
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = session
+        .explain(database.as_deref(), &sql, analyze, &stop)
+        .await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
 }
 
 /// How a run ended, in a word: the status of the last statement that was reached.

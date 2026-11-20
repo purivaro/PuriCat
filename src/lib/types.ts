@@ -320,6 +320,20 @@ export interface StatementOutcome {
   elapsedMs: number;
 }
 
+/** What a named parameter (`:name`) stands for. */
+export type ParamValue = { kind: "text"; value: string } | { kind: "number"; value: string } | { kind: "null" };
+
+/** The server's plan for one statement. */
+export interface Plan {
+  statement: string;
+  text: string;
+  /** Lines (or, for MySQL's classic table, tables) where a whole table is read. */
+  scans: string[];
+  /** The statement ran: the plan has real times and rows. */
+  analyzed: boolean;
+  elapsedMs: number;
+}
+
 export interface RunOutcome {
   statements: StatementOutcome[];
   skipped: number;

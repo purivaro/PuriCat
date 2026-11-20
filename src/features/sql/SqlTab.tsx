@@ -7,6 +7,7 @@ import {
   CircleSlash,
   Download,
   History,
+  ListTree,
   OctagonX,
   Play,
   Plug,
@@ -41,6 +42,7 @@ import { errorMessage, ipc, toAppError } from "../../lib/ipc";
 import type {
   ExportFormat,
   HistoryEntry,
+  ParamValue,
   ResultPreview,
   RowPage,
   RunOutcome,
@@ -54,6 +56,9 @@ import { useSettings } from "../../stores/settings";
 import { type SqlTab, sqlEditors, sqlSeed, sqlTextKey, useWorkspace } from "../../stores/workspace";
 import { DataGrid, type Selection } from "../table/DataGrid";
 import { EMPTY } from "../table/pending";
+import { type ParamDraft, remember, rememberedFor } from "./params";
+import { ParamsDialog } from "./ParamsDialog";
+import { PlanDialog, type PlanState } from "./PlanDialog";
 import { ScriptsMenu, type ScriptsMode } from "./ScriptsMenu";
 import { type Span, spans, statementAt } from "./statements";
 
@@ -120,7 +125,11 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   const [failure, setFailure] = useState<string | null>(null);
   const [view, setView] = useState<"messages" | number>("messages");
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [confirm, setConfirm] = useState<{ sql: string; limit: number | null; risky: SqlStatement[] } | null>(null);
+  const [confirm, setConfirm] = useState<{ sql: string; limit: number | null; risky: SqlStatement[]; params?: Record<string, ParamValue> } | null>(null);
+  // Named parameters asked for before a run or an explain; the answer resolves the promise.
+  const [paramAsk, setParamAsk] = useState<{ names: string[]; resolve: (values: Record<string, ParamValue> | null) => void } | null>(null);
+  const [plan, setPlan] = useState<PlanState | null>(null);
+  const planJob = useRef<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[] | null>(null);
   const [scriptsMode, setScriptsMode] = useState<ScriptsMode>("closed");
   // The text differs from the saved script this tab is editing.
@@ -338,12 +347,22 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   const limit = connection?.bulkReviewRows ?? 10;
   const production = connection?.environment === "production";
 
+  /** The values of the script's named parameters: none to ask for, the ones given, or null when the user cancelled. */
+  const valuesFor = useCallback(
+    async (sql: string): Promise<Record<string, ParamValue> | undefined | null> => {
+      const names = await ipc.sqlParameters(tab.connectionId, sql);
+      if (names.length === 0) return undefined;
+      return new Promise((resolve) => setParamAsk({ names, resolve }));
+    },
+    [tab.connectionId],
+  );
+
   const execute = useCallback(
-    async (sql: string, changeLimit: number | null) => {
+    async (sql: string, changeLimit: number | null, params?: Record<string, ParamValue>) => {
       setRunning(true);
       setFailure(null);
       try {
-        const result = await ipc.runSql(tab.connectionId, tab.id, tab.database, sql, { maxRows, changeLimit });
+        const result = await ipc.runSql(tab.connectionId, tab.id, tab.database, sql, { maxRows, changeLimit }, params);
         setOutcome(result);
         setSelection(null);
         const first = result.statements.flatMap((s) => s.results)[0];
@@ -364,17 +383,21 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   const run = useCallback(
     async (sql: string, changeLimit: number | null) => {
       if (running || !connected || !sql.trim()) return;
+      let params: Record<string, ParamValue> | undefined;
       try {
+        const asked = await valuesFor(sql);
+        if (asked === null) return;
+        params = asked;
         const statements = await ipc.analyzeSql(tab.connectionId, sql);
         const risky = statements.filter((s) => s.danger !== null || (production && s.kind !== "read"));
-        if (risky.length > 0) return setConfirm({ sql, limit: changeLimit, risky });
+        if (risky.length > 0) return setConfirm({ sql, limit: changeLimit, risky, params });
       } catch (e) {
         setView("messages");
         return setFailure(errorMessage(e));
       }
-      await execute(sql, changeLimit);
+      await execute(sql, changeLimit, params);
     },
-    [running, connected, tab.connectionId, production, execute],
+    [running, connected, tab.connectionId, production, execute, valuesFor],
   );
 
   const runEditor = useCallback(() => {
@@ -405,6 +428,49 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
   }, [running, connected, tab.connectionId, run, limit]);
   const runCurrentRef = useRef(runCurrent);
   runCurrentRef.current = runCurrent;
+
+  /** The plan of what is selected, or of the statement the cursor is in. */
+  const explain = useCallback(
+    async (analyze: boolean, given?: { sql: string; params: Record<string, ParamValue> | undefined }) => {
+      const editor = editorRef.current;
+      const monaco = monacoRef.current;
+      if (!editor || !monaco || !connected) return;
+      let sql = given?.sql;
+      let params = given?.params;
+      try {
+        if (!sql) {
+          const text = editor.getValue();
+          const chosen = monaco.textToRun(editor);
+          if (chosen !== text) sql = chosen;
+          else {
+            const statements = await ipc.analyzeSql(tab.connectionId, text);
+            const list = spans(text, statements);
+            const at = list[statementAt(text, list, monaco.cursorOffset(editor))];
+            sql = at ? text.slice(at.start, at.end) : text;
+          }
+          if (!sql.trim()) return;
+          const asked = await valuesFor(sql);
+          if (asked === null) return;
+          params = asked;
+        }
+      } catch (e) {
+        setView("messages");
+        return setFailure(errorMessage(e));
+      }
+      const job = crypto.randomUUID();
+      planJob.current = job;
+      setPlan({ sql, analyze, plan: null, error: null, loading: true });
+      try {
+        const result = await ipc.explainSql(tab.connectionId, tab.database, sql, params ?? null, analyze, job);
+        setPlan((p) => p && { ...p, plan: result, loading: false, params });
+      } catch (e) {
+        setPlan((p) => p && { ...p, error: errorMessage(e), loading: false });
+      } finally {
+        planJob.current = null;
+      }
+    },
+    [connected, tab.connectionId, tab.database, valuesFor],
+  );
 
   // An open transaction is uncommitted work: the tab asks before closing, and the
   // connection refuses to disconnect, exactly as for staged edits in a table tab.
@@ -622,7 +688,12 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
             </IconButton>
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
-            <DropdownMenu.Content align="end" sideOffset={6} data-sql-history className={cn(menuContentClass, "max-h-[60vh] w-[min(90vw,520px)] overflow-y-auto")}>
+            <DropdownMenu.Content
+              align="end"
+              sideOffset={6}
+              data-sql-history
+              className={cn(menuContentClass, "max-h-[60vh] w-[min(90vw,520px)] overflow-y-auto")}
+            >
               {!history ? (
                 <div className="flex items-center gap-2 px-2 py-3 text-xs text-fg-muted">
                   <Spinner className="size-3.5" /> {t("common.loading")}
@@ -662,7 +733,12 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
         {running ? (
-          <Button size="sm" variant="danger" icon={<Square className="size-3 fill-current" />} onClick={() => void ipc.cancelSql(tab.id).catch((e) => toast.error(errorMessage(e)))}>
+          <Button
+            size="sm"
+            variant="danger"
+            icon={<Square className="size-3 fill-current" />}
+            onClick={() => void ipc.cancelSql(tab.id).catch((e) => toast.error(errorMessage(e)))}
+          >
             {t("sql.stop")}
           </Button>
         ) : (
@@ -702,6 +778,10 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
                     <TextCursorInput className="size-3.5" /> {t("sql.runCurrent")}
                     <span className="ml-auto pl-6 text-xs text-fg-subtle">⇧⌘↵</span>
                   </DropdownMenu.Item>
+                  <DropdownMenu.Separator className={menuSeparatorClass} />
+                  <DropdownMenu.Item className={menuItemClass} data-sql-explain onSelect={() => void explain(false)}>
+                    <ListTree className="size-3.5" /> {t("plan.menu")}
+                  </DropdownMenu.Item>
                 </DropdownMenu.Content>
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
@@ -718,12 +798,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
           </div>
         )}
       </div>
-      <div
-        role="separator"
-        aria-orientation="horizontal"
-        onPointerDown={startResize}
-        className="group relative z-10 -my-1 h-2 shrink-0 cursor-row-resize"
-      >
+      <div role="separator" aria-orientation="horizontal" onPointerDown={startResize} className="group relative z-10 -my-1 h-2 shrink-0 cursor-row-resize">
         <div className="absolute inset-x-0 top-[3px] h-px bg-border transition-colors group-hover:h-0.5 group-hover:bg-accent group-active:bg-accent" />
       </div>
 
@@ -820,13 +895,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
                   </div>
                 </div>
               ) : (
-                <Messages
-                  outcome={outcome}
-                  failure={failure}
-                  limit={limit}
-                  onRunAnyway={(sql) => void execute(sql, null)}
-                  running={running}
-                />
+                <Messages outcome={outcome} failure={failure} limit={limit} onRunAnyway={(sql) => void execute(sql, null)} running={running} />
               )}
             </div>
           </>
@@ -871,7 +940,7 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
                 onClick={() => {
                   const pending = confirm;
                   setConfirm(null);
-                  if (pending) void execute(pending.sql, pending.limit);
+                  if (pending) void execute(pending.sql, pending.limit, pending.params);
                 }}
               >
                 {t("sql.confirmRun")}
@@ -880,6 +949,29 @@ export default function SqlTabView({ tab, active }: { tab: SqlTab; active: boole
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
+
+      <ParamsDialog
+        names={paramAsk?.names ?? null}
+        initial={rememberedFor(tab.id)}
+        onCancel={() => {
+          paramAsk?.resolve(null);
+          setParamAsk(null);
+        }}
+        onSubmit={(values, drafts: Record<string, ParamDraft>) => {
+          remember(tab.id, drafts);
+          paramAsk?.resolve(values);
+          setParamAsk(null);
+        }}
+      />
+      {connection && (
+        <PlanDialog
+          state={plan}
+          engine={connection.engine}
+          onAnalyze={() => plan && void explain(true, { sql: plan.sql, params: plan.params })}
+          onStop={() => planJob.current && void ipc.cancelJob(planJob.current)}
+          onClose={() => setPlan(null)}
+        />
+      )}
     </div>
   );
 }

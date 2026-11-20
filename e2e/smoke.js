@@ -1853,6 +1853,50 @@
     await waitFor(() => markedLines() === "4", "the mark follows the cursor");
     await stage("sql-run-current", { marked, runMenu, ranFromMenu, ranFromKeyboard });
 
+    // Named parameters: their values are asked for before the run and written in as literals;
+    // the next run asks again with them filled in, and Cancel runs nothing.
+    const paramsDialog = () => document.querySelector("[data-sql-params]");
+    sqlEditor().setValue("SELECT order_no, status FROM puricat_e2e.orders WHERE status = :status AND id <= :upto ORDER BY id");
+    await sleep(80);
+    await click(sqlButton("Run"), "run with parameters");
+    await waitFor(() => paramsDialog()?.querySelector('[data-param-value="status"]'), "the values asked for");
+    const paramNames = all("[data-param]").map((r) => r.dataset.param).join(",");
+    await type(paramsDialog().querySelector('[data-param-value="status"]'), "Pending");
+    await type(paramsDialog().querySelector('[data-param-value="upto"]'), "10");
+    const autoKinds = all("[data-param-kind]").map((el) => el.selectedOptions[0].textContent.trim()).join(" | ");
+    await stage("sql-params-ask", { autoKinds });
+    await click(paramsDialog().querySelector("[data-params-run]"), "run with these values");
+    await waitFor(() => !paramsDialog() && gridCells()[1] === "Pending", "the pending orders", 20000);
+    const paramRows = all(`${panelSel} [role="grid"] [role="row"]`).slice(1).map((r) => [...r.querySelectorAll('[role="gridcell"]')].map((c) => c.textContent.trim())[1]).join(",");
+    await showMessages();
+    const ranWith = messages()[0]?.text ?? "";
+    await click(sqlButton("Run"), "run again");
+    const remembered = (await waitFor(() => paramsDialog()?.querySelector('[data-param-value="status"]'), "the values asked for again")).value;
+    await click(exact("[data-sql-params] button", "Cancel"), "cancel the run");
+    await waitFor(() => !paramsDialog(), "the values dialog closed");
+    await sleep(300);
+    const paramsAfterCancel = messages()[0]?.text ?? "";
+    await stage("sql-params", { paramNames, autoKinds, paramRows, ranWith, remembered, paramsAfterCancel });
+    if (paramNames !== "status,upto" || !ranWith.includes("WHERE status = 'Pending' AND id <= 10")) throw new Error(`the parameters ran as ${ranWith}`);
+    if (!/^Pending(,Pending)*$/.test(paramRows)) throw new Error(`the rows are ${paramRows}`);
+    if (remembered !== "Pending" || paramsAfterCancel !== ranWith) throw new Error(`asked again with ${remembered}; after Cancel: ${paramsAfterCancel}`);
+
+    // EXPLAIN: the plan of the statement at the cursor, a whole-table read marked; then the
+    // statement run and measured.
+    const planDialog = () => document.querySelector("[data-sql-plan]");
+    sqlEditor().setValue("SELECT order_no FROM puricat_e2e.orders WHERE note = 'ส่งด่วน — โทรแจ้งก่อนส่ง'");
+    await sleep(80);
+    document.querySelector(`${panelSel} [data-sql-run-menu]`).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+    await click(await waitFor(() => document.querySelector("[data-sql-explain]"), "the explain item"), "explain the statement");
+    const planText = (await waitFor(() => planDialog()?.querySelector("[data-plan-text]"), "the plan", 20000)).textContent;
+    const scans = planDialog().querySelector("[data-plan-scans]")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+    await click(planDialog().querySelector("[data-plan-analyze]"), "run and measure");
+    const measured = await waitFor(() => /actual/.test(planDialog()?.querySelector("[data-plan-text]")?.textContent ?? "") && planDialog().querySelector("[data-plan-text]").textContent, "the measured plan", 20000);
+    await stage("sql-explain", { planText: planText.slice(0, 300), scans, measured: measured.slice(0, 300) });
+    if (!scans.includes("Table scan on orders")) throw new Error(`no whole-table read marked: ${scans} / ${planText}`);
+    await click(planDialog().querySelector("[data-plan-close]"), "close the plan");
+    await waitFor(() => !planDialog(), "the plan closed");
+
     // A second query tab is saved under a name (⌘S asks for one) and becomes that script.
     const sqlTabsBefore = tabStrip().length;
     await newQueryTab("Query 2");

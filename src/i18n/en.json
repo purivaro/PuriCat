@@ -921,6 +921,33 @@
     "scriptDeleted": "Deleted “{{name}}”",
     "scriptNameTaken": "This connection already has a script named “{{name}}”. Names do not differ by upper or lower case."
   },
+  "params": {
+    "title": "Values for the parameters",
+    "hint": "The query names values with a colon (:name). Each is written into it before it runs: a number as a number, text in quotes, or NULL.",
+    "kind": "How :{{name}} is written",
+    "auto": "Automatic ({{kind}})",
+    "text": "Text",
+    "number": "Number",
+    "run": "Run with these values",
+    "notNumber": "The value of :{{name}} is not a number"
+  },
+  "plan": {
+    "menu": "Explain the statement",
+    "title": "Plan of the statement",
+    "measuredTitle": "Plan, with the statement run and measured",
+    "took": "{{ms}} ms",
+    "loading": "Asking the server for its plan…",
+    "measuring": "Running the statement and measuring it…",
+    "scans_one": "The server reads a whole table here:",
+    "scans_other": "The server reads a whole table in {{count}} places:",
+    "noScans": "No step reads a whole table.",
+    "analyzedNote": "The statement ran to measure this: the times and rows are real.",
+    "analyzeHint": "The plan is the server's estimate; nothing was run.",
+    "stop": "Stop",
+    "copy": "Copy",
+    "analyze": "Run and measure",
+    "copied": "Plan copied"
+  },
   "copy": {
     "menu": "Copy rows to…",
     "onProblemStop": "Stop the copy",
