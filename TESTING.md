@@ -720,6 +720,21 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-20 (change table)
+
+macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0025](docs/adr/0025-new-table-form.md), section "Changing a table".
+
+| Check | Result |
+|---|---|
+| `live_table_design`: `mysql_table_changes`, `postgres_table_changes` | Pass. On each engine five changes at once — a column added with a default (and on PostgreSQL a comment), one dropped, one renamed, an index dropped, a unique index made — then the columns in order, a row's values under the new names, the indexes listed by the new `indexes` query. A change list whose second change fails (a column that does not exist): the server's error, and the first change (an added column) is not there afterwards, on both engines |
+| Unit tests | `table_design::tests` (3 new): MySQL's one statement, PostgreSQL's statements in order with the comment last, and the refusals (nothing to do, a key or self-numbering added column, a column changed twice, a rename to the same name, an index without or with a repeated column, dropping MySQL's `PRIMARY`, a type that is not offered). `alterTable.test.ts` (4): the order of the changes, renames left out, the columns an index can use, the indexes a drop affects |
+| End-to-end stage `alter-table` (MySQL), as a partial script | Pass on the first run. On the table the new-table stage made: a rename, a drop, an added `INT` column and a unique index; the exact `ALTER TABLE`; Apply disabled until the table's name is typed; afterwards the server's columns and indexes |
+| Screenshot | Looked at by hand (English, light) |
+| `e2e/run.sh` (dev-server mode), full | Pass, once, with an empty `problems` list |
+| `pnpm check` | Pass |
+
+Not verified: PostgreSQL through the window, a Production connection, Thai and dark, a rename of a key column, an index on an expression (listed as `(expression)` on MySQL).
+
 ## Results — 2026-11-20 (new table)
 
 macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0025](docs/adr/0025-new-table-form.md).

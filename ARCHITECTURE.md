@@ -143,6 +143,9 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `column_types` | `id` | The column types the table form offers for the connection's engine, with what each takes in parentheses |
 | `plan_create_table` | `id`, `spec` (table, columns, comment) | The statements `create_table` would run, in order. Runs nothing |
 | `create_table` | `id`, `spec` | The statements that ran. Refused on a read-only connection |
+| `table_indexes` | `id`, `table` | The table's indexes (name, columns, unique, primary), the primary key first |
+| `plan_alter_table` | `id`, `spec` (table, edits) | The statements `alter_table` would run. Runs nothing |
+| `alter_table` | `id`, `spec`, `confirm` | The statements that ran. Refused on a read-only connection, and when a column is dropped unless `confirm` is the table's name |
 | `list_processes` | `id` | The server's sessions (`Process`: id, user, host, database, command, seconds, state, statement up to 4,000 characters, client, own, idle) |
 | `plan_end_process` | `id`, `process` (a number), `what` (`query` / `connection`) | The statement `end_process` would run. Runs nothing |
 | `end_process` | `id`, `process`, `what` | The statement that ran. Refused on a read-only connection |
