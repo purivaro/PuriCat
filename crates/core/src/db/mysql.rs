@@ -365,16 +365,22 @@ impl MySqlSession {
         Ok(())
     }
 
-    /// The same, with `database` as the session's default one, on a connection of its own:
-    /// MySQL resolves the unqualified names inside a view's query against the session's
-    /// database, not against the database the view is created in.
+    /// One statement, for [`super::Session::execute_one`]: with `database` as the session's
+    /// default one, on a connection of its own, because MySQL resolves the unqualified names
+    /// inside a view's query against the session's database, not against the database the
+    /// view is created in. The statement goes as a prepared statement, which MySQL takes one
+    /// statement at a time: a text that holds a second one is a syntax error to the server.
     pub async fn execute_in(&self, database: &str, sql: &str) -> Result<()> {
         let use_database = format!("USE {}", ident::mysql(database)?);
         // Detached, so the default database does not stay behind on a pooled connection.
         let mut conn = self.pool.acquire().await.map_err(Error::database)?.detach();
         let mut result = conn.execute(use_database.as_str()).await.map(|_| ());
         if result.is_ok() {
-            result = conn.execute(sql).await.map(|_| ());
+            result = sqlx::query(sql)
+                .persistent(false)
+                .execute(&mut conn)
+                .await
+                .map(|_| ());
         }
         let _ = sqlx::Connection::close(conn).await;
         result.map_err(Error::database)

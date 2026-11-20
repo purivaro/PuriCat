@@ -390,6 +390,18 @@ impl SqliteSession {
         Ok(())
     }
 
+    /// One statement, for [`super::Session::execute_one`]. SQLite runs every statement of the
+    /// text it is given, and only a semicolon can end one: a text with no semicolon but a
+    /// final one holds a single statement.
+    pub async fn execute_one(&self, database: &str, sql: &str) -> Result<()> {
+        if sql.trim_end().trim_end_matches(';').contains(';') {
+            return Err(Error::Invalid(
+                "A semicolon inside the statement is not accepted here".into(),
+            ));
+        }
+        self.execute_statement(database, sql).await
+    }
+
     /// Run several such statements as one: all of them, or none.
     pub async fn execute_all(&self, database: &str, statements: &[String]) -> Result<()> {
         only_main(database)?;

@@ -592,15 +592,31 @@ impl Session {
         ddl::view_statements(self.engine(), spec)
     }
 
+    /// Run exactly one statement that returns no rows, in `database`. For a statement that
+    /// holds SQL the user wrote, such as a view's query: PuriCat's reading of the text decides
+    /// that it is one statement, and here the server decides it too. MySQL gets it as a
+    /// prepared statement and PostgreSQL through the extended protocol, and both take one
+    /// statement only, so a text that holds a second one is refused whatever the reading of
+    /// the text made of it. SQLite runs every statement of a text, so there the text may hold
+    /// no semicolon but a final one: without a semicolon, no second statement can follow.
+    pub async fn execute_one(&self, database: &str, sql: &str) -> Result<()> {
+        match self {
+            // With `database` as the default one: that is where MySQL looks for the tables
+            // a view's query names without a database.
+            Session::MySql(s) => s.execute_in(database, sql).await,
+            Session::Postgres(s) => s.execute_one_on(database, sql).await,
+            Session::Sqlite(s) => s.execute_one(database, sql).await,
+        }
+    }
+
     /// Create a view, or give an existing one another query. Returns the statements that ran.
     pub async fn save_view(&self, spec: &ddl::ViewSpec) -> Result<Vec<String>> {
         let statements = self.view_statements_sql(spec)?;
         let database = &spec.table.database;
         match self {
-            // With the view's database as the default one: that is where MySQL looks for
-            // the tables the query names without a database.
-            Session::MySql(s) => s.execute_in(database, &statements[0]).await?,
-            Session::Postgres(s) => s.execute_on(database, &statements[0]).await?,
+            Session::MySql(_) | Session::Postgres(_) => {
+                self.execute_one(database, &statements[0]).await?
+            }
             // No `OR REPLACE` there: drop and create, both or neither.
             Session::Sqlite(s) => s.execute_all(database, &statements).await?,
         }

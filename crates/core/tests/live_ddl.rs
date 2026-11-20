@@ -1222,6 +1222,52 @@ async fn mysql_view_form() {
             session.view_select(&at(&db, None, "missing")).await,
             Err(Error::NotFound(_))
         ));
+
+        // The save sends the statement as one prepared statement, and the server takes one
+        // statement at a time: a text that holds a second one is refused whatever the reading
+        // of the text made of it, and neither statement runs.
+        assert!(matches!(
+            session
+                .execute_one(
+                    &db,
+                    "CREATE VIEW `second` AS SELECT 1; CREATE TABLE made_by_second (a INT)"
+                )
+                .await,
+            Err(Error::Database(_))
+        ));
+        assert_eq!(objects(&session, &db, None).await, ["big orders", "orders"]);
+        // One statement goes through; a question mark inside a string is no parameter.
+        session
+            .execute_one(&db, "CREATE VIEW `asked` AS SELECT 'why?' AS q")
+            .await
+            .unwrap();
+        assert_eq!(
+            objects(&session, &db, None).await,
+            ["asked", "big orders", "orders"]
+        );
+
+        // `--` followed by a control character starts a comment for MySQL (its lexer asks
+        // "space or control character"), and for the reading of the text too. Read
+        // otherwise, the quote after an invisible control character would hide the second
+        // statement on the next line from that reading.
+        let commented = session
+            .preview_select(&db, "SELECT 1 AS x --\u{1} not SQL", 10)
+            .await
+            .unwrap();
+        assert_eq!(commented.result.rows, [[Some("1".to_string())]]);
+        let hidden = "SELECT id FROM orders --\u{1}'\n; CREATE TABLE made_by_second (a INT); -- '";
+        assert!(matches!(
+            session.view_statements_sql(&view(&big, hidden, true)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            session.preview_select(&db, hidden, 10).await,
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(
+            objects(&session, &db, None).await,
+            ["asked", "big orders", "orders"]
+        );
         session.close().await;
     })
     .await;
@@ -1369,6 +1415,53 @@ async fn postgres_view_form() {
             .unwrap();
         assert!(matches!(guarded.save_view(&replace).await, Err(Error::Database(_))));
         guarded.close().await;
+
+        // The save goes through the extended protocol, which takes exactly one statement: a
+        // second one in the text is refused by the server, and neither runs.
+        assert!(matches!(
+            session
+                .execute_one(
+                    &db,
+                    "CREATE VIEW shop.second AS SELECT 1; CREATE TABLE shop.made_by_second (a int)"
+                )
+                .await,
+            Err(Error::Database(_))
+        ));
+        session
+            .execute_one(&db, "CREATE VIEW shop.asked AS SELECT 'why?' AS q")
+            .await
+            .unwrap();
+
+        // In a database where backslashes escape in plain strings (`standard_conforming_strings
+        // = off`, an old setting), the reading of the text and the server disagree about where
+        // a string ends: the query below is one SELECT to the first, and a SELECT and a CREATE
+        // TABLE to the second. Asked to take one statement, the server refuses the save.
+        inside
+            .execute(
+                format!("ALTER DATABASE \"{db}\" SET standard_conforming_strings = off").as_str(),
+            )
+            .await
+            .unwrap();
+        // A new session: its connections are opened after the change.
+        let fresh = Session::connect(&t.profile, t.password.as_deref())
+            .await
+            .unwrap();
+        let sneaky = view(
+            &at(&db, Some("shop"), "sneaky"),
+            "SELECT 'a\\'' AS x; CREATE TABLE shop.made_by_second (a int); --'",
+            false,
+        );
+        assert!(fresh.view_statements_sql(&sneaky).is_ok(), "one query to the reading of the text");
+        assert!(matches!(fresh.save_view(&sneaky).await, Err(Error::Database(_))));
+        fresh.close().await;
+        let names = objects(&session, &db, Some("shop")).await;
+        assert!(names.iter().any(|n| n == "asked"), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| ["second", "sneaky", "made_by_second"].contains(&n.as_str())),
+            "{names:?}"
+        );
         inside.close().await.unwrap();
         session.close().await;
     })

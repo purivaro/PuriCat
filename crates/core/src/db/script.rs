@@ -76,8 +76,13 @@ fn scan(
                 }
                 i += 1;
             }
+            // MySQL starts a `--` comment only when a space or a control character follows
+            // the dashes (its lexer asks `isspace || iscntrl`); `5--1` is a subtraction there.
             b'-' if bytes.get(i + 1) == Some(&b'-')
-                && (!mysql || bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace())) =>
+                && (!mysql
+                    || bytes
+                        .get(i + 2)
+                        .is_none_or(|b| b.is_ascii_whitespace() || b.is_ascii_control())) =>
             {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
@@ -585,6 +590,25 @@ mod tests {
             texts(Engine::Postgres, "SELECT E'a\\';b'; SELECT 2").len(),
             2
         );
+    }
+
+    #[test]
+    fn mysql_double_dash_comments_are_read_as_the_server_reads_them() {
+        // MySQL's lexer starts a `--` comment when a space or a control character follows
+        // the dashes. Read otherwise, the quote after an invisible control character would
+        // open a string that hides the second statement on the next line.
+        let hidden = "SELECT id FROM t --\u{1}'\n; DROP TABLE t; -- '";
+        assert_eq!(
+            texts(Engine::Mysql, hidden),
+            ["SELECT id FROM t --\u{1}'", "DROP TABLE t"]
+        );
+        assert!(single_read(Engine::Mysql, hidden).is_err());
+        for control in ['\u{0}', '\u{1}', '\u{b}', '\u{1f}', '\u{7f}', '\t', '\r'] {
+            let sql = format!("SELECT 1 --{control}'\n; SELECT 2");
+            assert_eq!(texts(Engine::Mysql, &sql).len(), 2, "{control:?}");
+        }
+        // Still not a comment: `--` followed by a letter or a digit is two minus signs.
+        assert_eq!(texts(Engine::Mysql, "SELECT 5--1; SELECT --x").len(), 2);
     }
 
     #[test]

@@ -1873,6 +1873,34 @@ async fn view_form() {
     }
     assert_eq!(bodies("notes").await.unwrap().len(), 3);
 
+    // One statement only: SQLite would run every statement of a text, so a semicolon
+    // inside it is refused before anything is sent; one statement with a final one runs.
+    assert!(matches!(
+        session
+            .execute_one(
+                "main",
+                "CREATE VIEW second AS SELECT 1; CREATE TABLE made_by_second (a INT)"
+            )
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    session
+        .execute_one("main", "CREATE VIEW asked AS SELECT 'why?' AS q;")
+        .await
+        .unwrap();
+    let names: Vec<String> = session
+        .list_objects("main", None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "asked"), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n == "second" || n == "made_by_second"),
+        "{names:?}"
+    );
+
     // A file opened read-only refuses to save, saying how to change that.
     let guarded = Session::connect(&profile(scratch.path(), true), None)
         .await

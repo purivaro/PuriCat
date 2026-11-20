@@ -416,6 +416,18 @@ impl PgSession {
         Ok(())
     }
 
+    /// One statement on `database`, for [`super::Session::execute_one`]: sent through the
+    /// extended protocol, where the server refuses a text that holds more than one statement
+    /// ("cannot insert multiple commands into a prepared statement").
+    pub async fn execute_one_on(&self, database: &str, sql: &str) -> Result<()> {
+        sqlx::query(sql)
+            .persistent(false)
+            .execute(&self.pool(database).await?)
+            .await
+            .map_err(Error::database)?;
+        Ok(())
+    }
+
     /// The query of a plain view, as `pg_get_viewdef` prints it.
     pub async fn view_select(&self, table: &TableRef) -> Result<String> {
         let schema = super::require_schema(table.schema.as_deref())?;
