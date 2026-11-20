@@ -285,6 +285,33 @@
     "filteredColumn": "Filtered",
     "noMatch": "No rows match the filter",
     "noMatchBody": "Change the conditions, or clear the filter to see every row.",
+    "or": "or",
+    "use": "Use this condition",
+    "match": "Match",
+    "matchAll": "all",
+    "matchAny": "any",
+    "appliedAny_one": "{{count}} condition applied",
+    "appliedAny_other": "any of {{count}} conditions applied",
+    "from": "From",
+    "to": "To",
+    "rangeTo": "to",
+    "values": "Values",
+    "valuesHint": "a, b, c — or paste a column",
+    "valuesHelp": "Separate the values with commas, or paste a column from a spreadsheet. Wrap a value in double quotes to keep its commas and spaces.",
+    "valueCount_one": "{{count}} value",
+    "valueCount_other": "{{count}} values",
+    "tooManyValues": "more than {{max}}",
+    "notEmptyHint": "leaves out NULL as well",
+    "hideValue": "Hide rows with this value",
+    "byValues": "Show rows with these values",
+    "byValuesCount_one": "Show rows with this value",
+    "byValuesCount_other": "Show rows with these {{count}} values",
+    "noList": {
+      "binary": "A binary column can only be filtered on NULL",
+      "truncated": "A selected cell shows only part of its value",
+      "onlyNull": "The selected cells hold NULL only: use “Filter by this value” on one of them",
+      "tooMany": "More than 200 different values are selected"
+    },
     "op": {
       "equals": "=",
       "notEquals": "≠",
@@ -297,7 +324,12 @@
       "startsWith": "starts with",
       "endsWith": "ends with",
       "isNull": "is NULL",
-      "isNotNull": "is not NULL"
+      "isNotNull": "is not NULL",
+      "in": "is one of",
+      "notIn": "is not one of",
+      "between": "is between",
+      "isEmpty": "is empty",
+      "isNotEmpty": "is not empty"
     }
   },
   "cell": {

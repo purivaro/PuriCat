@@ -282,12 +282,15 @@ pub async fn count_rows(
     id: String,
     table: TableRef,
     filters: Vec<Filter>,
+    match_any: Option<bool>,
     job: String,
 ) -> Result<RowCount> {
     let session = state.session(&id).await?;
     let stop = Arc::new(AtomicBool::new(false));
     state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
-    let result = session.count_rows(&table, &filters, &stop).await;
+    let result = session
+        .count_rows(&table, &filters, match_any.unwrap_or(false), &stop)
+        .await;
     state.jobs.lock().unwrap().remove(&job);
     result
 }

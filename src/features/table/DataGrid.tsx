@@ -10,6 +10,8 @@ import {
   ClipboardPaste,
   Copy,
   Funnel,
+  FunnelX,
+  ListFilter,
   Hash,
   KeyRound,
   Lock,
@@ -30,7 +32,7 @@ import { clipboard, parseClipboardTable, toClipboardTable } from "../../lib/clip
 import { cn } from "../../lib/cn";
 import { errorMessage } from "../../lib/ipc";
 import type { ColumnMeta, RowFilter, RowPage, SortSpec, ValueKind } from "../../lib/types";
-import { cellFilter } from "./filter";
+import { cellExclusion, cellFilter, cellsFilter } from "./filter";
 import {
   addRows,
   blocker,
@@ -202,6 +204,18 @@ export function DataGrid(props: Props) {
     oneCell && page.columns[oneCell.left]
       ? cellFilter(page.columns[oneCell.left]!, page.rows[oneCell.top]?.[oneCell.left] ?? null, isTruncated(page, oneCell.top, oneCell.left))
       : null;
+  const hideForCell =
+    oneCell && page.columns[oneCell.left]
+      ? cellExclusion(page.columns[oneCell.left]!, page.rows[oneCell.top]?.[oneCell.left] ?? null, isTruncated(page, oneCell.top, oneCell.left))
+      : null;
+  // Several stored cells of one column: "show the rows that hold any of these values".
+  const listColumn = range && range.left === range.right && range.bottom > range.top ? page.columns[range.left] : undefined;
+  const listForCells = listColumn
+    ? cellsFilter(
+        listColumn,
+        selectedRows.filter((r) => !isInserted(page, r)).map((r) => ({ value: page.rows[r]?.[range!.left] ?? null, truncated: isTruncated(page, r, range!.left) })),
+      )
+    : null;
 
   const clampCell = (r: number, c: number): Cell => ({
     r: Math.min(rows - 1, Math.max(0, r)),
@@ -541,6 +555,23 @@ export function DataGrid(props: Props) {
               onSelect={() => filterForCell && onFilter(filterForCell)}
             >
               <Funnel className="size-3.5" /> {t("filter.byValue")}
+            </ContextMenu.Item>
+          )}
+          {onFilter && (
+            <ContextMenu.Item className={menuItemClass} disabled={!hideForCell || sortDisabled} onSelect={() => hideForCell && onFilter(hideForCell)}>
+              <FunnelX className="size-3.5" /> {t("filter.hideValue")}
+            </ContextMenu.Item>
+          )}
+          {onFilter && listForCells && (
+            <ContextMenu.Item
+              className={menuItemClass}
+              // Why it is greyed out, for whoever hovers it.
+              title={typeof listForCells === "string" ? t(`filter.noList.${listForCells}`) : undefined}
+              disabled={typeof listForCells === "string" || sortDisabled}
+              onSelect={() => typeof listForCells !== "string" && onFilter(listForCells)}
+            >
+              <ListFilter className="size-3.5" />{" "}
+              {typeof listForCells === "string" ? t("filter.byValues") : t("filter.byValuesCount", { count: listForCells.values?.length ?? 0 })}
             </ContextMenu.Item>
           )}
           {editable && (

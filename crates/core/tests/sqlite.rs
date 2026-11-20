@@ -1399,6 +1399,162 @@ async fn a_file_in_wal_mode_is_shared_with_the_program_that_owns_it() {
     other.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn lists_ranges_the_empty_text_and_any_of_the_conditions() {
+    let scratch = Scratch::new(&format!(
+        "{FIXTURE}\nCREATE TABLE blanks (id INTEGER PRIMARY KEY, t TEXT);\n\
+         INSERT INTO blanks VALUES (1, ''), (2, NULL), (3, 'x');"
+    ))
+    .await;
+    let session = open(&scratch).await;
+    let among = |column: &str, op: &str, values: &[&str]| json!([{ "column": column, "op": op, "values": values }]);
+    let none: [&str; 0] = [];
+
+    // A list: numbers by value, text exactly, to the last digit of a 64-bit integer.
+    assert_eq!(
+        ids(&session, among("id", "in", &["1", "3", "9"]))
+            .await
+            .unwrap(),
+        ["1", "3"]
+    );
+    assert_eq!(
+        ids(&session, among("price", "in", &["7.00", "12.5"]))
+            .await
+            .unwrap(),
+        ["1", "2"]
+    );
+    assert_eq!(
+        ids(&session, among("big", "in", &["9223372036854775807"]))
+            .await
+            .unwrap(),
+        ["1"]
+    );
+    assert_eq!(
+        ids(&session, among("big", "in", &["9223372036854775806"]))
+            .await
+            .unwrap(),
+        none
+    );
+    assert_eq!(
+        ids(&session, among("name", "in", &["Tea", "กาแฟ", "nobody"]))
+            .await
+            .unwrap(),
+        ["1", "2"]
+    );
+    // "Is not one of" keeps the rows that hold NULL.
+    assert_eq!(
+        ids(&session, among("price", "notIn", &["7"]))
+            .await
+            .unwrap(),
+        ["1", "3"]
+    );
+    assert_eq!(
+        ids(&session, among("code", "notIn", &["A-1", "zzz"]))
+            .await
+            .unwrap(),
+        ["2", "3"]
+    );
+    // Between: both ends included. Dates are text there, and compare as text.
+    assert_eq!(
+        ids(&session, among("qty", "between", &["3", "10"]))
+            .await
+            .unwrap(),
+        ["1", "3"]
+    );
+    assert_eq!(
+        ids(&session, among("price", "between", &["7", "12.49"]))
+            .await
+            .unwrap(),
+        ["2"]
+    );
+    assert_eq!(
+        ids(
+            &session,
+            among("made", "between", &["2026-01-31", "2026-02-01"])
+        )
+        .await
+        .unwrap(),
+        ["1", "2"]
+    );
+    assert_eq!(
+        ids(&session, among("name", "between", &["S", "U"]))
+            .await
+            .unwrap(),
+        ["2"]
+    );
+    for refused in [
+        among("id", "in", &[]),
+        among("qty", "in", &["1", "abc"]),
+        among("photo", "in", &["00"]),
+        among("qty", "between", &["1"]),
+        among("qty", "between", &["1", "abc"]),
+        among("data", "between", &["a", "b"]),
+        json!([{ "column": "qty", "op": "isEmpty" }]),
+    ] {
+        let error = ids(&session, refused.clone()).await.err();
+        assert!(
+            matches!(error, Some(Error::Invalid(_))),
+            "{refused}: {error:?}"
+        );
+    }
+
+    // The empty text is not NULL.
+    let blanks = async |op: &str| {
+        let request = serde_json::from_value(json!({
+            "offset": 0, "limit": 10, "filters": [{ "column": "t", "op": op }],
+        }))
+        .unwrap();
+        let page = session
+            .fetch_rows(&table("blanks"), &request)
+            .await
+            .unwrap();
+        page.rows
+            .into_iter()
+            .map(|r| r[0].clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(blanks("isEmpty").await, ["1"]);
+    assert_eq!(blanks("isNotEmpty").await, ["3"]);
+    assert_eq!(blanks("isNull").await, ["2"]);
+
+    // Any one of the conditions instead of all; the count agrees with the page.
+    let two = json!([
+        { "column": "qty", "op": "greater", "value": "5" },
+        { "column": "name", "op": "equals", "value": "Tea" },
+    ]);
+    assert_eq!(ids(&session, two.clone()).await.unwrap(), none);
+    let any = serde_json::from_value(json!({
+        "offset": 0, "limit": 100, "matchAny": true, "filters": two,
+    }))
+    .unwrap();
+    let page = session.fetch_rows(&table("items"), &any).await.unwrap();
+    let passed: Vec<_> = page
+        .rows
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect();
+    assert_eq!(passed, ["2", "3"]);
+    let idle = AtomicBool::new(false);
+    let conditions: Vec<puricat_core::db::filter::Filter> = serde_json::from_value(two).unwrap();
+    let items = table("items");
+    assert_eq!(
+        session
+            .count_rows(&items, &conditions, true, &idle)
+            .await
+            .unwrap()
+            .count,
+        2
+    );
+    assert_eq!(
+        session
+            .count_rows(&items, &conditions, false, &idle)
+            .await
+            .unwrap()
+            .count,
+        0
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
     let scratch = Scratch::new(&format!(
@@ -1413,13 +1569,17 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
 
     let items = table("items");
     assert_eq!(
-        session.count_rows(&items, &[], &idle).await.unwrap().count,
+        session
+            .count_rows(&items, &[], false, &idle)
+            .await
+            .unwrap()
+            .count,
         3
     );
     let some_rows = filters(json!([{ "column": "qty", "op": "greater", "value": "0" }]));
     assert_eq!(
         session
-            .count_rows(&items, &some_rows, &idle)
+            .count_rows(&items, &some_rows, false, &idle)
             .await
             .unwrap()
             .count,
@@ -1428,7 +1588,7 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
     let none = filters(json!([{ "column": "name", "op": "equals", "value": "nobody" }]));
     assert_eq!(
         session
-            .count_rows(&items, &none, &idle)
+            .count_rows(&items, &none, false, &idle)
             .await
             .unwrap()
             .count,
@@ -1437,7 +1597,7 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
     // A view is counted like a table; a value the column cannot hold is refused as on a page.
     assert_eq!(
         session
-            .count_rows(&table("cheap"), &[], &idle)
+            .count_rows(&table("cheap"), &[], false, &idle)
             .await
             .unwrap()
             .count,
@@ -1445,11 +1605,13 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
     );
     let bad = filters(json!([{ "column": "qty", "op": "equals", "value": "abc" }]));
     assert!(matches!(
-        session.count_rows(&items, &bad, &idle).await,
+        session.count_rows(&items, &bad, false, &idle).await,
         Err(Error::Invalid(_))
     ));
     assert!(matches!(
-        session.count_rows(&table("nothing"), &[], &idle).await,
+        session
+            .count_rows(&table("nothing"), &[], false, &idle)
+            .await,
         Err(Error::NotFound(_))
     ));
 
@@ -1461,7 +1623,9 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
         later.store(true, Ordering::Relaxed);
     });
     let started = Instant::now();
-    let outcome = session.count_rows(&table("endless"), &[], &stop).await;
+    let outcome = session
+        .count_rows(&table("endless"), &[], false, &stop)
+        .await;
     assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -1470,7 +1634,11 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
     );
     // Nothing of that stop is left for the next count.
     assert_eq!(
-        session.count_rows(&items, &[], &idle).await.unwrap().count,
+        session
+            .count_rows(&items, &[], false, &idle)
+            .await
+            .unwrap()
+            .count,
         3
     );
     session.close().await;

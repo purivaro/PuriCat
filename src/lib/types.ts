@@ -106,14 +106,21 @@ export type FilterOp =
   | "less"
   | "lessOrEqual"
   | "isNull"
-  | "isNotNull";
+  | "isNotNull"
+  | "in"
+  | "notIn"
+  | "between"
+  | "isEmpty"
+  | "isNotEmpty";
 
-/** One condition on the rows of a table. All conditions of a request must hold. */
+/** One condition on the rows of a table. The conditions of a request must all hold, or any one of them. */
 export interface RowFilter {
   column: string;
   op: FilterOp;
-  /** `null` for the NULL tests, which take no value. */
+  /** `null` for the operators that take no value, a list or a range. */
   value: string | null;
+  /** The list of "is one of" / "is not one of", or the two ends of "is between". */
+  values?: string[];
 }
 
 /** The rows of a table, or those a filter leaves: counted on the server, not estimated. */

@@ -83,6 +83,8 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<SortSpec | null>(null);
   const [filters, setFilters] = useState<RowFilter[]>([]);
+  // A row passes when any one of the conditions holds, instead of all of them.
+  const [matchAny, setMatchAny] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterFocus, setFilterFocus] = useState(0);
   const [loaded, setPage] = useState<RowPage | null>(null);
@@ -117,7 +119,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     const id = ++request.current;
     setLoad({ status: "loading" });
     ipc
-      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort, filters })
+      .fetchRows(tab.connectionId, tab.table, { offset, limit, sort, filters, matchAny })
       .then((rows) => {
         if (id !== request.current) return; // a newer request superseded this one
         setPage(rows);
@@ -135,7 +137,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       });
     // `page` is intentionally not a dependency: it only gates the first load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, filters, reloads, outside]);
+  }, [wanted, tab.connectionId, tab.table, offset, limit, sort, filters, matchAny, reloads, outside]);
 
   // A closed session invalidates what is on screen.
   useEffect(() => {
@@ -167,13 +169,13 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
       if (countJob.current) void ipc.cancelJob(countJob.current);
       countJob.current = null;
     };
-  }, [tab.connectionId, tab.table, filters, reloads, outside, connected]);
+  }, [tab.connectionId, tab.table, filters, matchAny, reloads, outside, connected]);
   const countRows = () => {
     const job = crypto.randomUUID();
     countJob.current = job;
     setCount({ status: "counting" });
     ipc
-      .countRows(tab.connectionId, tab.table, filters, job)
+      .countRows(tab.connectionId, tab.table, filters, matchAny, job)
       .then((result) => {
         if (countJob.current !== job) return;
         countJob.current = null;
@@ -193,12 +195,15 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     setOffset(0);
   };
   const changeFilters = useCallback(
-    (next: RowFilter[]) => {
-      if (sameFilters(next, filters)) return;
+    (next: RowFilter[], any = matchAny) => {
+      // One condition is the same either way.
+      const nextAny = any && next.length > 1;
+      if (sameFilters(next, filters) && nextAny === matchAny) return;
       setFilters(next);
+      setMatchAny(nextAny);
       setOffset(0);
     },
-    [filters],
+    [filters, matchAny],
   );
   const openFilter = useCallback(() => {
     setView("data");
@@ -416,6 +421,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
         <FilterBar
           columns={page.columns}
           applied={filters}
+          appliedAny={matchAny}
           onApply={changeFilters}
           onClose={() => setFilterOpen(false)}
           locked={locked}
@@ -574,7 +580,7 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
               </span>
               {filters.length > 0 && (
                 <span data-filter-status className="shrink-0 font-medium text-accent-text">
-                  · {t("filter.applied", { count: filters.length })}
+                  · {t(matchAny ? "filter.appliedAny" : "filter.applied", { count: filters.length })}
                 </span>
               )}
               {count.status === "done" && (

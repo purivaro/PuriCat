@@ -140,6 +140,64 @@ async fn filter_checks(session: &Session, items: &TableRef) {
     assert!(p.has_more && p.rows.len() == 1);
     assert_eq!(cell(&p, 0, "name").as_deref(), Some("third"));
 
+    // A list is so many "is": typed, exact, whatever the spelling of a number.
+    let among = |column: &str, op: &str, values: &[&str]| json!([{"column": column, "op": op, "values": values}]);
+    leaves!(among("id", "in", &["1", "3", "99"]), [THAI, "third"]);
+    leaves!(
+        among("name", "in", &["second", "third", "nobody"]),
+        ["second", "third"]
+    );
+    leaves!(
+        among("big", "in", &["9007199254740993", "-1"]),
+        [THAI, "third"]
+    );
+    leaves!(among("big", "in", &["9007199254740992"]), []);
+    leaves!(among("price", "in", &[".50"]), ["third"]);
+    leaves!(among("doc", "in", &["{\"a\": 1}", "{}"]), [THAI]);
+    // "Is not one of" keeps the rows that hold NULL, as "is not" does.
+    leaves!(among("price", "notIn", &["0.5"]), [THAI, "second"]);
+    leaves!(among("note", "notIn", &["short", "x"]), [THAI, "second"]);
+    // Between: both ends included; a number, a moment and text.
+    leaves!(among("price", "between", &["0.5", "1"]), ["third"]);
+    leaves!(among("price", "between", &["0.51", "1"]), []);
+    leaves!(among("id", "between", &["2", "3"]), ["second", "third"]);
+    leaves!(
+        among("created", "between", &["2026-01-01", "2026-01-03"]),
+        [THAI]
+    );
+    leaves!(
+        among("created", "between", &["2026-01-03", "2026-01-04"]),
+        []
+    );
+    leaves!(among("name", "between", &["s", "t"]), ["second"]);
+    // The empty text is not NULL: no row holds it yet, and "is not empty" leaves NULL out.
+    leaves!(is("note", "isEmpty"), []);
+    leaves!(is("note", "isNotEmpty"), [THAI, "third"]);
+
+    // Any one of the conditions, instead of all of them; the count agrees with the page.
+    let two = json!([{"column": "price", "op": "isNotNull"}, {"column": "note", "op": "equals", "value": "short"}]);
+    let any: PageRequest = serde_json::from_value(json!({
+        "offset": 0, "limit": 100, "matchAny": true, "filters": two,
+    }))
+    .unwrap();
+    let p = session.fetch_rows(items, &any).await.unwrap();
+    let passed: Vec<_> = (0..p.rows.len())
+        .map(|r| cell(&p, r, "name").unwrap())
+        .collect();
+    assert_eq!(passed, [THAI, "third"]);
+    let idle = std::sync::atomic::AtomicBool::new(false);
+    let conditions: Vec<puricat_core::db::filter::Filter> = serde_json::from_value(two).unwrap();
+    let counted = |match_any: bool| session.count_rows(items, &conditions, match_any, &idle);
+    assert_eq!(counted(true).await.unwrap().count, 2);
+    assert_eq!(counted(false).await.unwrap().count, 1);
+    let or_null =
+        json!([{"column": "id", "op": "in", "values": ["1"]}, {"column": "doc", "op": "isNull"}]);
+    let any: PageRequest = serde_json::from_value(json!({
+        "offset": 0, "limit": 100, "matchAny": true, "filters": or_null,
+    }))
+    .unwrap();
+    assert_eq!(session.fetch_rows(items, &any).await.unwrap().rows.len(), 3);
+
     // Refused before anything is sent.
     for filters in [
         one("nope", "equals", "1"),
@@ -147,6 +205,12 @@ async fn filter_checks(session: &Session, items: &TableRef) {
         one("payload", "contains", "00"),
         one("doc", "greater", "1"),
         is("id", "equals"),
+        among("id", "in", &[]),
+        among("payload", "in", &["00"]),
+        among("id", "between", &["1"]),
+        among("doc", "between", &["a", "b"]),
+        among("flag", "between", &["0", "1"]),
+        is("price", "isEmpty"),
     ] {
         assert!(
             matches!(
@@ -163,6 +227,49 @@ async fn filter_checks(session: &Session, items: &TableRef) {
     assert!(names(session, items, one("created", "equals", "garbage"))
         .await
         .is_err());
+    assert!(names(session, items, among("id", "in", &["1", "abc"]))
+        .await
+        .is_err());
+    assert!(names(
+        session,
+        items,
+        among("created", "between", &["2026-01-01", "garbage"])
+    )
+    .await
+    .is_err());
+}
+
+/// The empty text, found: one row is given it for the test and gets its NULL back.
+async fn empty_text_checks(session: &Session, items: &TableRef) {
+    use serde_json::json;
+    let place = match &items.schema {
+        Some(schema) => format!("{schema}.{}", items.name),
+        None => items.name.clone(),
+    };
+    let options = serde_json::from_value(json!({ "maxRows": 10, "changeLimit": null })).unwrap();
+    let idle = std::sync::atomic::AtomicBool::new(false);
+    let mut console = session.open_console(Some(&items.database)).await.unwrap();
+    let set = |value: &str| format!("UPDATE {place} SET note = {value} WHERE name = 'second'");
+    let outcome = console.run(&set("''"), &options, &idle).await.unwrap();
+    assert_eq!(outcome.statements[0].rows_affected, Some(1));
+    let empty = names(session, items, json!([{"column": "note", "op": "isEmpty"}])).await;
+    let not_empty = names(
+        session,
+        items,
+        json!([{"column": "note", "op": "isNotEmpty"}]),
+    )
+    .await;
+    let not_null = names(
+        session,
+        items,
+        json!([{"column": "note", "op": "isNotNull"}]),
+    )
+    .await;
+    let outcome = console.run(&set("NULL"), &options, &idle).await.unwrap();
+    assert_eq!(outcome.statements[0].rows_affected, Some(1));
+    assert_eq!(empty.unwrap(), ["second"]);
+    assert_eq!(not_empty.unwrap(), [THAI, "third"]);
+    assert_eq!(not_null.unwrap(), [THAI, "second", "third"]);
 }
 
 /// The exact count: of the table, and of the rows a filter leaves.
@@ -174,7 +281,7 @@ async fn count_checks(session: &Session, items: &TableRef) {
         async move {
             let filters: Vec<puricat_core::db::filter::Filter> =
                 serde_json::from_value(filters).unwrap();
-            session.count_rows(items, &filters, idle).await
+            session.count_rows(items, &filters, false, idle).await
         }
     };
     let all = names(session, items, json!([])).await.unwrap().len() as u64;
@@ -191,7 +298,7 @@ async fn count_checks(session: &Session, items: &TableRef) {
         ..items.clone()
     };
     assert!(matches!(
-        session.count_rows(&missing, &[], &idle).await,
+        session.count_rows(&missing, &[], false, &idle).await,
         Err(Error::NotFound(_))
     ));
 }
@@ -207,7 +314,7 @@ async fn count_is_stopped(session: &Session, items: &TableRef) {
         later.store(true, Ordering::Relaxed);
     });
     let started = std::time::Instant::now();
-    let outcome = session.count_rows(items, &[], &stop).await;
+    let outcome = session.count_rows(items, &[], false, &stop).await;
     assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
@@ -464,6 +571,7 @@ async fn mysql_body(t: Target, db: String) {
     ));
 
     filter_checks(&session, &items).await;
+    empty_text_checks(&session, &items).await;
     count_checks(&session, &items).await;
     admin.execute("LOCK TABLES items WRITE").await.unwrap();
     count_is_stopped(&session, &items).await;
@@ -749,6 +857,7 @@ async fn postgres_body(t: Target, db: String) {
     ));
 
     filter_checks(&session, &items).await;
+    empty_text_checks(&session, &items).await;
     count_checks(&session, &items).await;
     // A count that would never end. (Not a lock on the table: reading the table's
     // structure, which comes first and cannot be interrupted, would wait for that lock.)

@@ -155,7 +155,7 @@ The tables above describe the browse path, where PuriCat writes the `SELECT`. In
 
 ## Row filter
 
-A table tab can be narrowed with conditions on its columns; all of them must hold. The conditions become one `WHERE` clause in the page query. Every value is a bind parameter, and a column name must exist in the table's metadata before it is quoted (`db::filter`).
+A table tab can be narrowed with conditions on its columns. A row must meet all of them or — with two conditions or more and "Match: any" — any one. The conditions become one `WHERE` clause in the page query. Every value is a bind parameter, and a column name must exist in the table's metadata before it is quoted (`db::filter`).
 
 | Condition | MySQL | PostgreSQL |
 |---|---|---|
@@ -164,14 +164,28 @@ A table tab can be narrowed with conditions on its columns; all of them must hol
 | `=`, `≠` on JSON and other types (uuid, enum, array, …) | JSON: the text the grid shows, `CAST(col AS CHAR)`. Spatial columns: refused (NULL tests only) — the grid shows their WKT text, the column itself is binary | The text the grid shows: `col::text` |
 | `>`, `≥`, `<`, `≤` on those types | Refused | Refused |
 | contains, does not contain, starts with, ends with | `LIKE … ESCAPE '!'` on a text column itself (its own collation), on `CAST(col AS CHAR)` otherwise; refused on spatial columns | `ILIKE … ESCAPE '!'` on a text column itself, on `col::text` otherwise: always case-insensitive |
+| is one of, is not one of (a list of 1 to 200 values) | So many `=`: each value is checked and bound exactly as `=` would bind it. `col IN (CAST(? AS SIGNED / UNSIGNED), …)` on an integer, `col IN (?, …)` on text, `CAST(col AS CHAR) IN (?, …)` on JSON and on a `FLOAT`. Refused on spatial columns | `col IN ($n::<bare type>, …)`; `col::text IN ($n, …)` on JSON and other types. The placeholders are numbered through every condition and list |
+| is between (two values, both included) | Number, date / time and text columns: `col BETWEEN a AND b`, each end typed as for `>` and `<`. Refused on boolean, JSON and other types | The same, each end as `$n::<bare type>` |
+| is empty, is not empty | Text columns only: `col = ''`, `col <> ''`. Refused on every other kind of column | The same |
 | is NULL, is not NULL | Any column, including binary | Any column, including binary |
 | Anything else on a binary column | Refused | Refused |
 
 - `%`, `_` and `!` in a search text are taken literally.
-- "≠" and "does not contain" keep the rows whose value is NULL (`NOT (a <=> b)` on MySQL, `IS DISTINCT FROM` on PostgreSQL, `… OR col IS NULL` for the text search). A person reading the grid sees an empty cell as "not X".
-- **A value the column cannot hold is an error, never a silent result.** PostgreSQL refuses the cast itself and its message is shown. MySQL would read text that is not a number as `0` (and show the rows holding 0) and text that is not a date as NULL (and show no rows), each with only a warning, so PuriCat checks these itself before sending anything: a number must look like one, and a date or time must be complete (`2026-01-31`, `2026-01-31 13:45:00`, `13:45:00`). To find part of a date, use "starts with" or "contains".
+- "≠", "is not one of" and "does not contain" keep the rows whose value is NULL (`NOT (a <=> b)` on MySQL, `IS DISTINCT FROM` on PostgreSQL, `(col NOT IN (…) OR col IS NULL)` for the list, `… OR col IS NULL` for the text search). A person reading the grid sees an empty cell as "not X".
+- The empty text is not NULL. "Is empty" finds the rows that hold a text of no characters, not the NULL ones; "is not empty" (`col <> ''`) leaves the NULL rows out as well, and the bar says so beside the condition.
+- **A value the column cannot hold is an error, never a silent result.** PostgreSQL refuses the cast itself and its message is shown. MySQL would read text that is not a number as `0` (and show the rows holding 0) and text that is not a date as NULL (and show no rows), each with only a warning, so PuriCat checks these itself before sending anything: a number must look like one, and a date or time must be complete (`2026-01-31`, `2026-01-31 13:45:00`, `13:45:00`). To find part of a date, use "starts with" or "contains". Every value of a list and both ends of a range go through the same checks, and the message names the value that was refused.
 - Filters do not use an index when they compare the shown text (JSON, uuid, enum, the text searches on non-text columns). On a large table an equality filter on a `uuid` column scans the table.
-- At most 20 conditions. They are joined with AND only; there is no OR, no list of values and no free `WHERE` text. Use a query tab for those.
+- **All or any.** Conditions are joined with `AND`. With "Match: any" (offered once the bar holds two conditions) each condition is put in its own parentheses and they are joined with `OR`; one condition is the same either way. The page and the count are sent the same choice. On PostgreSQL, a list, a text search and a NULL test under "any" read:
+
+  ```sql
+  WHERE ("id" IN ($1::bigint, $2::bigint)) OR (("doc"::text NOT ILIKE $3 ESCAPE '!' OR "doc" IS NULL)) OR ("na`me" IS NULL)
+  ```
+
+  There are no brackets or nested groups — all of the conditions or any one of them, nothing in between — no NOT on a group and no free `WHERE` text. Use a query tab for those.
+- **Limits.** At most 20 conditions, 200 values in one list, and 1,000 bound values in one request over all its conditions; more is refused before anything is sent. An empty list, and a range without exactly two values, are refused too.
+- **The list box.** Values are separated by commas or line breaks. Spaces around a value are dropped, so are empty entries, and a value written twice is sent once. Double quotes keep a value as written, commas and spaces included; a quote inside them is written twice, and `""` is the empty text. A pasted text that has line breaks — a column copied from a spreadsheet — is turned into that form in the box. The box counts the values and says "more than 200" when the list is too long; such a list is still refused by the backend if it is sent.
+- **A condition switched off.** The checkbox in front of a condition takes it out without deleting it: it is not in the `WHERE` clause, not in the number of conditions the footer shows, and not in a count. It lives in the open bar only — hiding the bar drops it, as it drops a condition that is not written yet.
+- **From the grid.** "Hide rows with this value" in a cell's menu adds `≠` that value (rows that hold NULL stay), or "is not NULL" on a NULL cell. With several cells of one column selected, "Show rows with these N values" adds "is one of" with the different values of those cells; NULL cells and rows that are not saved yet are left out. It is greyed out, with the reason as its tooltip, on a binary column, when a selected cell shows only part of its value, when the cells hold NULL only, and for more than 200 different values. Both add to the conditions already applied, as "Filter by this value" does.
 - Sorting and paging apply to the rows that are left. The row estimate in the footer is still the whole table's. The number of matching rows is counted when asked for ("Count matches"): `SELECT COUNT(*)` with the same `WHERE` clause and parameters as the page, on a connection of its own so that it can be interrupted (`KILL QUERY` on MySQL, `pg_cancel_backend` on PostgreSQL, the connection's own stop flag on SQLite). Reading the table's structure comes first and cannot be interrupted: if the table is locked exclusively by another session, the count waits there, as a page does.
 
 ## Writing values
@@ -576,7 +590,7 @@ SQLite gives a column an *affinity* from its declared type and lets any value in
 
 ### Row filter
 
-The same operators as the other engines. Comparison is by the column's affinity: text sent for a number column meets it as a number. "Is not" keeps NULL rows (`IS NOT`). Text search uses `LIKE … ESCAPE '!'`, which in SQLite ignores the case of ASCII letters only.
+The same operators as the other engines, with "all" or "any" of the conditions as there. Comparison is by the column's affinity: text sent for a number column meets it as a number. "Is not" keeps NULL rows (`IS NOT`). A list is `col IN (?, …)` without casts, and "is not one of" keeps NULL rows as on the servers; every value of a list or a range for a number column must be a number. Dates are text there, so a range of dates compares as text. Text search uses `LIKE … ESCAPE '!'`, which in SQLite ignores the case of ASCII letters only.
 
 ### Writing
 
