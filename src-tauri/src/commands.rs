@@ -296,6 +296,41 @@ pub async fn count_rows(
     result
 }
 
+/// Find in database, one table: per column, the rows that hold `text`. Reads the whole
+/// table on the server; read-only. `cancel_job` interrupts it.
+#[tauri::command]
+pub async fn find_in_table(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+    text: String,
+    mode: puricat_core::db::find::FindMode,
+    job: String,
+) -> Result<puricat_core::db::find::TableFind> {
+    let session = state.session(&id).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = session.find_in_table(&table, &text, mode, &stop).await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
+}
+
+/// Find in database, names: tables, views and columns whose name contains `text`.
+#[tauri::command]
+pub async fn find_names(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    text: String,
+) -> Result<Vec<puricat_core::db::find::NameHit>> {
+    state
+        .session(&id)
+        .await?
+        .find_names(&database, schema.as_deref(), &text)
+        .await
+}
+
 /// The whole value of one cell that a page shows shortened; the row by its primary key.
 #[tauri::command]
 pub async fn fetch_cell(

@@ -205,6 +205,15 @@ export function TableTabView({ tab, active }: { tab: TableTab; active: boolean }
     },
     [filters, matchAny],
   );
+  // Filters sent from outside (Find in database): shown once, then they are the tab's own.
+  const preset = useWorkspace((s) => s.presets[tab.id]);
+  useEffect(() => {
+    if (!preset) return;
+    useWorkspace.getState().presetTaken(tab.id);
+    setView("data");
+    changeFilters(preset.filters, preset.matchAny);
+    setFilterOpen(true);
+  }, [preset, tab.id, changeFilters]);
   const openFilter = useCallback(() => {
     setView("data");
     setFilterOpen(true);

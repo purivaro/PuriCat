@@ -46,6 +46,8 @@ pub fn run() {
             commands::describe_table,
             commands::fetch_rows,
             commands::count_rows,
+            commands::find_in_table,
+            commands::find_names,
             commands::fetch_cell,
             commands::plan_changes,
             commands::apply_changes,

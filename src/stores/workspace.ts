@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { ipc } from "../lib/ipc";
-import type { ObjectKind, TableRef } from "../lib/types";
+import type { ObjectKind, RowFilter, TableRef } from "../lib/types";
 
 export interface TableTab {
   id: string;
@@ -111,6 +111,11 @@ interface WorkspaceState {
   reloadTable: (connectionId: string, table: TableRef) => void;
   /** A table was renamed or dropped: its tab closes. */
   tableGone: (connectionId: string, table: TableRef) => void;
+  /** Filters a table tab is to show when it next renders, by tab id; the tab takes them once. */
+  presets: Record<string, { filters: RowFilter[]; matchAny: boolean }>;
+  /** Open a table (or bring its tab to the front) showing only the rows `filters` leave. */
+  openTableFiltered: (connectionId: string, table: TableRef, objectKind: ObjectKind, filters: RowFilter[], matchAny: boolean) => void;
+  presetTaken: (id: string) => void;
   /** Close even if dirty (after the user confirmed). */
   forceClose: (id: string) => void;
   cancelClose: () => void;
@@ -313,5 +318,17 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       set((s) => ({ reloads: { ...s.reloads, [id]: (s.reloads[id] ?? 0) + 1 } }));
     },
     tableGone: (connectionId, table) => commit(closeTabIn(get().tabs, get().activeId, tableTabId(connectionId, table))),
+    presets: {},
+    openTableFiltered: (connectionId, table, objectKind, filters, matchAny) => {
+      const id = tableTabId(connectionId, table);
+      set((s) => ({ presets: { ...s.presets, [id]: { filters, matchAny } } }));
+      get().openTable(connectionId, table, objectKind);
+    },
+    presetTaken: (id) =>
+      set((s) => {
+        const presets = { ...s.presets };
+        delete presets[id];
+        return { presets };
+      }),
   };
 });

@@ -38,6 +38,8 @@ interface UiState {
   newTableIn: { connection: ConnectionView; database: string; schema: string | null } | null;
   /** The connection whose server sessions are open. */
   sessionsOf: ConnectionView | null;
+  /** Find in database: where to look (on PostgreSQL a schema, or `null` for every schema of the database). */
+  findIn: { connection: ConnectionView; database: string; schema: string | null } | null;
   /** The database whose backup dialog is open. */
   backupOf: { connection: ConnectionView; database: string } | null;
   paletteOpen: boolean;
@@ -50,6 +52,7 @@ interface UiState {
   askViewTask: (task: ViewTask | null) => void;
   askUsers: (connection: ConnectionView | null) => void;
   askSessions: (connection: ConnectionView | null) => void;
+  askFind: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askAlterTable: (target: { connection: ConnectionView; table: TableRef } | null) => void;
   askNewTable: (target: { connection: ConnectionView; database: string; schema: string | null } | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
@@ -65,6 +68,7 @@ export const useUi = create<UiState>((set) => ({
   viewTask: null,
   usersOf: null,
   sessionsOf: null,
+  findIn: null,
   newTableIn: null,
   alterOf: null,
   backupOf: null,
@@ -78,6 +82,7 @@ export const useUi = create<UiState>((set) => ({
   askViewTask: (viewTask) => set({ viewTask }),
   askUsers: (usersOf) => set({ usersOf }),
   askSessions: (sessionsOf) => set({ sessionsOf }),
+  askFind: (findIn) => set({ findIn }),
   askNewTable: (newTableIn) => set({ newTableIn }),
   askAlterTable: (alterOf) => set({ alterOf }),
   askBackup: (backupOf) => set({ backupOf }),

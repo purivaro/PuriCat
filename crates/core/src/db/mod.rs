@@ -7,6 +7,7 @@ pub mod console;
 pub mod ddl;
 pub mod export;
 pub mod filter;
+pub mod find;
 pub mod ident;
 pub mod monitor;
 mod mysql;
@@ -982,7 +983,6 @@ impl Session {
         match_any: bool,
         stop: &std::sync::atomic::AtomicBool,
     ) -> Result<RowCount> {
-        use std::sync::atomic::Ordering;
         let started = Instant::now();
         let meta = self.describe_table(table).await?;
         if meta.columns.is_empty() {
@@ -991,9 +991,31 @@ impl Session {
         let engine = self.engine();
         let filter = filter::where_clause(engine, &meta, filters, match_any)?;
         let sql = count_sql(engine, table, &filter)?;
-        let mut console = self.open_reader(Some(&table.database)).await?;
+        let answer = self
+            .scalar_until_stopped(&table.database, &sql, &filter.params, stop)
+            .await?;
+        let count = answer.and_then(|t| t.parse().ok()).ok_or_else(|| {
+            Error::Database("The server did not answer the count with a number".into())
+        })?;
+        Ok(RowCount {
+            count,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// One text value from `sql`, on a connection of its own, so that setting `stop`
+    /// interrupts the statement on the server (the call then fails with `Conflict`).
+    async fn scalar_until_stopped(
+        &self,
+        database: &str,
+        sql: &str,
+        params: &[String],
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<String>> {
+        use std::sync::atomic::Ordering;
+        let mut console = self.open_reader(Some(database)).await?;
         let canceller = console.canceller();
-        let query = console.text_scalar(&sql, &filter.params);
+        let query = console.text_scalar(sql, params);
         tokio::pin!(query);
         let mut asked = false;
         let answer = loop {
@@ -1007,19 +1029,82 @@ impl Session {
                 }
             }
         };
-        let count = match answer {
-            Ok(text) => text.and_then(|t| t.parse().ok()).ok_or_else(|| {
-                Error::Database("The server did not answer the count with a number".into())
-            })?,
+        match answer {
+            Ok(text) => Ok(text),
             Err(e) if asked && console::is_cancellation(&e) => {
-                return Err(Error::Conflict("Cancelled".into()))
+                Err(Error::Conflict("Cancelled".into()))
             }
-            Err(e) => return Err(Error::database(e)),
+            Err(e) => Err(Error::database(e)),
+        }
+    }
+
+    /// Find in database, one table: per column, the rows that hold `text`, and the rows in
+    /// which any column does. Reads the whole table once; read-only. `stop` interrupts it.
+    pub async fn find_in_table(
+        &self,
+        table: &TableRef,
+        text: &str,
+        mode: find::FindMode,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<find::TableFind> {
+        let started = Instant::now();
+        find::check_text(text)?;
+        let meta = self.describe_table(table).await?;
+        if meta.columns.is_empty() {
+            return Err(Error::NotFound(format!("Table {}", table.name)));
+        }
+        let Some(find::TableSearch {
+            sql,
+            params,
+            columns,
+        }) = find::table_sql(self.engine(), table, &meta, text, mode)?
+        else {
+            return Ok(find::TableFind {
+                searched: Vec::new(),
+                hits: Vec::new(),
+                rows: 0,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
         };
-        Ok(RowCount {
-            count,
+        let answer = self
+            .scalar_until_stopped(&table.database, &sql, &params, stop)
+            .await?;
+        let (hits, rows) = find::read_counts(columns.clone(), answer.as_deref())?;
+        Ok(find::TableFind {
+            searched: columns,
+            hits,
+            rows,
             elapsed_ms: started.elapsed().as_millis() as u64,
         })
+    }
+
+    /// Find in database, names: the tables, views and columns of `database` (on PostgreSQL
+    /// of `schema`, or of every schema that is not the server's own) whose name contains
+    /// `text`, whatever the case.
+    pub async fn find_names(
+        &self,
+        database: &str,
+        schema: Option<&str>,
+        text: &str,
+    ) -> Result<Vec<find::NameHit>> {
+        let pattern = find::name_pattern(text)?;
+        let sql = find::names_sql(self.engine())?;
+        let rows = match self {
+            Session::MySql(s) => {
+                let db = Some(database.to_string());
+                s.query_text(sql, &[db.clone(), Some(pattern.clone()), db, Some(pattern)])
+                    .await?
+            }
+            Session::Postgres(s) => {
+                s.query_text(database, sql, &[schema.map(str::to_string), Some(pattern)])
+                    .await?
+            }
+            Session::Sqlite(s) => {
+                s.query_text(sql, &[Some(pattern.clone()), Some(pattern)])
+                    .await?
+            }
+        };
+        Ok(find::read_names(rows))
     }
 
     /// Read one cell in full: the row addressed by its complete primary key. Read-only.

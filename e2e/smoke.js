@@ -1700,6 +1700,55 @@
     await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
     await dbMenu("Demo MySQL", "puricat_e2e", "Refresh");
     await waitFor(() => !treeRow("e2e_new_table"), "the dropped table gone from the explorer", 15000);
+
+    // Find in database: a value in any table (each read once on the server), a result opened
+    // as its table filtered to the rows that were counted; an exact value; then names.
+    const findDialog = () => document.querySelector("[data-find-dialog]");
+    const findTables = () => all("[data-find-table]").map((r) => r.dataset.findTable);
+    const findDone = () => findDialog()?.querySelector('[data-find-status="done"]');
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await dbMenu("Demo MySQL", "puricat_e2e", "Find in database…");
+    await waitFor(() => findDialog()?.querySelector("[data-find-text]"), "the find dialog");
+    await type(findDialog().querySelector("[data-find-text]"), "ข้าวหอม");
+    await click(findDialog().querySelector("[data-find-start]"), "find");
+    await waitFor(findDone, "the search to finish", 30000);
+    const foundTables = findTables();
+    const foundColumns = all("[data-find-column]").map((b) => b.textContent.replace(/\s+/g, " ").trim());
+    const findSummary = findDone().textContent.trim();
+    await stage("find-data", { foundTables, foundColumns, findSummary });
+    if (foundTables.join() !== "customers,products") throw new Error(`found in ${foundTables}`);
+    if (foundColumns.join("|") !== "name · 1|title · 1") throw new Error(`found in the columns ${foundColumns.join("|")}`);
+    await click(findDialog().querySelector('[data-find-table="products"] [data-find-column="title"]'), "open products where the title holds it");
+    await waitFor(() => !findDialog(), "the find dialog to close");
+    await waitFor(
+      () => frontTab()?.title.startsWith("products") && activePanel()?.querySelector("[data-filter-bar]") && dataRows().length === 1 && gridCells().join(" ").includes("ข้าวหอมมะลิ"),
+      "products filtered to the row found",
+      20000,
+    );
+    const findOpened = { title: frontTab().title, rows: dataRows().length, footer: footer() };
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the products tab");
+    // The place's last search comes back with the dialog; then an exact value.
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await dbMenu("Demo MySQL", "puricat_e2e", "Find in database…");
+    await waitFor(() => findDialog()?.querySelector('[data-find-table="customers"]'), "the last search kept");
+    await setChoice(findDialog().querySelector("[data-find-mode]"), "equals");
+    await type(findDialog().querySelector("[data-find-text]"), "245.5");
+    await click(findDialog().querySelector("[data-find-start]"), "find exactly");
+    await waitFor(() => findDone() && findDialog().querySelector('[data-find-table="products"] [data-find-column="price"]'), "the exact value found", 30000);
+    const exactColumns = all('[data-find-table="products"] [data-find-column]').map((b) => b.dataset.findColumn);
+    if (exactColumns.join() !== "price") throw new Error(`245.5 found in products.${exactColumns}`);
+    // Names: the tables and columns whose name holds the text.
+    await click(exact("[data-find-dialog] [role=\"radio\"]", "Names"), "look in names");
+    await type(findDialog().querySelector("[data-find-text]"), "ORDER_N");
+    await click(findDialog().querySelector("[data-find-start]"), "find names");
+    const namesFound = (await waitFor(() => findDialog().querySelector('[data-find-name="orders"]'), "the orders table by its column's name", 15000)).textContent.replace(/\s+/g, " ").trim();
+    const nameRows = all("[data-find-name]").map((r) => r.dataset.findName);
+    await stage("find-names", { findOpened, exactColumns, namesFound, nameRows });
+    if (nameRows.join() !== "orders" || !namesFound.includes("order_no")) throw new Error(`names: ${nameRows} / ${namesFound}`);
+    await click(findDialog().querySelector('[data-find-name="orders"]'), "open orders");
+    await waitFor(() => !findDialog() && frontTab()?.title.startsWith("orders"), "the orders tab in front");
+    log.push({ stage: "find-done", foundTables, findOpened, exactColumns, nameRows });
+
     await click(all('[role="tab"]').find((t) => t.title === mysqlQueryTitle), "back to the MySQL query tab");
     await waitFor(() => frontTab()?.title === mysqlQueryTitle && sqlTab()?.__editor, "the MySQL query tab in front");
     log.push({ stage: "new-table-done", createdColumns });

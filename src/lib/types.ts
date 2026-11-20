@@ -683,6 +683,28 @@ export interface IndexInfo {
   primary: boolean;
 }
 
+export type FindMode = "contains" | "equals" | "startsWith";
+
+/** What one table holds of the value looked for. */
+export interface TableFind {
+  /** The columns it was looked for in. */
+  searched: string[];
+  /** The columns that hold it, with their rows: only those with one or more. */
+  hits: { column: string; rows: number }[];
+  /** Rows in which any searched column holds it. */
+  rows: number;
+  elapsedMs: number;
+}
+
+export interface NameHit {
+  schema: string | null;
+  table: string;
+  kind: ObjectKind;
+  /** `null`: the table's own name matched. */
+  column: string | null;
+  dataType: string | null;
+}
+
 export interface ColumnDefinition {
   name: string;
   columnType: string;
