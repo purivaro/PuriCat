@@ -26,6 +26,7 @@ import {
   StarOff,
   Table2,
   TerminalSquare,
+  TextSearch,
   Trash2,
   Unplug,
   UsersRound,
@@ -352,6 +353,14 @@ function Schemas({ connection, database, depth, query }: Omit<ObjectsProps, "sch
               }}
               menu={
                 <>
+                  {!schema.system && (
+                    <ContextMenu.Item
+                      className={menuItemClass}
+                      onSelect={() => useUi.getState().askFind({ connection, database, schema: schema.name })}
+                    >
+                      <TextSearch className="size-3.5" /> {t("find.menu")}
+                    </ContextMenu.Item>
+                  )}
                   {/* The server's own schemas are shown, not added to. */}
                   {!schema.system && (
                     <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewTable({ connection, database, schema: schema.name })}>
@@ -449,6 +458,11 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                   <ContextMenu.Item className={menuItemClass} onSelect={() => openSqlFile(connection.id, db.name)}>
                     <FileCode2 className="size-3.5" /> {t("explorer.openSqlFile")}
                   </ContextMenu.Item>
+                  {!db.system && (
+                    <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askFind({ connection, database: db.name, schema: null })}>
+                      <TextSearch className="size-3.5" /> {t("find.menu")}
+                    </ContextMenu.Item>
+                  )}
                   {/* Where a database holds its views itself; on PostgreSQL a schema does. */}
                   {!hasSchemas && !db.system && connection.engine !== "sqlite" && (
                     <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askNewTable({ connection, database: db.name, schema: null })}>

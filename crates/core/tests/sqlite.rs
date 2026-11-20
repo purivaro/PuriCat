@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use puricat_core::db::console::{Console, RunOptions, RunOutcome, Status};
+use puricat_core::db::find::FindMode;
 use puricat_core::db::script::Kind;
 use puricat_core::db::smart::RowStatus;
 use puricat_core::db::{ObjectKind, Session, TableRef, ValueKind};
@@ -1912,4 +1913,60 @@ async fn view_form() {
     }
     guarded.close().await;
     session.close().await;
+}
+
+#[tokio::test]
+async fn find_in_database() {
+    let scratch = Scratch::new(FIXTURE).await;
+    let session = open(&scratch).await;
+    let stop = AtomicBool::new(false);
+    let hits = |f: &puricat_core::db::find::TableFind| {
+        f.hits
+            .iter()
+            .map(|h| (h.column.clone(), h.rows))
+            .collect::<Vec<_>>()
+    };
+    // LIKE is case-insensitive for ASCII; Thai and literal wildcards are found as typed.
+    let tea = session
+        .find_in_table(&table("items"), "TEA", FindMode::Contains, &stop)
+        .await
+        .unwrap();
+    assert_eq!((hits(&tea), tea.rows), (vec![("name".to_string(), 1)], 1));
+    assert!(
+        !tea.searched.contains(&"photo".to_string()),
+        "binary is not searched: {:?}",
+        tea.searched
+    );
+    let thai = session
+        .find_in_table(&table("items"), "กาแฟ", FindMode::Contains, &stop)
+        .await
+        .unwrap();
+    assert_eq!(hits(&thai), [("name".to_string(), 1)]);
+    let off = session
+        .find_in_table(&table("items"), "50%", FindMode::Contains, &stop)
+        .await
+        .unwrap();
+    assert_eq!(hits(&off), [("name".to_string(), 1)]);
+    // An exact number meets a DECIMAL column as a number.
+    let seven = session
+        .find_in_table(&table("items"), "7", FindMode::Equals, &stop)
+        .await
+        .unwrap();
+    assert_eq!(hits(&seven), [("price".to_string(), 1)]);
+    // Names: columns, and a view by its own name.
+    let price = session.find_names("main", None, "PRIC").await.unwrap();
+    assert_eq!(
+        price
+            .iter()
+            .map(|n| (n.table.as_str(), n.column.as_deref()))
+            .collect::<Vec<_>>(),
+        [("items", Some("price"))]
+    );
+    let view = session.find_names("main", None, "cheap").await.unwrap();
+    assert_eq!(
+        view.iter()
+            .map(|n| (n.table.as_str(), n.kind, n.column.is_none()))
+            .collect::<Vec<_>>(),
+        [("cheap", ObjectKind::View, true)]
+    );
 }

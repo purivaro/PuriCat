@@ -190,7 +190,7 @@ fn sides(
     })
 }
 
-fn condition(
+pub(crate) fn condition(
     engine: Engine,
     col: &ColumnMeta,
     filter: &Filter,

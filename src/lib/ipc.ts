@@ -51,6 +51,9 @@ import type {
   NewTable,
   IndexInfo,
   ColumnDefinition,
+  FindMode,
+  NameHit,
+  TableFind,
   ForeignKeyInfo,
   AlterTable,
   EndProcess,
@@ -123,6 +126,11 @@ export const ipc = {
     return invoke<ApplyResult>("apply_paste", { id, table, request, expected, job, onProgress: channel });
   },
   cancelJob: (job: string) => invoke<void>("cancel_job", { job }),
+  /** Reads the whole table on the server; `cancelJob(job)` interrupts it (the call then fails with `conflict`). */
+  findInTable: (id: string, table: TableRef, text: string, mode: FindMode, job: string) =>
+    invoke<TableFind>("find_in_table", { id, table, text, mode, job }),
+  findNames: (id: string, database: string, schema: string | null, text: string) =>
+    invoke<NameHit[]>("find_names", { id, database, schema, text }),
   describeTable: (id: string, table: TableRef) => invoke<TableColumns>("describe_table", { id, table }),
   analyzeSql: (id: string, sql: string) => invoke<SqlStatement[]>("analyze_sql", { id, sql }),
   runSql: (
