@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implemented for MySQL and PostgreSQL. Verified in the backend on both engines for single-column and composite keys; through the UI for UPSERT on MySQL only ([TESTING.md](../../TESTING.md)). SQL Server has no implementation. Builds on [ADR 0013](0013-staged-edits-and-optimistic-saves.md).
+Accepted. Implemented for MySQL and PostgreSQL. Verified in the backend on both engines for single-column and composite keys; through the UI for UPSERT on MySQL only ([TESTING.md](../../TESTING.md)). SQL Server has no implementation. Builds on [ADR 0013](0013-staged-edits-and-optimistic-saves.md). A file of more than 10,000 rows is imported in batches since 2026-11-20 ([ADR 0027](0027-large-imports-in-batches.md)); this record still describes every run within the limit.
 
 ## Context
 
