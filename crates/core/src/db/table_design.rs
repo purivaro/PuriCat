@@ -465,6 +465,231 @@ pub fn create_table(engine: Engine, spec: &NewTable) -> Result<Vec<String>> {
     Ok(statements)
 }
 
+// ---- changing a table ---------------------------------------------------------------------
+
+/// An index of a table, as the server lists it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInfo {
+    pub name: String,
+    /// The columns in index order; an expression as the server prints it.
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+}
+
+/// One change of the table form's "Edit table…".
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TableEdit {
+    AddColumn {
+        column: ColumnSpec,
+    },
+    DropColumn {
+        name: String,
+    },
+    RenameColumn {
+        from: String,
+        to: String,
+    },
+    AddIndex {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+        #[serde(default)]
+        unique: bool,
+    },
+    DropIndex {
+        name: String,
+    },
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AlterTable {
+    pub table: TableRef,
+    pub edits: Vec<TableEdit>,
+}
+
+impl AlterTable {
+    /// The columns this change deletes, with their data.
+    pub fn dropped_columns(&self) -> Vec<&str> {
+        self.edits
+            .iter()
+            .filter_map(|e| match e {
+                TableEdit::DropColumn { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The statements that make the changes, in the order they run. MySQL: one `ALTER TABLE`
+/// with a clause per change, which the server applies as one. PostgreSQL: one statement per
+/// change (and a `COMMENT ON` for an added column's comment), run together in one
+/// transaction.
+pub fn alter_table(engine: Engine, spec: &AlterTable) -> Result<Vec<String>> {
+    let choices = types(engine)?;
+    if spec.edits.is_empty() {
+        return Err(Error::Invalid("Nothing is changed yet".into()));
+    }
+    let table = &spec.table;
+    let qualified = match engine {
+        Engine::Mysql => format!(
+            "{}.{}",
+            ident::mysql(&table.database)?,
+            ident::mysql(&table.name)?
+        ),
+        _ => format!(
+            "{}.{}",
+            ident::postgres(super::require_schema(table.schema.as_deref())?)?,
+            ident::postgres(&table.name)?
+        ),
+    };
+    let mut clauses = Vec::new(); // MySQL
+    let mut statements = Vec::new(); // PostgreSQL
+    let mut after = Vec::new(); // PostgreSQL: comments, after the columns exist
+    let mut touched = std::collections::HashSet::new();
+    let mut mark = |name: &str| -> Result<()> {
+        let key = if engine == Engine::Mysql {
+            name.to_lowercase()
+        } else {
+            name.to_string()
+        };
+        if touched.insert(key) {
+            Ok(())
+        } else {
+            Err(Error::Invalid(format!(
+                "“{name}” is changed twice; make one change per column"
+            )))
+        }
+    };
+    for edit in &spec.edits {
+        match edit {
+            TableEdit::AddColumn { column } => {
+                let name = column.name.trim();
+                check_name(engine, "column", name)?;
+                mark(name)?;
+                if column.key || column.auto {
+                    return Err(Error::Invalid(format!(
+                        "A column added to an existing table cannot be part of the primary key or number itself here (column “{name}”); use a query tab for that"
+                    )));
+                }
+                let definition = format!(
+                    "{} {}",
+                    quote(engine, name)?,
+                    column_sql(engine, &choices, column, name)?
+                );
+                match engine {
+                    Engine::Mysql => clauses.push(format!("ADD COLUMN {definition}")),
+                    _ => {
+                        statements.push(format!("ALTER TABLE {qualified} ADD COLUMN {definition}"));
+                        if let Some(comment) = clean(&column.comment) {
+                            after.push(format!(
+                                "COMMENT ON COLUMN {qualified}.{} IS {}",
+                                quote(engine, name)?,
+                                literal("column comment", comment)?
+                            ));
+                        }
+                    }
+                }
+            }
+            TableEdit::DropColumn { name } => {
+                mark(name)?;
+                let column = quote(engine, name)?;
+                match engine {
+                    Engine::Mysql => clauses.push(format!("DROP COLUMN {column}")),
+                    _ => statements.push(format!("ALTER TABLE {qualified} DROP COLUMN {column}")),
+                }
+            }
+            TableEdit::RenameColumn { from, to } => {
+                let to = to.trim();
+                check_name(engine, "column", to)?;
+                if to == from {
+                    return Err(Error::Invalid(format!("“{from}” already has that name")));
+                }
+                mark(from)?;
+                mark(to)?;
+                let clause = format!(
+                    "RENAME COLUMN {} TO {}",
+                    quote(engine, from)?,
+                    quote(engine, to)?
+                );
+                match engine {
+                    Engine::Mysql => clauses.push(clause),
+                    _ => statements.push(format!("ALTER TABLE {qualified} {clause}")),
+                }
+            }
+            TableEdit::AddIndex {
+                name,
+                columns,
+                unique,
+            } => {
+                if columns.is_empty() {
+                    return Err(Error::Invalid("An index needs at least one column".into()));
+                }
+                let mut seen = std::collections::HashSet::new();
+                let mut quoted = Vec::new();
+                for c in columns {
+                    if !seen.insert(c.as_str()) {
+                        return Err(Error::Invalid(format!("“{c}” is in the index twice")));
+                    }
+                    quoted.push(quote(engine, c)?);
+                }
+                let name = clean(name);
+                if let Some(n) = name {
+                    check_name(engine, "index", n)?;
+                }
+                let unique = if *unique { "UNIQUE " } else { "" };
+                let named = name
+                    .map(|n| quote(engine, n))
+                    .transpose()?
+                    .map(|n| format!("{n} "))
+                    .unwrap_or_default();
+                match engine {
+                    Engine::Mysql => {
+                        clauses.push(format!("ADD {unique}INDEX {named}({})", quoted.join(", ")))
+                    }
+                    _ => statements.push(format!(
+                        "CREATE {unique}INDEX {named}ON {qualified} ({})",
+                        quoted.join(", ")
+                    )),
+                }
+            }
+            TableEdit::DropIndex { name } => {
+                if engine == Engine::Mysql && name.eq_ignore_ascii_case("PRIMARY")
+                    || name.is_empty()
+                {
+                    return Err(Error::Invalid("The primary key is not dropped here".into()));
+                }
+                match engine {
+                    Engine::Mysql => clauses.push(format!("DROP INDEX {}", quote(engine, name)?)),
+                    // An index lives in the table's schema.
+                    _ => statements.push(format!(
+                        "DROP INDEX {}.{}",
+                        ident::postgres(super::require_schema(table.schema.as_deref())?)?,
+                        ident::postgres(name)?
+                    )),
+                }
+            }
+        }
+    }
+    Ok(match engine {
+        Engine::Mysql => vec![format!(
+            "ALTER TABLE {qualified}\n  {}",
+            clauses.join(",\n  ")
+        )],
+        _ => {
+            statements.extend(after);
+            statements
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +855,86 @@ mod tests {
             None,
         );
         assert_eq!(create_table(Engine::Postgres, &s).unwrap()[0], "CREATE TABLE \"public\".\"orders\" (\n  \"code\" text NOT NULL,\n  PRIMARY KEY (\"code\")\n)");
+    }
+
+    fn alter(engine: Engine, edits: serde_json::Value) -> Result<Vec<String>> {
+        let schema = (engine == Engine::Postgres).then_some("public");
+        let spec: AlterTable = serde_json::from_value(json!({
+            "table": { "database": "shop", "schema": schema, "name": "orders" },
+            "edits": edits,
+        }))
+        .unwrap();
+        alter_table(engine, &spec)
+    }
+
+    #[test]
+    fn mysql_changes_are_one_statement() {
+        let edits = json!([
+            { "kind": "addColumn", "column": { "name": "หมายเหตุ", "type": "VARCHAR", "length": 200, "nullable": true, "comment": "x" } },
+            { "kind": "dropColumn", "name": "old" },
+            { "kind": "renameColumn", "from": "a", "to": "b" },
+            { "kind": "addIndex", "columns": ["b", "c"], "unique": true, "name": "ux_bc" },
+            { "kind": "addIndex", "columns": ["d"] },
+            { "kind": "dropIndex", "name": "ix_old" }
+        ]);
+        assert_eq!(
+            alter(Engine::Mysql, edits).unwrap(),
+            ["ALTER TABLE `shop`.`orders`\n  ADD COLUMN `หมายเหตุ` VARCHAR(200) NULL COMMENT 'x',\n  DROP COLUMN `old`,\n  RENAME COLUMN `a` TO `b`,\n  ADD UNIQUE INDEX `ux_bc` (`b`, `c`),\n  ADD INDEX (`d`),\n  DROP INDEX `ix_old`"]
+        );
+    }
+
+    #[test]
+    fn postgres_changes_are_statements_in_order() {
+        let edits = json!([
+            { "kind": "addColumn", "column": { "name": "note", "type": "text", "nullable": true, "comment": "c" } },
+            { "kind": "renameColumn", "from": "a", "to": "B" },
+            { "kind": "addIndex", "columns": ["B"], "unique": false },
+            { "kind": "dropIndex", "name": "ix old" }
+        ]);
+        assert_eq!(
+            alter(Engine::Postgres, edits).unwrap(),
+            [
+                "ALTER TABLE \"public\".\"orders\" ADD COLUMN \"note\" text NULL",
+                "ALTER TABLE \"public\".\"orders\" RENAME COLUMN \"a\" TO \"B\"",
+                "CREATE INDEX ON \"public\".\"orders\" (\"B\")",
+                "DROP INDEX \"public\".\"ix old\"",
+                "COMMENT ON COLUMN \"public\".\"orders\".\"note\" IS 'c'",
+            ]
+        );
+    }
+
+    #[test]
+    fn what_a_change_cannot_be() {
+        let err = |engine, edits| alter(engine, edits).unwrap_err().to_string();
+        assert!(err(Engine::Mysql, json!([])).contains("Nothing"));
+        assert!(err(
+            Engine::Mysql,
+            json!([{ "kind": "addColumn", "column": { "name": "k", "type": "INT", "key": true } }])
+        )
+        .contains("primary key"));
+        assert!(err(Engine::Mysql, json!([{ "kind": "dropColumn", "name": "a" }, { "kind": "renameColumn", "from": "A", "to": "z" }])).contains("twice"));
+        assert!(err(
+            Engine::Postgres,
+            json!([{ "kind": "renameColumn", "from": "a", "to": "a" }])
+        )
+        .contains("already has"));
+        assert!(err(
+            Engine::Postgres,
+            json!([{ "kind": "addIndex", "columns": [] }])
+        )
+        .contains("at least one column"));
+        assert!(err(
+            Engine::Postgres,
+            json!([{ "kind": "addIndex", "columns": ["a", "a"] }])
+        )
+        .contains("twice"));
+        assert!(err(
+            Engine::Mysql,
+            json!([{ "kind": "dropIndex", "name": "PRIMARY" }])
+        )
+        .contains("primary key"));
+        assert!(err(Engine::Mysql, json!([{ "kind": "addColumn", "column": { "name": "a", "type": "INT); DROP TABLE x" } }])).contains("not a type"));
+        let dropped: AlterTable = serde_json::from_value(json!({ "table": { "database": "d", "schema": null, "name": "t" }, "edits": [{ "kind": "dropColumn", "name": "x" }, { "kind": "dropIndex", "name": "i" }] })).unwrap();
+        assert_eq!(dropped.dropped_columns(), ["x"]);
     }
 }

@@ -676,6 +676,45 @@ pub async fn create_table(
     state.session(&id).await?.create_table(&spec).await
 }
 
+/// The indexes of a table, for the table form's changes.
+#[tauri::command]
+pub async fn table_indexes(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+) -> Result<Vec<puricat_core::db::table_design::IndexInfo>> {
+    state.session(&id).await?.indexes(&table).await
+}
+
+/// The statements the change form would run. Runs nothing.
+#[tauri::command]
+pub async fn plan_alter_table(
+    state: State<'_, AppState>,
+    id: String,
+    spec: puricat_core::db::table_design::AlterTable,
+) -> Result<Vec<String>> {
+    let engine = state.store.get_connection(&id).await?.engine;
+    puricat_core::db::table_design::alter_table(engine, &spec)
+}
+
+/// Change a table. When a column is dropped, `confirm` must be the table's name, as typed.
+#[tauri::command]
+pub async fn alter_table(
+    state: State<'_, AppState>,
+    id: String,
+    spec: puricat_core::db::table_design::AlterTable,
+    confirm: Option<String>,
+) -> Result<Vec<String>> {
+    refuse_read_only(&state, &id, "change a table").await?;
+    if !spec.dropped_columns().is_empty() && confirm.as_deref() != Some(spec.table.name.as_str()) {
+        return Err(Error::Invalid(format!(
+            "Dropping a column deletes its data: type the table's name, {}, to confirm",
+            spec.table.name
+        )));
+    }
+    state.session(&id).await?.alter_table(&spec).await
+}
+
 /// The sessions on the server of a connection ([ADR 0024](../../docs/adr/0024-server-sessions.md)).
 #[tauri::command]
 pub async fn list_processes(

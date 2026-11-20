@@ -676,6 +676,25 @@ export interface ColumnSpec {
   comment: string | null;
 }
 
+export interface IndexInfo {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+}
+
+export type TableEdit =
+  | { kind: "addColumn"; column: ColumnSpec }
+  | { kind: "dropColumn"; name: string }
+  | { kind: "renameColumn"; from: string; to: string }
+  | { kind: "addIndex"; name: string | null; columns: string[]; unique: boolean }
+  | { kind: "dropIndex"; name: string };
+
+export interface AlterTable {
+  table: TableRef;
+  edits: TableEdit[];
+}
+
 export interface NewTable {
   table: TableRef;
   columns: ColumnSpec[];

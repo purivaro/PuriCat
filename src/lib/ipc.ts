@@ -49,6 +49,8 @@ import type {
   ServerProcess,
   TypeChoice,
   NewTable,
+  IndexInfo,
+  AlterTable,
   EndProcess,
   SortSpec,
   SqlFile,
@@ -191,6 +193,11 @@ export const ipc = {
   /** The statements `createTable` would run, in order. Runs nothing. */
   planCreateTable: (id: string, spec: NewTable) => invoke<string[]>("plan_create_table", { id, spec }),
   createTable: (id: string, spec: NewTable) => invoke<string[]>("create_table", { id, spec }),
+  tableIndexes: (id: string, table: TableRef) => invoke<IndexInfo[]>("table_indexes", { id, table }),
+  /** The statements `alterTable` would run. Runs nothing. */
+  planAlterTable: (id: string, spec: AlterTable) => invoke<string[]>("plan_alter_table", { id, spec }),
+  /** `confirm`: the table's name as typed, needed when a column is dropped. */
+  alterTable: (id: string, spec: AlterTable, confirm: string | null) => invoke<string[]>("alter_table", { id, spec, confirm }),
   listProcesses: (id: string) => invoke<ServerProcess[]>("list_processes", { id }),
   /** The statement `endProcess` would run. Runs nothing. */
   planEndProcess: (id: string, process: number, what: EndProcess) => invoke<string>("plan_end_process", { id, process, what }),

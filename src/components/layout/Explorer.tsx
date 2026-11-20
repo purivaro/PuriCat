@@ -1,6 +1,7 @@
 import {
   Activity,
   ChevronRight,
+  Columns3,
   CircleAlert,
   Copy,
   Database,
@@ -278,6 +279,11 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                         {(o.kind === "table" || connection.engine !== "sqlite") && (
                           <ContextMenu.Item className={menuItemClass} onSelect={() => ask("rename")}>
                             <PencilLine className="size-3.5" /> {t("schema.renameTable")}
+                          </ContextMenu.Item>
+                        )}
+                        {o.kind === "table" && connection.engine !== "sqlite" && (
+                          <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askAlterTable({ connection, table })}>
+                            <Columns3 className="size-3.5" /> {t("schema.alterTable")}
                           </ContextMenu.Item>
                         )}
                         {o.kind === "table" && (

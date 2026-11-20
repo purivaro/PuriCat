@@ -1579,7 +1579,7 @@
 
     // New table: a form of columns, the statement shown before it runs, the table opened after.
     const newTableDialog = () => document.querySelector("[data-new-table]");
-    const columnRow = (i) => newTableDialog().querySelector(`[data-new-table-column="${i}"]`);
+    const columnRow = (i) => newTableDialog().querySelector(`[data-table-column="${i}"]`);
     const inRow = (i, label) => columnRow(i).querySelector(`[aria-label="${label}"]`);
     await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
     await dbMenu("Demo MySQL", "puricat_e2e", "New table…");
@@ -1609,6 +1609,37 @@
     const createdTable = await invoke("describe_table", { id: mysqlConnId, table: { database: "puricat_e2e", schema: null, name: "e2e_new_table" } });
     const createdColumns = createdTable.columns.map((c) => c.name).join(",");
     if (createdColumns !== "id,ชื่อสินค้า,price,placed" || createdTable.primaryKey.join() !== "id") throw new Error(`the server has ${createdColumns} / ${createdTable.primaryKey}`);
+    // Change table: rename a column, drop one (typed confirmation), add one, make an index.
+    const alterDialog = () => document.querySelector("[data-alter-table]");
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await rightClick(await waitFor(() => treeRow("e2e_new_table"), "the new table in the explorer", 15000));
+    await click(await waitFor(() => menuItem("Change table…"), "the change item"), "change table");
+    await waitFor(() => alterDialog()?.querySelector('[data-existing-column="price"]'), "the table's columns in the change form", 20000);
+    await type(alterDialog().querySelector('[data-existing-column="price"] input'), "unit_price");
+    await click(alterDialog().querySelector('[data-drop-column="placed"]'), "drop placed");
+    await click(alterDialog().querySelector("[data-alter-add-column]"), "add a column");
+    await setChoice(await waitFor(() => alterDialog().querySelector('[data-table-column="0"] [aria-label="Type"]'), "the added column's type"), "INT");
+    await type(alterDialog().querySelector('[data-table-column="0"] [aria-label="Column"]'), "qty");
+    await click(alterDialog().querySelector("[data-alter-add-index]"), "add an index");
+    await click(await waitFor(() => alterDialog().querySelector('[data-new-index="0"] [data-index-column="ชื่อสินค้า"]'), "the index's columns"), "index on the name");
+    await click(withText('[data-new-index="0"] label', "Unique").querySelector("input"), "unique");
+    const expectedAlter = "ALTER TABLE `puricat_e2e`.`e2e_new_table`\n  ADD COLUMN `qty` INT NULL,\n  RENAME COLUMN `price` TO `unit_price`,\n  DROP COLUMN `placed`,\n  ADD UNIQUE INDEX (`ชื่อสินค้า`)";
+    await waitFor(() => alterDialog().querySelector("[data-ddl-preview]:not([aria-busy=true])")?.textContent === expectedAlter, "the ALTER TABLE statement", 15000).catch(() => {
+      throw new Error(`the change form shows: ${alterDialog().querySelector("[data-ddl-preview], [data-ddl-preview-empty]")?.textContent}`);
+    });
+    const applyBeforeConfirm = alterDialog().querySelector("[data-alter-apply]").disabled;
+    await type(alterDialog().querySelector("[data-alter-confirm]"), "e2e_new_table");
+    await waitFor(() => !alterDialog().querySelector("[data-alter-apply]").disabled, "apply enabled once the name is typed");
+    await stage("alter-table", { applyBeforeConfirm, expectedAlter });
+    if (!applyBeforeConfirm) throw new Error("the change could be applied before the table's name was typed");
+    await click(alterDialog().querySelector("[data-alter-apply]"), "apply the changes");
+    await waitFor(() => !alterDialog(), "the change form to close", 15000);
+    const altered = await invoke("describe_table", { id: mysqlConnId, table: { database: "puricat_e2e", schema: null, name: "e2e_new_table" } });
+    const alteredColumns = altered.columns.map((c) => c.name).join(",");
+    const alteredIndexes = (await invoke("table_indexes", { id: mysqlConnId, table: { database: "puricat_e2e", schema: null, name: "e2e_new_table" } })).map((i) => `${i.name}:${i.unique}:${i.columns.join("+")}`).join(" ");
+    if (alteredColumns !== "id,ชื่อสินค้า,unit_price,qty") throw new Error(`after the change the server has ${alteredColumns}`);
+    if (!/^PRIMARY:true:id \S+:true:ชื่อสินค้า$/.test(alteredIndexes)) throw new Error(`after the change the indexes are ${alteredIndexes}`);
+    log.push({ stage: "alter-table-done", alteredColumns, alteredIndexes });
     // Put things back for the later stages: the table goes, and so does its tab.
     await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the new table's tab");
     await invoke("run_sql", { id: mysqlConnId, tab: "e2e-drop-new", database: "puricat_e2e", sql: "DROP TABLE puricat_e2e.e2e_new_table", options: { maxRows: 10, changeLimit: null } });
