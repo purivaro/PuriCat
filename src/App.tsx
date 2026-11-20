@@ -17,6 +17,7 @@ import { BackupDialog } from "./features/backup/BackupDialog";
 import { ConnectionDialog } from "./features/connections/ConnectionDialog";
 import { DatabaseDialogs } from "./features/schema/DatabaseDialogs";
 import { NewDatabaseDialog } from "./features/schema/NewDatabaseDialog";
+import { TableDialogs } from "./features/schema/TableDialogs";
 import { UpdateDialog } from "./features/updates/UpdateDialog";
 import i18n from "./i18n";
 import { errorMessage, ipc } from "./lib/ipc";
@@ -303,6 +304,7 @@ export default function App() {
       <DeleteConnectionDialog />
       <NewDatabaseDialog />
       <DatabaseDialogs />
+      <TableDialogs />
       <BackupDialog />
       <UpdateDialog />
       <CommandPalette />

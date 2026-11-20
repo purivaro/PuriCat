@@ -1,12 +1,20 @@
 import { create } from "zustand";
 
-import type { ConnectionView, FlushKind } from "../lib/types";
+import type { ConnectionView, FlushKind, ObjectKind, TableRef } from "../lib/types";
 
 /** Something a database's or a connection's menu asked to do to the server. */
 export type DatabaseTask =
   | { kind: "edit"; connection: ConnectionView; database: string }
   | { kind: "drop"; connection: ConnectionView; database: string }
   | { kind: "flush"; connection: ConnectionView; what: FlushKind };
+
+/** Something the menu of a table or a view asked for. */
+export interface TableTask {
+  kind: "definition" | "rename" | "empty" | "drop";
+  connection: ConnectionView;
+  table: TableRef;
+  objectKind: ObjectKind;
+}
 
 interface UiState {
   /** `null` closed, `"new"` creating, otherwise the connection being edited. */
@@ -15,6 +23,7 @@ interface UiState {
   /** The connection a new database is being created on. */
   newDatabaseOn: ConnectionView | null;
   databaseTask: DatabaseTask | null;
+  tableTask: TableTask | null;
   /** The database whose backup dialog is open. */
   backupOf: { connection: ConnectionView; database: string } | null;
   paletteOpen: boolean;
@@ -23,6 +32,7 @@ interface UiState {
   askDelete: (target: ConnectionView | null) => void;
   askNewDatabase: (connection: ConnectionView | null) => void;
   askDatabaseTask: (task: DatabaseTask | null) => void;
+  askTableTask: (task: TableTask | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
   setPaletteOpen: (open: boolean) => void;
 }
@@ -32,6 +42,7 @@ export const useUi = create<UiState>((set) => ({
   deleteTarget: null,
   newDatabaseOn: null,
   databaseTask: null,
+  tableTask: null,
   backupOf: null,
   paletteOpen: false,
   openConnectionDialog: (target) => set({ connectionDialog: target ?? "new" }),
@@ -39,6 +50,7 @@ export const useUi = create<UiState>((set) => ({
   askDelete: (deleteTarget) => set({ deleteTarget }),
   askNewDatabase: (newDatabaseOn) => set({ newDatabaseOn }),
   askDatabaseTask: (databaseTask) => set({ databaseTask }),
+  askTableTask: (tableTask) => set({ tableTask }),
   askBackup: (backupOf) => set({ backupOf }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));

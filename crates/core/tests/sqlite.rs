@@ -1475,3 +1475,120 @@ async fn rows_are_counted_exactly_and_a_count_can_be_stopped() {
     );
     session.close().await;
 }
+
+/// The table menu: the definition as the file keeps it, then rename, empty and drop.
+#[tokio::test]
+async fn table_menu() {
+    use puricat_core::db::ddl::{DefinitionSource, TableChange};
+    let scratch = Scratch::new(
+        r#"
+        CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL, kept INT DEFAULT 0);
+        CREATE INDEX notes_body ON notes (body);
+        CREATE TABLE log (n INTEGER);
+        CREATE TRIGGER notes_gone AFTER DELETE ON notes BEGIN INSERT INTO log VALUES (old.id); END;
+        CREATE VIEW kept_notes AS SELECT id, body FROM notes WHERE kept = 1;
+        INSERT INTO notes (body) VALUES ('a'), ('b');
+        "#,
+    )
+    .await;
+    let session = open(&scratch).await;
+    let change = |value: Value| serde_json::from_value::<TableChange>(value).unwrap();
+    let listed = || async {
+        session
+            .list_objects("main", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|o| o.name)
+            .collect::<Vec<_>>()
+    };
+
+    // The table's own text first, then its index and its trigger, each ended.
+    let definition = session
+        .table_definition(&table("notes"), ObjectKind::Table)
+        .await
+        .unwrap();
+    assert_eq!(definition.source, DefinitionSource::File);
+    assert_eq!(
+        definition.sql,
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL, kept INT DEFAULT 0);\n\n\
+         CREATE INDEX notes_body ON notes (body);\n\n\
+         CREATE TRIGGER notes_gone AFTER DELETE ON notes BEGIN INSERT INTO log VALUES (old.id); END;"
+    );
+    let view = session
+        .table_definition(&table("kept_notes"), ObjectKind::View)
+        .await
+        .unwrap();
+    assert_eq!(
+        view.sql,
+        "CREATE VIEW kept_notes AS SELECT id, body FROM notes WHERE kept = 1;"
+    );
+    for (name, kind) in [("notes", ObjectKind::View), ("ghost", ObjectKind::Table)] {
+        assert!(matches!(
+            session.table_definition(&table(name), kind).await,
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    // Rename a table; SQLite cannot rename a view.
+    let rename = change(
+        json!({ "action": "rename", "table": table("log"), "kind": "table", "newName": "log 2" }),
+    );
+    assert_eq!(
+        session.table_change_sql(&rename).unwrap(),
+        r#"ALTER TABLE "log" RENAME TO "log 2""#
+    );
+    session.table_change(&rename).await.unwrap();
+    assert_eq!(listed().await, ["kept_notes", "log 2", "notes"]);
+    assert!(matches!(
+        session.table_change_sql(&change(json!({
+            "action": "rename", "table": table("kept_notes"), "kind": "view", "newName": "x",
+        }))),
+        Err(Error::Unsupported(_))
+    ));
+
+    // Empty is a DELETE, so the table's trigger fires for every row.
+    let empty = change(json!({ "action": "empty", "table": table("notes") }));
+    assert_eq!(
+        session.table_change(&empty).await.unwrap(),
+        r#"DELETE FROM "notes""#
+    );
+    let mut console = session.open_console(None).await.unwrap();
+    let counts = run(
+        &mut console,
+        r#"SELECT (SELECT count(*) FROM notes), (SELECT count(*) FROM "log 2")"#,
+    )
+    .await;
+    assert_eq!(rows(&counts), [[some("0"), some("2")]]);
+    drop(console);
+
+    // A file opened read-only refuses, saying how to change that; planning still works.
+    let guarded = Session::connect(&profile(scratch.path(), true), None)
+        .await
+        .unwrap();
+    let drop_view =
+        change(json!({ "action": "drop", "table": table("kept_notes"), "kind": "view" }));
+    assert_eq!(
+        guarded.table_change_sql(&drop_view).unwrap(),
+        r#"DROP VIEW "kept_notes""#
+    );
+    match guarded.table_change(&drop_view).await {
+        Err(Error::Invalid(message)) => assert!(message.contains("read-only"), "{message}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    guarded.close().await;
+
+    // Drop the view, then the table.
+    session.table_change(&drop_view).await.unwrap();
+    let drop_table = change(json!({ "action": "drop", "table": table("notes"), "kind": "table" }));
+    assert_eq!(
+        session.table_change(&drop_table).await.unwrap(),
+        r#"DROP TABLE "notes""#
+    );
+    assert_eq!(listed().await, ["log 2"]);
+    assert!(matches!(
+        session.table_change(&drop_table).await,
+        Err(Error::Database(_))
+    ));
+    session.close().await;
+}

@@ -72,7 +72,9 @@ SQLite has its own section, "SQLite — a database file", further down: what app
 | Edit a database from a form that shows the exact statements (see "Database menu") | Default character set and collation. Implemented & verified (unit and live tests; a collation change through the UI in the E2E stage `database-edit`). A database cannot be renamed on MySQL | Name and owner. Implemented & verified (unit and live tests; a rename through the UI in the end-to-end test, after the stage `database-edit`). The owner change is not verified through the UI; the encoding cannot be changed | Planned (Phase 4) |
 | Drop a database after typing its name (see "Database menu") | Implemented & verified (unit and live tests); not through the UI on this engine | Implemented & verified (unit and live tests; through the UI in the E2E stage `database-drop`) | Planned (Phase 4) |
 | Open a SQL file in a new query tab; `FLUSH` from the connection's menu (see "Database menu") | Open SQL file: implemented & verified through the UI for a small file (E2E). Flush: implemented & verified for Privileges, Tables and Status (live test), Status through the UI (E2E); `FLUSH LOGS` accepted once by hand | Open SQL file: implemented, not yet verified on this engine. Flush: not available, it is a MySQL statement | Planned (Phase 4) |
-| Create, alter or drop tables, indexes and views through a form | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
+| The definition of a table or a view, as read-only text (see "Table menu") | The server's `SHOW CREATE TABLE` / `SHOW CREATE VIEW` text. Implemented & verified (live test; a table through the UI in the E2E stage `table-definition`, also opened in a query tab) | A view's stored query under a `CREATE` line; a table's text put together by PuriCat from the catalogue, with what that leaves out. Implemented & verified (live test: one sample table, whose text run in a second database gives the same text back; a view and a materialized view; `shop.orders` through the UI in the end-to-end test) | Planned (Phase 4) |
+| Rename, empty or drop a table; rename or drop a view — each with its statement shown, empty and drop after the name is typed (see "Table menu") | Implemented & verified (unit and live tests; a table through the UI: renamed, emptied and dropped in the end-to-end test, stage `table-drop`). A view through the UI is not verified | Implemented & verified (unit and live tests, materialized views included). Not through the UI on this engine | Planned (Phase 4) |
+| Create a table, an index or a view through a form; change a table's columns, keys or indexes | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Import from CSV / XLSX, SQL dump export, EXPLAIN view | Planned (Phase 4) | Planned (Phase 4) | Planned (Phase 4) |
 | Schema context for the agent chat (engine and version, database, tables and views with column names, types, key / NOT NULL / generated flags, row estimates; no rows) | Implemented, not yet verified on this engine (the same code reads the catalogue as for the structure view; no test reads the text of a MySQL context. The E2E stage `agent-mysql` sends one turn with a MySQL context and asserts only the context button's label) | Implemented & verified (unit test of the text; E2E: the context inspector and the prompt handed to the stand-in CLI, for a table tab in a non-`public` schema) | Planned |
 | Database tools for the AI, off by default: catalogue lookups (`list_tables`, `describe_table`; `list_schemas` where the engine has schemas) | Implemented & verified (live test; E2E through the UI at the "Structure" level, on a stand-in CLI: `list_tables` and `describe_table`, whose step opens to the structure the model was given) | Implemented & verified (live test; E2E through the UI at "Structure and rows", on a stand-in CLI; `list_schemas` is not called there) | Planned |
@@ -343,7 +345,7 @@ Limits:
 
 | Limitation | Detail |
 |---|---|
-| Databases only | No form for tables, indexes or views. Planned (Phase 4); the SQL can be typed in a query tab. Editing and dropping a database are in "Database menu" below |
+| Databases only | No form creates a table, an index or a view. Planned (Phase 4); the SQL can be typed in a query tab. Editing and dropping a database are in "Database menu" below; the definition, rename, empty and drop of a table or a view are in "Table menu" |
 | PostgreSQL options left out | Everything but owner, template and encoding: among them `LC_COLLATE`, `LC_CTYPE`, the locale provider and ICU locale, tablespace, connection limit and `IS_TEMPLATE`. A database gets the locale of its template |
 | MySQL options left out | `ENCRYPTION` and `READ ONLY` |
 | PostgreSQL templates | Only databases marked as templates are offered, although PostgreSQL lets a superuser or the owner copy any database |
@@ -403,6 +405,72 @@ Limits:
 | No record | Nothing done from this menu is written to the SQL history or to any log |
 | Through the UI | Verified there: a MySQL collation change, opening a SQL file, Flush → Status, a PostgreSQL rename and a PostgreSQL drop (E2E, dev mode). Not verified there: a MySQL drop, an owner change, the other Flush kinds, a read-only or Production-labelled connection, the refusals, Thai and the dark theme, the bundled app |
 | Engines and versions | MySQL 9.3.0 and PostgreSQL 16.13 only |
+
+## Table menu
+
+Added on 2026-11-20, on the same rule ([ADR 0019](docs/adr/0019-schema-changes-through-forms.md), section 8): a form only chooses, the backend builds the statement (`db::ddl::table_change`), the form shows it as "Statement that will run", and the same function builds it again when it is run.
+
+Right-click a table, a view or a materialized view in the explorer: Open data, Definition…, Copy name, Rename…, Empty table… (tables only), Drop table… or Drop view…. On MySQL, PostgreSQL and SQLite. "Rename…" is not in the menu of a SQLite view.
+
+### Definition
+
+The statements that would create the object as it is now. Read from the server and shown; nothing is run. The dialog has "Copy" and "Open in query tab" (a new query tab on the table's database, holding the text; nothing runs there either), and one line under the text that says where it comes from.
+
+| Engine | Where the text comes from | What it holds |
+|---|---|---|
+| MySQL | The server's own statement: `SHOW CREATE TABLE`, or `SHOW CREATE VIEW` for a view | Whatever that server version prints. A table's text names the table without its database; a view's text names the database, after whatever the server writes between `CREATE` and `VIEW` (on 9.3.0 the live test requires only that the text starts with `CREATE` and holds `` VIEW `db`.`v` AS select ``) |
+| SQLite | The text SQLite keeps in the file (`sqlite_master`), exactly as the object was created | The table's or view's own statement, then the statements of its indexes and triggers, each ended with `;`. Indexes SQLite made by itself (for a `PRIMARY KEY` or `UNIQUE` written in the table) have no text and are not listed |
+| PostgreSQL, a view or a materialized view | `pg_get_viewdef`, under a `CREATE VIEW` or `CREATE MATERIALIZED VIEW` line written by PuriCat | The stored query as the server prints it, then the object's indexes (a materialized view's), triggers and comments |
+| PostgreSQL, a table | **Put together by PuriCat from the catalogue.** PostgreSQL has no statement that prints a table; `pg_dump` is the tool that does, and it remains the authority | See below |
+
+What the PostgreSQL text of a table holds, in this order: `CREATE TABLE` (or `CREATE UNLOGGED TABLE`) with the schema and the name; every column with its type as `format_type` prints it, its collation when that is not the type's default, then `GENERATED ALWAYS AS IDENTITY` / `GENERATED BY DEFAULT AS IDENTITY`, or `GENERATED ALWAYS AS (…) STORED`, or `DEFAULT …`, then `NOT NULL`; the constraints by name — primary key, unique, check, exclusion, then foreign keys — each as `pg_get_constraintdef` prints it; `PARTITION BY …` for a partitioned table; then the indexes that do not back one of those constraints (`pg_get_indexdef`), the triggers that are not the server's own (`pg_get_triggerdef`), and `COMMENT ON` for the table and its columns.
+
+Limits of the PostgreSQL text. The first row is what the dialog itself says; the others are not said there:
+
+| Limitation | Detail |
+|---|---|
+| Not included | Owner, grants, row-level-security policies, storage parameters and inheritance |
+| `serial` columns | Printed as `DEFAULT nextval('…')`. The sequence is not part of the text, so the text does not run in a database that lacks it |
+| Identity columns | The options of the sequence (start, increment, …) are not printed; the text gives a default sequence |
+| Partitions | A partition prints as a plain table, not as `PARTITION OF` its parent. `PARTITION BY` on the parent is printed, and has no test |
+| Foreign tables | Listed under Tables in the explorer, but the definition looks for ordinary and partitioned tables only: "not found" (read from the code; not tried) |
+| Verified with one table | The live test's sample: an identity column, a default, a generated column, a non-default collation, a primary key, a check, a foreign key with `ON DELETE CASCADE`, a partial index, a trigger, a table comment in Thai with a quote in it, a column comment. Run in a second database, the text made a table whose own definition was the same text and whose columns `describe_table` reported the same. An unlogged table, an exclusion constraint, a unique constraint and a partitioned table are in the code and not in a test |
+
+### Rename, Empty, Drop
+
+| Aspect | MySQL | PostgreSQL | SQLite |
+|---|---|---|---|
+| Rename | ``RENAME TABLE `db`.`a` TO `db`.`b` `` — the same statement for a view; the database is named on both sides, so the new name cannot land in the session's database | `ALTER TABLE "schema"."a" RENAME TO "b"`, or `ALTER VIEW …`, or `ALTER MATERIALIZED VIEW …` | `ALTER TABLE "a" RENAME TO "b"`. A view cannot be renamed: SQLite has no statement for it. The item is not in a view's menu, and the builder refuses with the advice to drop the view and create it again |
+| Empty (tables only) | ``TRUNCATE TABLE `db`.`a` `` | `TRUNCATE TABLE "schema"."a"` | `DELETE FROM "a"`: SQLite has no `TRUNCATE` |
+| What the Empty form says | `TRUNCATE` commits at once and cannot be rolled back, and `AUTO_INCREMENT` starts again from the beginning (verified: the next row inserted got id 1) | It cannot be undone; identity and serial counters keep their values (no `RESTART IDENTITY`); a table that another table refers to with a foreign key is refused by the server (verified: refused, the rows kept) | It cannot be undone; a `DELETE` runs, so the table's triggers fire (verified: a trigger fired once per row) |
+| Drop | ``DROP TABLE `db`.`a` `` or ``DROP VIEW `db`.`a` `` | `DROP TABLE`, `DROP VIEW` or `DROP MATERIALIZED VIEW`, with `"schema"."a"` | `DROP TABLE "a"` or `DROP VIEW "a"` |
+| Where it runs | On a connection of the session's pool | On a pooled connection to **the database that holds the table**, which need not be the one the session was opened on (verified: the live test's session is opened on another database) | On the file's writable handle. A file opened read-only is refused before anything runs, with the advice to turn the read-only session off (verified) |
+| The row count in the Empty and Drop forms | "It holds about N rows", from `information_schema.TABLES.TABLE_ROWS`. The estimate can lag: in the end-to-end run the Drop form still said "about 2 rows" right after the table had been emptied | The estimate from `pg_class.reltuples`; no number for a table that was never analysed | No number: SQLite keeps no estimate |
+
+Shared by the three engines:
+
+- **One statement, nothing added.** No `IF EXISTS` and no `CASCADE`: a table that is gone, a name that is taken, a view that depends on the table — the server refuses in its own words and the form stays open (verified below the UI: a taken name on MySQL; on PostgreSQL a table two views depend on, dropped only after them; a second drop of the same table on MySQL and SQLite).
+- **Names are quoted as one identifier**, whatever they contain (verified with a name of Thai letters, a space and backticks on MySQL, and a space and double quotes on PostgreSQL). The new name is trimmed; an empty one, the same name again and a name with a NUL character are refused; so is one that is too long — more than 64 characters on MySQL, more than 63 bytes on PostgreSQL, which would otherwise shorten it silently. The 64-character rule is applied to SQLite as well, although SQLite has no such limit.
+- **The name typed to confirm.** "Empty table" and "Drop table" / "Drop view" are enabled only once the object's name has been typed exactly, and `apply_table_change` compares the typed text with the name again. A rename has no typed confirmation.
+- **Read-only connection.** The definition is still shown. The three forms say so and disable their button; the command refuses a profile saved as read-only; the servers refuse the statements in a read-only session (the servers' refusals are verified below the UI; the command's and the forms' are not).
+- **Production-labelled connection.** A warning in each of the three forms, and a danger-styled Rename button (the Empty and Drop buttons are danger-styled on every connection).
+- **Unsaved edits.** None of the three runs while the tab of that table has unsaved edits; the form asks to save or discard them first. The check is the form's and looks at that table's tab only.
+- **Afterwards.** After a rename or a drop the table's tab closes and the explorer reads the object list again; a renamed table is opened again from the explorer under its new name. After an empty the open tab reads its rows again; the object list is not read again, since nothing in it changed.
+
+Limits:
+
+| Limitation | Detail |
+|---|---|
+| What the menu does not do | Create a table, change columns, keys or indexes, move a table to another schema or database, refresh a materialized view. Planned (Phase 4); the SQL can be typed in a query tab |
+| No protected names | Unlike the database menu, nothing is refused by name: the tables of the server's own databases and schemas (`mysql`, `pg_catalog`, …) have the same menu, and what happens is up to the account's privileges and the server (read from the code) |
+| PostgreSQL foreign tables | Listed under Tables, so the statements say `TABLE` for them. Not tried |
+| Emptying is not the same thing on the three engines | See the table: an implicit commit and a counter reset on MySQL, counters kept on PostgreSQL, a row-by-row `DELETE` with triggers on SQLite. PostgreSQL's `RESTART IDENTITY` and `CASCADE` are not offered |
+| The row count is an estimate, or missing | It is information for the reader, read when the form opens; it does not guard anything, and on MySQL it can be stale |
+| Other tabs | Only the table's own tab is closed or reloaded. A query tab that uses the table, and the tab of a view that reads it, are left as they are |
+| Stop | None. A statement that waits behind a lock can only be waited for; the form cannot be closed meanwhile |
+| No record | Nothing done from this menu is written to the SQL history or to any log |
+| Through the UI | Verified there (E2E, dev mode): on a MySQL table the definition, "Open in query tab", a rename, an empty and a drop; the definition of the PostgreSQL table `shop.orders` with its note. Not verified there: SQLite; views and materialized views; a rename, an empty or a drop on PostgreSQL; "Copy"; unsaved edits holding a form back; a read-only or Production-labelled connection; a refusal by the server; Thai and the dark theme; the bundled app |
+| Engines and versions | MySQL 9.3.0, PostgreSQL 16.13 and the SQLite the app carries (3.46.0) only |
 
 ## Object classification
 
@@ -468,6 +536,7 @@ Added on 2026-11-18 ([ADR 0018](docs/adr/0018-sqlite-files.md)). A connection is
 | Tables without a primary key | Read-only in the grid (rows can be added), as on the other engines. The row id is not offered as a key |
 | "New database…", "Edit database…" and "Drop database…" in the menus | Not offered: the file is its one database, so there is nothing to create, rename or drop inside it; the backend refuses as well (verified). See "New database" and "Database menu" |
 | "Open SQL file…" in the menus | Offered, as on the other engines. Implemented, not yet verified on SQLite |
+| The table menu: Definition, Rename, Empty, Drop (see "Table menu") | Implemented & verified in the backend (one test on a real file: the definition as the file keeps it, with the table's index and trigger; a table renamed; a view's rename refused; Empty as a `DELETE` that fires the table's trigger for every row; a view and a table dropped; a file opened read-only refused, while planning still works). Not through the UI |
 | Create a database file; attached databases; encrypted databases | Not built |
 
 ### Types: a declared type is a suggestion

@@ -932,6 +932,48 @@
     "prodFlushWarning": "This runs on a PRODUCTION server.",
     "run": "Run",
     "running": "Running…",
-    "flushed": "Ran {{statement}}"
+    "flushed": "Ran {{statement}}",
+    "definition": "Definition…",
+    "definitionTitle": "Definition of “{{name}}”",
+    "definitionFrom": {
+      "server": "The server's own statement, from SHOW CREATE.",
+      "file": "The text SQLite keeps in the file, followed by the table's indexes and triggers.",
+      "catalogue": "Put together by PuriCat from the catalogue — PostgreSQL has no statement for this. Owner, grants, row-level-security policies, storage parameters and inheritance are not included; pg_dump is the authority."
+    },
+    "openInQueryTab": "Open in query tab",
+    "renameTable": "Rename…",
+    "renameTableTitle": "Rename “{{name}}”",
+    "newName": "New name",
+    "renameEmpty": "Type another name to see the statement.",
+    "renameAction": "Rename",
+    "renaming": "Renaming…",
+    "tableRenamed": "“{{from}}” is now “{{to}}”",
+    "emptyTable": "Empty table…",
+    "emptyTableTitle": "Empty “{{name}}”?",
+    "emptyAbout": {
+      "mysql": "Every row of the table is deleted. TRUNCATE commits at once — it cannot be rolled back — and AUTO_INCREMENT starts again from the beginning.",
+      "postgres": "Every row of the table is deleted. This cannot be undone. Identity and serial counters keep their values. If another table refers to this one with a foreign key, the server refuses.",
+      "sqlite": "Every row of the table is deleted. This cannot be undone. SQLite has no TRUNCATE, so a DELETE runs and the table's triggers fire."
+    },
+    "emptyAction": "Empty table",
+    "emptying": "Emptying…",
+    "tableEmptied": "“{{name}}” emptied",
+    "dropTable": "Drop table…",
+    "dropView": "Drop view…",
+    "dropTableTitle": "Drop “{{name}}”?",
+    "dropAbout": {
+      "table": "The table is deleted from the server with its rows, indexes and triggers. This cannot be undone. If a view or a foreign key depends on it, the server may refuse.",
+      "view": "Only the view is deleted; the tables it reads keep their rows. If another view depends on it, the server may refuse.",
+      "matview": "The materialized view and its stored result are deleted; the tables it was made from keep their rows."
+    },
+    "dropTableAction": "Drop table",
+    "dropViewAction": "Drop view",
+    "tableDropped": "“{{name}}” dropped",
+    "holdsNoRows": "It holds no rows.",
+    "holdsRows_one": "It holds about {{count}} row.",
+    "holdsRows_other": "It holds about {{count}} rows.",
+    "closesTab": "Its open tab will be closed.",
+    "unsavedTable": "A tab of this table has unsaved changes. Save or discard them first.",
+    "prodTableWarning": "This runs on a PRODUCTION server."
   }
 }

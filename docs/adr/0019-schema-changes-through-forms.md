@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implemented for the forms of a database on a MySQL or PostgreSQL connection: "New database…" (sections 1 to 6) and, added the same day, "Edit database…", "Drop database…" and MySQL's "Flush" (section 7, which records what the forms that alter and drop needed beyond the first six). Verified in the backend on both engines (unit and live tests) and through the UI in end-to-end stages; what was and was not run is in [TESTING.md](../../TESTING.md), "Results — 2026-11-19 (New database)" and "(Database menu)". Forms for tables, indexes and views are not built. Builds on [ADR 0013](0013-staged-edits-and-optimistic-saves.md) (plan, then apply, from one function).
+Accepted. Implemented for the forms of a database on a MySQL or PostgreSQL connection: "New database…" (sections 1 to 6) and, added the same day, "Edit database…", "Drop database…" and MySQL's "Flush" (section 7, which records what the forms that alter and drop needed beyond the first six). Verified in the backend on both engines (unit and live tests) and through the UI in end-to-end stages; what was and was not run is in [TESTING.md](../../TESTING.md), "Results — 2026-11-19 (New database)" and "(Database menu)". On 2026-11-20 the menu of a table or a view followed, on MySQL, PostgreSQL and SQLite: its definition as read-only text, and rename, empty and drop (section 8; "Results — 2026-11-20 (Table menu)"). Forms that create a table, an index or a view, or that change a table's columns, are not built. Builds on [ADR 0013](0013-staged-edits-and-optimistic-saves.md) (plan, then apply, from one function).
 
 ## Context
 
@@ -63,6 +63,26 @@ Sections 1 to 5 hold unchanged for `ALTER DATABASE`, `DROP DATABASE` and `FLUSH`
 
 Opening a SQL file from the same menus is not a schema change and follows [ADR 0015](0015-sql-console.md): the text lands in a query tab and nothing runs.
 
+### 8. The menu of a table or a view (added 2026-11-20)
+
+Sections 1, 2 and 5 hold unchanged: one builder (`ddl::table_change`) for a rename, an empty and a drop, a `plan_table_change` command and an `apply_table_change` command that calls the builder again, every typed or stored name as a quoted identifier. There are no keywords to match here: the only words that vary — `TABLE`, `VIEW`, `MATERIALIZED VIEW` — follow from a kind the request names out of three. Of section 7 the typed confirmation, the read-only refusal and the hold for unsaved work carry over. Decided in addition:
+
+- **Emptying is confirmed like dropping.** `TRUNCATE` leaves the table standing and takes everything in it; to the person whose rows they were there is no difference. So "Empty table…" asks for the table's name exactly as "Drop table…" does, on every connection, and `apply_table_change` compares the typed text for both. A rename destroys no data and has no typed confirmation, as a database's rename has none.
+- **One statement, and nothing that widens it.** No `IF EXISTS`, no `CASCADE`, no `RESTART IDENTITY`. A form that added `CASCADE` would drop objects the statement does not name; one that added `IF EXISTS` would report success for something that did not happen. What stands in the way — a view that depends on the table, a foreign key that points at it, a name that is taken — is the server's to say, and its message is shown.
+- **Each engine's statement, with what it does said in the form.** MySQL renames a view with `RENAME TABLE` and names the database on both sides, so the new name cannot land in the session's database. SQLite has no `TRUNCATE`: the builder writes `DELETE FROM`, and the form says that triggers fire. SQLite cannot rename a view: the item is left out and the builder refuses. The Empty form has one paragraph per engine because the three statements are not the same act: an implicit commit and a counter reset on MySQL, counters kept and a refusal for a referenced table on PostgreSQL, a row-by-row delete on SQLite.
+- **The statement runs inside the table's database (PostgreSQL).** A database's statements run on the database the session was opened on, because the database in question may not exist yet or must not be connected to. A table's statement can only run from inside its database, so `PgSession::execute_on` takes the pool of the database the table belongs to. Nothing is released first: the server does not ask for it.
+- **On SQLite the statement goes to the writable handle, and a file opened read-only is refused by the session**, not only by the command: the refusal belongs where the handle is chosen ([ADR 0018](0018-sqlite-files.md)).
+- **No list of protected tables.** The database forms refuse the server's own databases by name. For tables no such list was written: which tables are the server's own differs per engine and version, and the typed name, the account's privileges and the server are what stands between a user and `mysql.user`. This is a gap stated, not a decision that none is needed.
+- **The row count in the form is the estimate, labelled "about".** An exact count can take long on the very tables where the number matters; the form reads what the engine keeps and shows nothing where it keeps nothing.
+
+The definition is not a change and needed its own decision:
+
+- **Each engine's own text where it has one.** MySQL prints a table or a view with `SHOW CREATE`; SQLite keeps the text of every object in the file. PuriCat shows that text and adds only, for SQLite, the statements of the table's indexes and triggers, which live in separate rows of the same catalogue.
+- **PostgreSQL has no such statement, so PuriCat writes one — and says so.** The alternatives were to offer nothing on PostgreSQL, or to run `pg_dump --schema-only` for one table. The first leaves the engine where a definition is hardest to come by without one. The second needs a dump tool of the right version on the computer ([ADR 0021](0021-backups-with-dump-tools.md)) and a process per click, for a dialog that should open at once. The text is therefore put together from the catalogue, with the server's own `pg_get_…` functions wherever one exists (constraints, indexes, triggers, view queries, default and generation expressions, the partition key) and PuriCat's own words only for the `CREATE` line, the column list and the `COMMENT ON` lines around them.
+- **A reconstruction is labelled as one.** The response carries where the text comes from (`server`, `file`, `catalogue`), and the dialog turns that into a sentence under the text. For `catalogue` the sentence says that PuriCat put the text together, names what is left out (owner, grants, row-level-security policies, storage parameters, inheritance) and names `pg_dump` as the authority. Without the label a user would take the text for the server's, as it is on the other two engines.
+- **Its test is a round trip.** Asserting pieces of the text would only show that the text is what its author expected. The live test runs the text in a second database and requires the table made there to have the same definition and the same columns as `describe_table` reports them. That shows the text is valid SQL and a fixed point for one sample table; it does not show completeness, and the known limits are listed in [DATABASE_COMPATIBILITY.md](../../DATABASE_COMPATIBILITY.md), "Table menu".
+- **Read-only text, with two ways out.** "Copy", and "Open in query tab", which seeds a query tab on the table's database and runs nothing, as for a SQL file. The definition is available on a read-only connection.
+
 ## Alternatives considered
 
 - **Build the SQL in the form and send it to `run_sql`.** No new backend code, and the console's history for free. Rejected: the UI would build SQL from typed text, and the preview would be whatever the web view chose to show.
@@ -72,6 +92,8 @@ Opening a SQL file from the same menus is not a schema change and follows [ADR 0
 - **Through the console path**, as ARCHITECTURE.md had planned for object editing. See 5. Open again for a statement that can run long and needs Stop.
 - **A typed confirmation on Production** (type the database name). Not added for a statement that destroys nothing; open again for forms that drop or alter. Decided in section 7: typed for a drop, on every connection; not for an alter.
 - **Check the typed name in the form only.** Rejected: the one destructive request PuriCat's forms can make should not depend on a button's state.
+- **For a PostgreSQL definition, `pg_dump --schema-only --table`, or nothing at all.** See section 8. Open again if the reconstruction's limits turn out to matter in use.
+- **`CASCADE` as a checkbox in the Drop form.** Not offered: see section 8. Someone who means it can type the SQL.
 
 ## Consequences
 
@@ -94,6 +116,18 @@ Added with section 7:
 - The list of protected databases is a constant. A server with other databases of its own (a managed service's, say) is not covered, and the explorer hides the menu items only where its listing marks a database as the server's.
 - Still not recorded, still no Stop: `FLUSH TABLES` or a drop that waits can only be waited for.
 - Not verified for section 7: the commands' own checks (read-only, the typed name, releasing the consoles of an open query tab), a drop or rename while another client is connected to a PostgreSQL database, an owner change and the Flush kinds other than Status through the UI, a read-only or Production-labelled connection through the UI, Thai and the dark theme, the bundled app, other server versions.
+
+Added with section 8:
+
+- The forms can now destroy the rows of one table as well as a whole database, on three engines. The guard is the same typed name; there is still no backup first and no undo.
+- **PuriCat now shows SQL it wrote that it does not run.** The PostgreSQL definition of a table is the first text of this kind whose correctness nothing checks at the moment of use: a statement that is run is judged by the server, a definition is only read. The label in the dialog and the round-trip test are what stands behind it.
+- Known limits of that text: a `serial` column prints as `DEFAULT nextval('…')` without its sequence; the options of an identity sequence are not printed; a partition prints as a plain table, not as `PARTITION OF`; `PARTITION BY` is printed for a partitioned parent and has no test; a foreign table is listed under Tables and has no definition. Each new PostgreSQL feature that changes what a table is will have to be added by hand.
+- The round trip covers one sample table. An unlogged table, an exclusion or unique constraint and a partitioned table are in the code and in no test.
+- The length rule of section 2 is applied to a new table name on SQLite too (64 characters), where the engine has no such limit.
+- After a rename the table's tab closes; the form does not open the table again under its new name.
+- Only the table's own tab is looked at: a query tab with an open transaction on the table neither holds a form back nor is told afterwards.
+- Still not recorded, still no Stop.
+- Not verified for section 8: `apply_table_change`'s own checks (the typed name, the read-only refusal); SQLite, views and materialized views through the UI; a rename, an empty or a drop on PostgreSQL through the UI; "Copy"; unsaved edits holding a form back; a read-only or Production-labelled connection through the UI; Thai and the dark theme; the bundled app; other server versions.
 
 ## Licensing
 

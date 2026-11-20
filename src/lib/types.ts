@@ -316,7 +316,22 @@ export type ExportFormat = "csv" | "json" | "xlsx";
 export interface TableColumns {
   columns: ColumnMeta[];
   primaryKey: string[];
+  /** Planner statistics, not an exact count. */
+  estimatedRows: number | null;
 }
+
+/** The statements that would create a table or a view as it is now. */
+export interface TableDefinition {
+  sql: string;
+  /** The server's own statement, text put together from the catalogue, or the text in a SQLite file. */
+  source: "server" | "catalogue" | "file";
+}
+
+/** A change to one table or view, from a form of the explorer's table menu. */
+export type TableChange =
+  | { action: "rename"; table: TableRef; kind: ObjectKind; newName: string }
+  | { action: "empty"; table: TableRef }
+  | { action: "drop"; table: TableRef; kind: ObjectKind };
 
 /** A database to create. Only the fields of the connection's engine are sent. */
 export interface NewDatabase {
