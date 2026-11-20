@@ -144,7 +144,9 @@ All commands are registered in `src-tauri/src/lib.rs` and implemented in `comman
 | `plan_create_table` | `id`, `spec` (table, columns, comment) | The statements `create_table` would run, in order. Runs nothing |
 | `create_table` | `id`, `spec` | The statements that ran. Refused on a read-only connection |
 | `table_indexes` | `id`, `table` | The table's indexes (name, columns, unique, primary), the primary key first |
-| `plan_alter_table` | `id`, `spec` (table, edits) | The statements `alter_table` would run. Runs nothing |
+| `column_definitions` | `id`, `table` | Each column as the server keeps it: type text, NULL, default and whether it is an expression, MySQL `EXTRA`, comment, character set and collation, generated or identity |
+| `foreign_keys` | `id`, `table` | The table's foreign keys: name, columns, referenced table and columns, the delete and update actions |
+| `plan_alter_table` | `id`, `spec` (table, edits) | The statements `alter_table` would run (reads the column definitions when a column is changed). Runs nothing |
 | `alter_table` | `id`, `spec`, `confirm` | The statements that ran. Refused on a read-only connection, and when a column is dropped unless `confirm` is the table's name |
 | `list_processes` | `id` | The server's sessions (`Process`: id, user, host, database, command, seconds, state, statement up to 4,000 characters, client, own, idle) |
 | `plan_end_process` | `id`, `process` (a number), `what` (`query` / `connection`) | The statement `end_process` would run. Runs nothing |
