@@ -30,6 +30,8 @@ interface UiState {
   databaseTask: DatabaseTask | null;
   tableTask: TableTask | null;
   viewTask: ViewTask | null;
+  /** The connection whose users and privileges are open. */
+  usersOf: ConnectionView | null;
   /** The database whose backup dialog is open. */
   backupOf: { connection: ConnectionView; database: string } | null;
   paletteOpen: boolean;
@@ -40,6 +42,7 @@ interface UiState {
   askDatabaseTask: (task: DatabaseTask | null) => void;
   askTableTask: (task: TableTask | null) => void;
   askViewTask: (task: ViewTask | null) => void;
+  askUsers: (connection: ConnectionView | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
   setPaletteOpen: (open: boolean) => void;
 }
@@ -51,6 +54,7 @@ export const useUi = create<UiState>((set) => ({
   databaseTask: null,
   tableTask: null,
   viewTask: null,
+  usersOf: null,
   backupOf: null,
   paletteOpen: false,
   openConnectionDialog: (target) => set({ connectionDialog: target ?? "new" }),
@@ -60,6 +64,7 @@ export const useUi = create<UiState>((set) => ({
   askDatabaseTask: (databaseTask) => set({ databaseTask }),
   askTableTask: (tableTask) => set({ tableTask }),
   askViewTask: (viewTask) => set({ viewTask }),
+  askUsers: (usersOf) => set({ usersOf }),
   askBackup: (backupOf) => set({ backupOf }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));

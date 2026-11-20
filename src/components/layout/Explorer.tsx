@@ -25,6 +25,7 @@ import {
   TerminalSquare,
   Trash2,
   Unplug,
+  UsersRound,
   X,
 } from "lucide-react";
 import { ContextMenu } from "radix-ui";
@@ -574,6 +575,12 @@ function ConnectionNode({ connection, query }: { connection: ConnectionView; que
             {connected && (
               <ContextMenu.Item className={menuItemClass} onSelect={() => openSqlFile(connection.id, null)}>
                 <FileCode2 className="size-3.5" /> {t("explorer.openSqlFile")}
+              </ContextMenu.Item>
+            )}
+            {/* A SQLite file has no accounts: whoever can read the file can read the database. */}
+            {connected && connection.engine !== "sqlite" && (
+              <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askUsers(connection)}>
+                <UsersRound className="size-3.5" /> {t("users.menu")}
               </ContextMenu.Item>
             )}
             {connected && connection.engine === "mysql" && (

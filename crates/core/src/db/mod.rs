@@ -13,6 +13,7 @@ mod postgres;
 pub mod script;
 pub mod smart;
 mod sqlite;
+pub mod users;
 pub mod write;
 
 use std::time::Instant;

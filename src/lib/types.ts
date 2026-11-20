@@ -355,6 +355,77 @@ export interface QueryPreview extends ResultPreview {
   elapsedMs: number;
 }
 
+/** An account as the server names it: a MySQL user at a host, or a PostgreSQL role. */
+export interface AccountRef {
+  name: string;
+  /** MySQL only. */
+  host?: string | null;
+}
+
+/** An account in the list of "Users and privileges". */
+export interface Account {
+  name: string;
+  host: string | null;
+  /** The account this connection is logged in as. */
+  you: boolean;
+  /** One of the server's own accounts: shown, not changed. */
+  system: boolean;
+  /** MySQL: the account is locked. PostgreSQL: the role cannot log in. */
+  locked: boolean;
+  superuser: boolean;
+}
+
+export interface RoleAttributes {
+  login: boolean;
+  superuser: boolean;
+  createDatabase: boolean;
+  createRole: boolean;
+  replication: boolean;
+  bypassRls: boolean;
+  /** -1: no limit. */
+  connectionLimit: number;
+  validUntil: string | null;
+}
+
+export interface DatabaseAccess {
+  name: string;
+  owner: boolean;
+  connect: boolean;
+  create: boolean;
+  temporary: boolean;
+}
+
+/** What one account may do, as far as this version reads it. */
+export interface AccountDetails {
+  /** MySQL: `SHOW GRANTS`, one statement each. */
+  grants: string[];
+  plugin: string | null;
+  passwordExpired: boolean;
+  /** PostgreSQL. */
+  attributes: RoleAttributes | null;
+  memberOf: string[];
+  members: string[];
+  databases: DatabaseAccess[];
+}
+
+/** What a new user is for: everything in one database, reading one database, or nothing yet. */
+export type UserTemplate = "app" | "readOnly" | "none";
+
+/** A user to create. The password travels to the backend only. */
+export interface UserSpec {
+  account: AccountRef;
+  template: UserTemplate;
+  database: string | null;
+  password: string;
+}
+
+/** One statement of a user form, in the order it runs. */
+export interface UserStep {
+  sql: string;
+  /** PostgreSQL: the database the statement runs inside; `null`: the server as a whole. */
+  database: string | null;
+}
+
 /** A database to create. Only the fields of the connection's engine are sent. */
 export interface NewDatabase {
   name: string;

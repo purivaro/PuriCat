@@ -1035,5 +1035,121 @@
     "viewSave": "Save view",
     "viewCreated": "View “{{name}}” created",
     "viewSaved": "View “{{name}}” saved"
+  },
+  "users": {
+    "menu": "Users and privileges…",
+    "title": "Users and privileges",
+    "search": "Find an account",
+    "new": "New user…",
+    "noMatch": "No account matches.",
+    "empty": "Select an account to see what it may do.",
+    "loadFailed": "The accounts could not be read: {{message}}",
+    "you": "you",
+    "system": "server's own",
+    "locked": "locked",
+    "noLogin": "no login",
+    "superuser": "superuser",
+    "yes": "Yes",
+    "no": "No",
+    "changePassword": "Change password…",
+    "drop": "Drop user…",
+    "untouchable": {
+      "you": "This is the account this connection is logged in as. PuriCat does not change it from here.",
+      "system": "One of the server's own accounts. PuriCat does not change it.",
+      "superuser": "A superuser. PuriCat does not change it."
+    },
+    "plugin": "Authentication",
+    "accountLocked": "Account locked",
+    "passwordExpired": "Password expired",
+    "grants": "Grants",
+    "grantsNote": "As SHOW GRANTS prints them: the server's own account of what this user may do.",
+    "attributes": "Attributes",
+    "attribute": {
+      "login": "Can log in",
+      "superuser": "Superuser",
+      "createDatabase": "Can create databases",
+      "createRole": "Can create roles",
+      "replication": "Replication",
+      "bypassRls": "Bypasses row-level security"
+    },
+    "connectionLimit": "Connection limit",
+    "noLimit": "none",
+    "validUntil": "Password valid until",
+    "forever": "no end",
+    "memberOf": "Member of",
+    "members": "Members",
+    "databases": "Databases",
+    "database": "Database",
+    "access": {
+      "owner": "Owner",
+      "connect": "CONNECT",
+      "create": "CREATE",
+      "temporary": "TEMP"
+    },
+    "tablesNote": "Privileges on the tables inside each database are not listed in this version.",
+    "newTitle": "New user",
+    "template": "What is this user for?",
+    "templates": {
+      "app": {
+        "title": "Application user",
+        "hint": "Everything inside one database, nothing outside it."
+      },
+      "readOnly": {
+        "title": "Read-only user",
+        "hint": "May read every table and view of one database."
+      },
+      "none": {
+        "title": "No privileges yet",
+        "hint": "The account alone. Grant what it needs later."
+      }
+    },
+    "name": "User name",
+    "namePlaceholder": "e.g. shop_app",
+    "host": "May connect from",
+    "hosts": {
+      "any": "Any host (%)",
+      "local": "This server only (localhost)",
+      "custom": "Another host…"
+    },
+    "hostPlaceholder": "e.g. 10.0.0.% or app.example.com",
+    "hostHint": "% is any host; localhost is the server's own machine.",
+    "chooseDatabase": "Choose a database",
+    "password": "Password",
+    "generate": "Generate",
+    "show": "Show the password",
+    "hide": "Hide the password",
+    "copyPassword": "Copy the password",
+    "statements": "Statements that will run",
+    "statementsEmpty": "Give the user a name, and a database if the template needs one, to see the statements.",
+    "inside": "Inside database {{name}}",
+    "maskNote": "What runs is this text with the real password where the mask is.",
+    "revealNote": "The password is shown as it will be written into the statement.",
+    "wildcardNote": "\\_ keeps the underscore from matching any character: in a grant, _ and % in a database name are wildcards.",
+    "pgDefaultNote": "ALTER DEFAULT PRIVILEGES covers only what {{role}} — the role this connection uses — creates later. Tables made by another role need a grant of their own.",
+    "pgPublicNote": "Nothing is taken away from PUBLIC: on most servers every role may still connect to the other databases. What it can read there depends on their own grants.",
+    "readOnly": "This connection is read-only, so it cannot change accounts. Turn off the read-only session in its settings first.",
+    "prodWarning": "This changes accounts on a PRODUCTION server.",
+    "back": "Back",
+    "create": "Create user",
+    "creating": "Creating…",
+    "created": "User {{name}} created",
+    "createdTitle": "{{name}} was created",
+    "keepPassword": "Copy the password now. PuriCat does not keep it, and the server stores only a hash of it.",
+    "done": "Done",
+    "passwordTitle": "New password for {{name}}",
+    "passwordAbout": "Whatever connects with the old password stops working once it is changed.",
+    "change": "Change password",
+    "changing": "Changing…",
+    "changed": "Password of {{name}} changed",
+    "changedTitle": "The password of {{name}} was changed",
+    "dropTitle": "Drop {{name}}?",
+    "dropAbout": {
+      "mysql": "The account and all its privileges are removed from the server. Sessions it has open keep running until they end.",
+      "postgres": "The role is removed from the server. PostgreSQL refuses while the role owns objects or still holds privileges: run REASSIGN OWNED BY and DROP OWNED BY for it in a query tab of each database first."
+    },
+    "dropButton": "Drop user",
+    "dropProd": "Drop on production",
+    "dropping": "Dropping…",
+    "dropped": "User {{name}} dropped"
   }
 }
