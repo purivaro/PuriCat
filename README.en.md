@@ -92,6 +92,8 @@ A MySQL or PostgreSQL connection's menu also has *Users and privileges…*: the 
 
 *Server sessions…* in the same menu lists who is connected to the server and what each session runs, for how long. A statement that runs too long can be stopped, or a forgotten session ended, after the statement that does it (`KILL QUERY`, `pg_cancel_backend`, …) is shown. A read-only connection only lists.
 
+*Find in database…* in a database's menu (or a PostgreSQL schema's) looks for a value in every table — contains, is exactly, or starts with — reading each table once on the server and showing, as it goes, the tables and columns that hold it and in how many rows. A result opens the table showing just those rows; *Stop* ends the search at once. It can also find the tables and columns whose *name* contains some text. Nothing is changed.
+
 ### Backups, by hand and on a schedule, and a restore into a new database
 
 Right-click a database → **Back up…** makes a backup with the database's own tool (`mysqldump` or `pg_dump`, which must be installed) into **a folder you choose**, and shows which tool it found and whether it fits the server. A file is kept only after it was checked to be complete; a backup that fails or is stopped leaves nothing behind. In the same dialog you can have the backup made **every day or on chosen days**, also while PuriCat is closed, and say how many to keep. Every backup in the dialog's history has **Restore…**, which loads it into a **new database** on the same connection, so that you can look at it beside the original: nothing that exists is replaced. Replacing an existing database is done with the same tools, outside PuriCat: [BACKUP_RESTORE.md](BACKUP_RESTORE.md) has the commands and the limits. Backup files are not encrypted.
