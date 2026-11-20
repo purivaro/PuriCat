@@ -40,4 +40,6 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 
 | [0029](0029-explain-and-query-parameters.md) | EXPLAIN as the server's own plan text (MySQL `FORMAT=TREE` or the classic table, PostgreSQL text, SQLite query plan) with whole-table reads marked, on a connection of its own; `EXPLAIN ANALYZE` only for a statement that reads. `:name` parameters found by the splitter's scanner and written in as literals of the engine (hex on MySQL and `E''` on PostgreSQL for a backslash) | Accepted | MySQL 9.3.0 and PostgreSQL 16.13 (live tests); through the window on MySQL |
 
+| [0030](0030-structure-compare.md) | Structure compare, the report: each side (a MySQL database or a PostgreSQL schema, same engine) read with four whole-schema catalogue queries, compared without the server — tables, views and columns by name, indexes and foreign keys by what they are, MySQL integer display widths ignored. Read-only; generating the changes is a later slice | Accepted | MySQL 9.3.0 and PostgreSQL 16.13 (live tests); through the window on MySQL |
+
 To add a record: copy the section layout of an existing one, use the next number, and add a row here. Do not rewrite an accepted record; supersede it with a new one.

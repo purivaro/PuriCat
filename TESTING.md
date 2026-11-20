@@ -720,6 +720,20 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-21 (structure compare)
+
+macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0030](docs/adr/0030-structure-compare.md).
+
+| Check | Result |
+|---|---|
+| `live_compare`: `mysql_compare_two_databases`, `postgres_compare_two_schemas` | Pass on the first run. Two MySQL databases and two PostgreSQL schemas made with known differences: a table on each side alone, a view on A alone, a table alike; in `orders` a column whose type and NULL differ, a column on each side alone, an index under another name found the same, a foreign key whose ON DELETE differs found as one on each side, a partial index with the same condition found the same (PostgreSQL), a Thai comment read whole (MySQL), identity read as an extra (PostgreSQL). A side compared with itself is alike; a PostgreSQL side without a schema is refused |
+| Unit tests | `compare::tests` (3): integer display widths, the compare of tables, columns, indexes and keys, a key with another action. `compareText.test.ts` (3): one-line descriptions, the tally, the text report |
+| End-to-end stage `compare` (MySQL) | Pass, in a full run: the demo database against one built from it (customers the same, products with a longer title and a column more, the rest missing): 1 alike, 1 differs, 2 tables and 1 view only in A, the title's two types and the extra column side by side |
+| Full `e2e/run.sh` | Not passed through to the end yet. Of two runs at night, one stopped in an earlier SQL stage while other programs kept the load near 18; the other passed every stage up to and including `compare`, then stalled at `dialog-sqlite` when the Mac's display slept and the screen locked. No screenshot of the compare dialog was saved, so it has not been looked at by hand |
+| `pnpm check` | Pass (Vitest 139, core unit 167) |
+
+Not verified: a full run to the end, the dialog looked at by hand, PostgreSQL through the window, servers of different versions, MariaDB, Thai and dark.
+
 ## Results — 2026-11-21 (explain and parameters)
 
 macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0029](docs/adr/0029-explain-and-query-parameters.md).
