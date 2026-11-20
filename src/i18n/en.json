@@ -948,6 +948,38 @@
     "analyze": "Run and measure",
     "copied": "Plan copied"
   },
+  "compare": {
+    "menu": "Compare structure…",
+    "title": "Compare structure",
+    "run": "Compare",
+    "sameSide": "Choose another database to compare with: this is A itself.",
+    "nothingYet": "Choose the database to compare with, then Compare. Nothing is changed.",
+    "identical_one": "Alike: {{count}} table, the same on both sides.",
+    "identical_other": "Alike: {{count}} tables, the same on both sides.",
+    "count": {
+      "changed": "differ",
+      "onlyA": "only in A",
+      "onlyB": "only in B",
+      "same": "alike"
+    },
+    "onlyA": "Only in A",
+    "onlyB": "Only in B",
+    "view": "view",
+    "index": "Index",
+    "foreignKey": "Foreign key",
+    "absent": "not there",
+    "field": {
+      "type": "type",
+      "nullable": "NULL",
+      "default": "default",
+      "extra": "extras",
+      "comment": "comment",
+      "collation": "collation"
+    },
+    "how": "Tables and columns are matched by name. Indexes and foreign keys are matched by what they are, not by their name, so one renamed by a server is not a difference. MySQL's integer display widths (int(11)) are left out.",
+    "copy": "Copy the report",
+    "copied": "Report copied"
+  },
   "copy": {
     "menu": "Copy rows to…",
     "onProblemStop": "Stop the copy",

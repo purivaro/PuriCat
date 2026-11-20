@@ -93,6 +93,7 @@ pub fn run() {
             commands::import_batch,
             commands::copy_preview,
             commands::copy_rows,
+            commands::compare_structure,
             commands::cancel_job,
             commands::analyze_sql,
             commands::run_sql,

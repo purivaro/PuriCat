@@ -28,6 +28,7 @@ import type {
   ExportFormat,
   FileReadOptions,
   BatchOutcome,
+  Comparison,
   CopyBatch,
   CopyPreview,
   FileTable,
@@ -175,6 +176,9 @@ export const ipc = {
   /** One batch of a large import, in one transaction; `cancelJob(job)` stops it. */
   importBatch: (id: string, table: TableRef, request: PasteRequest, onProblem: OnProblem, job: string) =>
     invoke<BatchOutcome>("import_batch", { id, table, request, onProblem, job }),
+  /** Structure compare of database (or PostgreSQL schema) A with B, of the same engine. Reads only. */
+  compareStructure: (aId: string, aDatabase: string, aSchema: string | null, bId: string, bDatabase: string, bSchema: string | null) =>
+    invoke<Comparison>("compare_structure", { aId, aDatabase, aSchema, bId, bDatabase, bSchema }),
   /** The first `limit` rows of `from`, analysed against `to` as a paste. Writes nothing. */
   copyPreview: (sourceId: string, from: TableRef, columns: string[], targetId: string, to: TableRef, request: PasteRequest, limit: number) =>
     invoke<CopyPreview>("copy_preview", { sourceId, from, columns, targetId, to, request, limit }),

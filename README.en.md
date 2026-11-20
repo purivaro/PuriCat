@@ -94,6 +94,8 @@ A MySQL or PostgreSQL connection's menu also has *Users and privileges…*: the 
 
 *Find in database…* in a database's menu (or a PostgreSQL schema's) looks for a value in every table — contains, is exactly, or starts with — reading each table once on the server and showing, as it goes, the tables and columns that hold it and in how many rows. A result opens the table showing just those rows; *Stop* ends the search at once. It can also find the tables and columns whose *name* contains some text. Nothing is changed.
 
+*Compare structure…* on a database (on PostgreSQL, a schema) compares it with another of the same engine — local against production, say — and lists the tables each has alone and, for the tables both have, the columns, indexes and foreign keys that differ. Nothing is changed.
+
 *Copy rows to…* in a table's menu copies its rows into a table on any connection — another database, another server, even MySQL to PostgreSQL. Columns pair up by name, the first rows are checked against the target, and the rows are then written a thousand at a time, with the same choice and report as a large import.
 
 ### Backups, by hand and on a schedule, and a restore into a new database

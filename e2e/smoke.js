@@ -1790,6 +1790,40 @@
     await sqlOn(pgConn, "DROP TABLE shop.copied", "e2e-copy-drop");
     log.push({ stage: "copy-rows-done", copied, inPostgres });
 
+    // Structure compare: the demo database (A) with one built from it with differences (B):
+    // customers the same, products with a longer title and a column more, the rest missing.
+    for (const sql of [
+      "CREATE DATABASE puricat_e2e_cmp",
+      "CREATE TABLE puricat_e2e_cmp.customers LIKE puricat_e2e.customers",
+      "CREATE TABLE puricat_e2e_cmp.products LIKE puricat_e2e.products",
+      "ALTER TABLE puricat_e2e_cmp.products MODIFY title VARCHAR(200) NOT NULL, ADD extra INT",
+    ]) {
+      await sqlOn(mysqlConnId, sql, "e2e-cmp-make");
+    }
+    const compareDialog = () => document.querySelector("[data-compare]");
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await dbMenu("Demo MySQL", "puricat_e2e", "Compare structure…");
+    await setChoice(
+      await waitFor(() => compareDialog()?.querySelector('[data-compare-database] option[value="puricat_e2e_cmp"]') && compareDialog().querySelector("[data-compare-database]"), "the databases to compare with", 20000),
+      "puricat_e2e_cmp",
+    );
+    await click(compareDialog().querySelector("[data-compare-run]"), "compare");
+    await waitFor(() => compareDialog().querySelector("[data-compare-summary]"), "the comparison", 20000);
+    const compareCounts = Object.fromEntries(all("[data-compare-count]").map((e) => [e.dataset.compareCount, e.querySelector("b").textContent]));
+    const onlyInA = compareDialog().querySelector('[data-compare-only="a"]')?.textContent.replace(/\s+/g, " ").trim() ?? "";
+    const differs = all("[data-compare-table]").map((s) => s.dataset.compareTable);
+    const productColumns = all('[data-compare-table="products"] [data-compare-column]').map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    await stage("compare", { compareCounts, onlyInA, differs, productColumns });
+    if (differs.join() !== "products" || compareCounts.same !== "1") throw new Error(`compared as ${JSON.stringify({ differs, compareCounts })}`);
+    if (!onlyInA.includes("orders") || !onlyInA.includes("order_totals")) throw new Error(`only in A: ${onlyInA}`);
+    if (productColumns.length !== 2 || !productColumns[0].startsWith("title") || !productColumns[0].includes("varchar(200)") || !productColumns[1].startsWith("extra")) {
+      throw new Error(`the products columns compared as ${JSON.stringify(productColumns)}`);
+    }
+    await click(exact("[data-compare] button", "Close"), "close the compare");
+    await waitFor(() => !compareDialog(), "the compare closed");
+    await sqlOn(mysqlConnId, "DROP DATABASE puricat_e2e_cmp", "e2e-cmp-drop");
+    log.push({ stage: "compare-done", compareCounts, differs });
+
     await click(all('[role="tab"]').find((t) => t.title === mysqlQueryTitle), "back to the MySQL query tab");
     await waitFor(() => frontTab()?.title === mysqlQueryTitle && sqlTab()?.__editor, "the MySQL query tab in front");
     log.push({ stage: "new-table-done", createdColumns });

@@ -973,6 +973,32 @@ pub async fn copy_rows(
     result
 }
 
+/// Structure compare: database (or PostgreSQL schema) A against B, of the same engine. Reads only.
+#[tauri::command]
+pub async fn compare_structure(
+    state: State<'_, AppState>,
+    a_id: String,
+    a_database: String,
+    a_schema: Option<String>,
+    b_id: String,
+    b_database: String,
+    b_schema: Option<String>,
+) -> Result<puricat_core::db::compare::Comparison> {
+    let a = state.session(&a_id).await?;
+    let b = state.session(&b_id).await?;
+    if a.engine() != b.engine() {
+        return Err(Error::Invalid(
+            "Compare two databases of the same kind: MySQL with MySQL, PostgreSQL with PostgreSQL"
+                .into(),
+        ));
+    }
+    let (left, right) = tokio::join!(
+        a.structure(&a_database, a_schema.as_deref()),
+        b.structure(&b_database, b_schema.as_deref())
+    );
+    Ok(puricat_core::db::compare::compare(&left?, &right?))
+}
+
 /// Ask a running job to stop. It rolls back at the next statement boundary.
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, job: String) {
