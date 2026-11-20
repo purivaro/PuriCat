@@ -94,6 +94,8 @@ A MySQL or PostgreSQL connection's menu also has *Users and privileges…*: the 
 
 *Find in database…* in a database's menu (or a PostgreSQL schema's) looks for a value in every table — contains, is exactly, or starts with — reading each table once on the server and showing, as it goes, the tables and columns that hold it and in how many rows. A result opens the table showing just those rows; *Stop* ends the search at once. It can also find the tables and columns whose *name* contains some text. Nothing is changed.
 
+*Copy rows to…* in a table's menu copies its rows into a table on any connection — another database, another server, even MySQL to PostgreSQL. Columns pair up by name, the first rows are checked against the target, and the rows are then written a thousand at a time, with the same choice and report as a large import.
+
 ### Backups, by hand and on a schedule, and a restore into a new database
 
 Right-click a database → **Back up…** makes a backup with the database's own tool (`mysqldump` or `pg_dump`, which must be installed) into **a folder you choose**, and shows which tool it found and whether it fits the server. A file is kept only after it was checked to be complete; a backup that fails or is stopped leaves nothing behind. In the same dialog you can have the backup made **every day or on chosen days**, also while PuriCat is closed, and say how many to keep. Every backup in the dialog's history has **Restore…**, which loads it into a **new database** on the same connection, so that you can look at it beside the original: nothing that exists is replaced. Replacing an existing database is done with the same tools, outside PuriCat: [BACKUP_RESTORE.md](BACKUP_RESTORE.md) has the commands and the limits. Backup files are not encrypted.
