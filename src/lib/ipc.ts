@@ -1,6 +1,9 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
+  Account,
+  AccountDetails,
+  AccountRef,
   AgentEvent,
   AiProvider,
   AlterDatabase,
@@ -35,9 +38,9 @@ import type {
   PasteAnalysis,
   PasteRequest,
   PickedFile,
+  QueryPreview,
   RestorePlan,
   RowCount,
-  QueryPreview,
   RowFilter,
   RowPage,
   RunOutcome,
@@ -54,6 +57,8 @@ import type {
   UniqueKey,
   UpdateInfo,
   UpdateProgress,
+  UserSpec,
+  UserStep,
   ViewSpec,
 } from "./types";
 
@@ -161,6 +166,19 @@ export const ipc = {
   /** The first rows of a view's query, read on a connection that cannot write. */
   previewViewSelect: (id: string, database: string, select: string) =>
     invoke<QueryPreview>("preview_view_select", { id, database, select }),
+  listAccounts: (id: string) => invoke<Account[]>("list_accounts", { id }),
+  accountDetails: (id: string, account: AccountRef) => invoke<AccountDetails>("account_details", { id, account }),
+  /** The statements `createUser` would run. `reveal`: with the password instead of the mask. Runs nothing. */
+  planUser: (id: string, spec: UserSpec, reveal: boolean) => invoke<UserStep[]>("plan_user", { id, spec, reveal }),
+  /** All of it or none. Answers with the statements that ran, the password masked. */
+  createUser: (id: string, spec: UserSpec) => invoke<UserStep[]>("create_user", { id, spec }),
+  planPassword: (id: string, account: AccountRef, password: string, reveal: boolean) =>
+    invoke<string>("plan_password", { id, account, password, reveal }),
+  changePassword: (id: string, account: AccountRef, password: string) =>
+    invoke<string>("change_password", { id, account, password }),
+  planDropUser: (id: string, account: AccountRef) => invoke<string>("plan_drop_user", { id, account }),
+  /** `typed` is what the user typed to confirm; the backend checks it against the account's name. */
+  dropUser: (id: string, account: AccountRef, typed: string) => invoke<string>("drop_user", { id, account, typed }),
   planFlush: (id: string, what: FlushKind) => invoke<string>("plan_flush", { id, what }),
   flushServer: (id: string, what: FlushKind) => invoke<string>("flush_server", { id, what }),
   /** Shows the native Open dialog for a SQL file and gives its text. `null` when it was cancelled. */

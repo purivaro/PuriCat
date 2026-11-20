@@ -19,6 +19,7 @@ use puricat_core::db::export::{self, Format};
 use puricat_core::db::filter::Filter;
 use puricat_core::db::script;
 use puricat_core::db::smart::{Analysis, PasteRequest, UniqueKey};
+use puricat_core::db::users::{self, Account, AccountDetails, AccountRef, Step, UserSpec};
 use puricat_core::db::write::{ApplyResult, CellValue, ChangeSet, Statement};
 use puricat_core::db::{
     CellContent, DbObject, Namespace, ObjectKind, PageRequest, QueryPreview, RowCount, RowPage,
@@ -530,6 +531,111 @@ pub async fn preview_view_select(
         .await?
         .preview_select(&database, &select, VIEW_PREVIEW_ROWS)
         .await
+}
+
+// ---- users and privileges ---------------------------------------------------------------
+//
+// A password crosses this boundary from the UI to the backend only. It comes back in one
+// case: inside the previewed statement, to the form that sent it, when the user asked to
+// see it (`reveal`).
+
+/// The accounts of the server.
+#[tauri::command]
+pub async fn list_accounts(state: State<'_, AppState>, id: String) -> Result<Vec<Account>> {
+    state.session(&id).await?.list_accounts().await
+}
+
+/// What one account may do. Reads only.
+#[tauri::command]
+pub async fn account_details(
+    state: State<'_, AppState>,
+    id: String,
+    account: AccountRef,
+) -> Result<AccountDetails> {
+    state.session(&id).await?.account_details(&account).await
+}
+
+/// The statements the "New user" form would run, in order. Runs nothing.
+#[tauri::command]
+pub async fn plan_user(
+    state: State<'_, AppState>,
+    id: String,
+    spec: UserSpec,
+    reveal: bool,
+) -> Result<Vec<Step>> {
+    state.session(&id).await?.plan_user(&spec, reveal).await
+}
+
+/// Create a user from a template: all of it or none. Returns the statements that ran, with
+/// the mask where the password is.
+#[tauri::command]
+pub async fn create_user(
+    state: State<'_, AppState>,
+    id: String,
+    spec: UserSpec,
+) -> Result<Vec<Step>> {
+    refuse_read_only(&state, &id, "create a user").await?;
+    state.session(&id).await?.create_user(&spec).await
+}
+
+/// The statement that would give an account another password. Runs nothing.
+#[tauri::command]
+pub async fn plan_password(
+    state: State<'_, AppState>,
+    id: String,
+    account: AccountRef,
+    password: String,
+    reveal: bool,
+) -> Result<String> {
+    state
+        .session(&id)
+        .await?
+        .plan_password(&account, &password, reveal)
+        .await
+}
+
+/// Give an account another password. Returns the statement that ran, masked.
+#[tauri::command]
+pub async fn change_password(
+    state: State<'_, AppState>,
+    id: String,
+    account: AccountRef,
+    password: String,
+) -> Result<String> {
+    refuse_read_only(&state, &id, "change a password").await?;
+    state
+        .session(&id)
+        .await?
+        .change_password(&account, &password)
+        .await
+}
+
+/// The exact statement that would drop an account. Runs nothing.
+#[tauri::command]
+pub async fn plan_drop_user(
+    state: State<'_, AppState>,
+    id: String,
+    account: AccountRef,
+) -> Result<String> {
+    state.session(&id).await?.plan_drop_user(&account).await
+}
+
+/// Drop an account. `typed` is what the user typed to confirm, checked here too.
+#[tauri::command]
+pub async fn drop_user(
+    state: State<'_, AppState>,
+    id: String,
+    account: AccountRef,
+    typed: String,
+) -> Result<String> {
+    refuse_read_only(&state, &id, "drop a user").await?;
+    let session = state.session(&id).await?;
+    if typed != users::display_name(session.engine(), &account) {
+        return Err(Error::Invalid(
+            "Type the account's name exactly as it is shown to drop it.".into(),
+        ));
+    }
+    session.drop_user(&account).await
 }
 
 /// The exact `FLUSH` statement of a MySQL connection's menu. Runs nothing.

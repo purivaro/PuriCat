@@ -38,6 +38,10 @@ drop_made() {
   # The "restore" stage loads a backup into this one, on both servers.
   "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e 'DROP DATABASE IF EXISTS puricat_e2e_restored' 2>/dev/null || true
   "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP DATABASE IF EXISTS puricat_e2e_restored WITH (FORCE)' >/dev/null 2>&1 || true
+  # The "users" stage creates this account through the app and drops it again; a run that
+  # stopped in between must not leave it.
+  "$MYSQL" -u"$MYSQL_USER" -h127.0.0.1 -e "DROP USER IF EXISTS 'puricat_e2e_user'@'localhost'" 2>/dev/null || true
+  "$PSQL" -qX -h127.0.0.1 -U"$PG_USER" -d postgres -c 'DROP ROLE IF EXISTS puricat_e2e_user' >/dev/null 2>&1 || true
 }
 drop_made
 

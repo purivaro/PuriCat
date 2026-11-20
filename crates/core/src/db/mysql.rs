@@ -6,6 +6,7 @@ use sqlx::{ConnectOptions, Executor, Row};
 use super::console::Console;
 use super::filter::Where;
 use super::smart::UniqueKey;
+use super::users::{self, Facts};
 use super::write::{self, Statement};
 use super::{
     ident, Capabilities, ColumnMeta, DbObject, Namespace, ObjectKind, Order, PageRequest,
@@ -386,6 +387,39 @@ impl MySqlSession {
         result.map_err(Error::database)
     }
 
+    /// What the statements of the user forms depend on, as one connection of the pool has
+    /// it. For a preview: a statement that runs asks the connection it runs on (see
+    /// `account_connection`).
+    pub async fn account_facts(&self) -> Result<Facts> {
+        let mut conn = self.pool.acquire().await.map_err(Error::database)?;
+        account_facts(&mut conn).await
+    }
+
+    /// A connection of its own for statements that carry a string literal, with what was
+    /// read on it: the literal is then written for the `sql_mode` it will be read in.
+    pub async fn account_connection(&self) -> Result<(sqlx::MySqlConnection, Facts)> {
+        let mut conn = self.pool.acquire().await.map_err(Error::database)?.detach();
+        match account_facts(&mut conn).await {
+            Ok(facts) => Ok((conn, facts)),
+            Err(e) => {
+                let _ = sqlx::Connection::close(conn).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// `SHOW GRANTS` for an account already written as `'user'@'host'`: one statement a row.
+    pub async fn show_grants(&self, account: &str) -> Result<Vec<String>> {
+        // Not a statement the server prepares: sent as text.
+        let rows = sqlx::raw_sql(&format!("SHOW GRANTS FOR {account}"))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::database)?;
+        rows.iter()
+            .map(|row| Ok(text(row, 0)?.unwrap_or_default()))
+            .collect()
+    }
+
     /// The query of a view as the server keeps it: its own rewriting, with every name
     /// qualified, not the text that was typed.
     pub async fn view_select(&self, table: &TableRef) -> Result<String> {
@@ -520,6 +554,29 @@ fn value_kind(data_type: &str, column_type: &str) -> ValueKind {
         "json" => ValueKind::Json,
         _ => ValueKind::Other,
     }
+}
+
+/// What the user forms' statements depend on, read on the connection they will run on.
+async fn account_facts(conn: &mut sqlx::MySqlConnection) -> Result<Facts> {
+    let mode = sqlx::query("SELECT @@SESSION.sql_mode")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Error::database)?;
+    // The variable exists from MySQL 8.0.16 on; asked for by name so older servers answer
+    // with no row instead of an error.
+    let partial = sqlx::query("SHOW VARIABLES LIKE 'partial_revokes'")
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(Error::database)?;
+    let partial = match partial {
+        Some(row) => text(&row, 1)?.unwrap_or_default(),
+        None => String::new(),
+    };
+    Ok(Facts {
+        no_backslash_escapes: users::no_backslash_escapes(&text(&mode, 0)?.unwrap_or_default()),
+        literal_wildcards: partial.eq_ignore_ascii_case("ON"),
+        ..Default::default()
+    })
 }
 
 /// Read a string-typed column. MySQL reports several catalogue columns as binary

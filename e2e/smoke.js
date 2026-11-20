@@ -528,6 +528,90 @@
     await waitFor(() => viewsGroup().getAttribute("aria-expanded") === "false", "the views group closed");
     log.push({ stage: "view-form", viewMenuItems, viewKept, viewReplacePlan, viewAfter });
 
+    // ---- users and privileges: the accounts, a new user from a template, its grants, drop
+    const usersDialog = () => document.querySelector("[data-users-dialog]");
+    const usersView = (kind) => usersDialog()?.querySelector(`[data-users-view="${kind}"]`);
+    const usersButton = (label) => all("[data-users-dialog] button").find((b) => b.textContent.trim() === label);
+    const accountRow = (label) => all("[data-users-dialog] [data-account-row]").find((r) => r.dataset.accountRow === label);
+    // The statements of a form, once they answer the choices on screen.
+    const usersPlan = () => all("[data-users-dialog] [data-ddl-preview]:not([aria-busy='true']) pre").map((p) => p.textContent.trim());
+    const badges = (row) => [...row.querySelectorAll("span")].filter((x) => x.children.length === 0).map((x) => x.textContent.trim());
+    await rightClick(treeRow("Demo MySQL"));
+    await click(await waitFor(() => menuItem("Users and privileges…"), "users menu item"), "users and privileges");
+    await waitFor(() => usersView("browse") && accountRow("mysql.sys@localhost"), "the accounts of the server");
+    // this connection's own account is marked, and so are the server's own
+    const ownRow = all("[data-users-dialog] [data-account-row]").find((r) => badges(r).includes("you"));
+    if (!ownRow || !ownRow.dataset.accountRow.startsWith("__MYSQL_USER__@")) throw new Error(`the account marked "you": ${ownRow?.dataset.accountRow}`);
+    if (!badges(accountRow("mysql.sys@localhost")).includes("server's own")) throw new Error("mysql.sys is not marked as the server's own");
+    // its grants as the server prints them; the forms are not offered for it
+    await click(ownRow, "own account");
+    const ownGrants = await waitFor(() => usersDialog().querySelector("[data-grants]")?.textContent, "grants of the own account");
+    if (!ownGrants.startsWith("GRANT ")) throw new Error(`grants of the own account: ${ownGrants.slice(0, 80)}`);
+    const ownFixed = [usersButton("Change password…").disabled, usersButton("Drop user…").disabled];
+    if (ownFixed.some((disabled) => !disabled)) throw new Error("the own account can be changed from the list");
+    await stage("users", { ownAccount: ownRow.dataset.accountRow, accounts: all("[data-users-dialog] [data-account-row]").length, ownGrants: ownGrants.slice(0, 120) });
+
+    // a read-only user for one database: the statements with the password masked
+    await click(usersButton("New user…"), "new user");
+    await waitFor(() => usersView("new"), "new user form");
+    const userNoPlan = usersDialog().querySelector("[data-ddl-preview-empty]")?.textContent.trim();
+    await click(usersDialog().querySelector('[data-template="readOnly"]'), "read-only template");
+    await type(field("User name"), "puricat_e2e_user");
+    await setChoice(field("May connect from"), "localhost");
+    await waitFor(() => [...field("Database").options].some((o) => o.value === "puricat_e2e"), "databases to choose from");
+    // Only the count goes into the report: the other databases on a developer's server are theirs.
+    const userDatabases = [...field("Database").options].map((o) => o.value).filter(Boolean);
+    const systemOffered = userDatabases.filter((d) => ["mysql", "information_schema", "performance_schema", "sys"].includes(d));
+    if (systemOffered.length > 0) throw new Error(`system databases are offered: ${systemOffered}`);
+    await setChoice(field("Database"), "puricat_e2e");
+    const userMasked = "CREATE USER 'puricat_e2e_user'@'localhost' IDENTIFIED BY '••••••••';\nGRANT SELECT, SHOW VIEW ON `puricat\\_e2e`.* TO 'puricat_e2e_user'@'localhost';";
+    const userPlan = await waitFor(() => usersPlan().length === 1 && usersPlan()[0], "statements of the new user");
+    if (userPlan !== userMasked) throw new Error(`statements of the new user: ${userPlan}`);
+    // nothing is created without a password
+    if (!usersButton("Create user").disabled) throw new Error("a user can be created without a password");
+    // a generated password is shown, and then the statement holds it, as it will be written
+    await click(usersButton("Generate"), "generate a password");
+    const generated = field("Password").value;
+    if (!/^[A-Za-z0-9]{24}$/.test(generated) || field("Password").type !== "text") throw new Error("the generated password is not 24 letters and digits in view");
+    await waitFor(() => usersPlan()[0] === userMasked.replace("'••••••••'", `'${generated}'`), "the statement with the password");
+    // hidden again, the mask is back
+    await click(usersDialog().querySelector('button[aria-label="Hide the password"]'), "hide the password");
+    await waitFor(() => usersPlan()[0] === userMasked && field("Password").type === "password", "the mask again");
+    await waitFor(() => !usersButton("Create user").disabled, "create button");
+    await stage("user-new", { userNoPlan, databasesOffered: userDatabases.length, userPlan });
+    await click(usersButton("Create user"), "create user");
+    // the one chance to copy the password, then the new account in the list, selected
+    const kept = (await waitFor(() => usersDialog().querySelector("[data-users-done] [data-password]"), "the password to copy", 15000)).value;
+    if (kept !== generated) throw new Error("the password shown after creating is not the one that was set");
+    await click(usersButton("Done"), "done");
+    await waitFor(() => usersView("browse") && accountRow("puricat_e2e_user@localhost")?.getAttribute("aria-selected") === "true", "the new account, selected");
+    const userGrants = await waitFor(() => {
+      const text = usersDialog().querySelector("[data-grants]")?.textContent;
+      return text?.includes("puricat_e2e_user") && text;
+    }, "grants of the new user");
+    if (!userGrants.includes("GRANT SELECT, SHOW VIEW ON `puricat\\_e2e`.*")) throw new Error(`grants of the new user: ${userGrants}`);
+    // the server has it so: reading that database, and nothing more in it
+    const granted = await scratchCount("SELECT COUNT(*) FROM mysql.db WHERE User = 'puricat_e2e_user' AND Host = 'localhost' AND Db = 'puricat\\\\_e2e' AND Select_priv = 'Y' AND Show_view_priv = 'Y' AND Insert_priv = 'N' AND Delete_priv = 'N'");
+    if (granted !== 1) throw new Error("the server does not hold the grant the form showed");
+
+    // drop: only after the account was typed as it is written, host included
+    await click(usersButton("Drop user…"), "drop user");
+    const userDropPlan = await waitFor(() => usersView("drop") && usersDialog().querySelector("[data-ddl-preview]")?.textContent.trim(), "drop user statement");
+    if (userDropPlan !== "DROP USER 'puricat_e2e_user'@'localhost';") throw new Error(`drop user statement: ${userDropPlan}`);
+    const userConfirm = usersDialog().querySelector("[data-confirm-name]");
+    const userDropStates = [usersButton("Drop user").disabled];
+    await type(userConfirm, "puricat_e2e_user");
+    userDropStates.push(usersButton("Drop user").disabled);
+    await type(userConfirm, "puricat_e2e_user@localhost");
+    await waitFor(() => !usersButton("Drop user").disabled, "drop user button once the account is typed");
+    if (userDropStates.some((disabled) => !disabled)) throw new Error("the drop user button was enabled before the account was typed");
+    await click(usersButton("Drop user"), "drop the user");
+    await waitFor(() => usersView("browse") && !accountRow("puricat_e2e_user@localhost"), "the account gone from the list", 15000);
+    if ((await scratchCount("SELECT COUNT(*) FROM mysql.user WHERE User = 'puricat_e2e_user'")) !== 0) throw new Error("the dropped user is still on the server");
+    await click(usersDialog().querySelector('button[aria-label="Close"]'), "close users and privileges");
+    await waitFor(() => !usersDialog(), "users dialog closed");
+    log.push({ stage: "users-form", userGrants, userDropPlan });
+
     // ---- backups: a database's menu, a folder of the user's choice, the history, a schedule
     const backupDialog = () => document.querySelector("[data-backup-dialog]");
     const inBackup = (sel) => backupDialog()?.querySelector(sel);
