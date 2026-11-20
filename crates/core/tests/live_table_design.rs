@@ -324,3 +324,165 @@ async fn postgres_table_changes() {
         .unwrap();
     outcome.unwrap();
 }
+
+/// Changing a column keeps what is not changed, and foreign keys are made and dropped.
+#[tokio::test]
+async fn mysql_column_changes_and_foreign_keys() {
+    let Some((profile, password)) = target(Engine::Mysql, "PURICAT_TEST_MYSQL") else {
+        eprintln!("skipped: PURICAT_TEST_MYSQL is not set");
+        return;
+    };
+    let mut opts = sqlx::mysql::MySqlConnectOptions::new()
+        .host(&profile.host)
+        .port(profile.port)
+        .username(&profile.username);
+    if let Some(pw) = &password {
+        opts = opts.password(pw);
+    }
+    let mut admin = sqlx::MySqlConnection::connect_with(&opts).await.unwrap();
+    let db = scratch_name();
+    admin
+        .execute(format!("CREATE DATABASE `{db}` CHARACTER SET utf8mb4").as_str())
+        .await
+        .unwrap();
+    let d = db.clone();
+
+    let outcome = tokio::spawn(async move {
+        let session = Session::connect(&profile, password.as_deref()).await.unwrap();
+        let mut conn = sqlx::MySqlConnection::connect_with(&opts.database(&d)).await.unwrap();
+        conn.execute(
+            "CREATE TABLE customers (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50) NOT NULL);
+             CREATE TABLE orders (
+               id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+               customer_id INT UNSIGNED NOT NULL,
+               title VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT 'ไม่มีชื่อ' COMMENT 'ชื่อ',
+               at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3));
+             INSERT INTO customers (name) VALUES ('ก'), ('ข');
+             INSERT INTO orders (customer_id) VALUES (1), (2);",
+        )
+        .await
+        .unwrap();
+        let table = TableRef { database: d.clone(), schema: None, name: "orders".into() };
+        let before = session.column_definitions(&table).await.unwrap();
+
+        // Only NULL changes on two columns, and only the type on the id: the rest stays.
+        session
+            .alter_table(&change(&d, None, "orders", json!([
+                { "kind": "changeColumn", "name": "title", "nullable": true },
+                { "kind": "changeColumn", "name": "at", "nullable": true },
+                { "kind": "changeColumn", "name": "id", "type": { "type": "BIGINT", "unsigned": true } },
+                { "kind": "addForeignKey", "name": "fk_customer", "columns": ["customer_id"], "references": { "database": d, "schema": null, "name": "customers" }, "refColumns": ["id"], "onDelete": "cascade" }
+            ])))
+            .await
+            .unwrap();
+        let after = session.column_definitions(&table).await.unwrap();
+        let col = |list: &[puricat_core::db::table_design::ColumnDefinition], n: &str| list.iter().find(|c| c.name == n).unwrap().clone();
+        let (t0, t1) = (col(&before, "title"), col(&after, "title"));
+        assert!(t1.nullable && !t0.nullable);
+        assert_eq!((t1.column_type.as_str(), t1.default.as_deref(), t1.comment.as_deref(), t1.collation.as_deref()), ("varchar(120)", Some("ไม่มีชื่อ"), Some("ชื่อ"), Some("utf8mb4_bin")));
+        let a1 = col(&after, "at");
+        assert!(a1.nullable);
+        assert_eq!(a1.default.as_deref(), Some("CURRENT_TIMESTAMP(3)"));
+        assert!(a1.extra.contains("on update CURRENT_TIMESTAMP(3)"), "{}", a1.extra);
+        let i1 = col(&after, "id");
+        assert_eq!((i1.column_type.as_str(), i1.extra.as_str()), ("bigint unsigned", "auto_increment"));
+
+        let fks = session.foreign_keys(&table).await.unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!((fks[0].name.as_str(), fks[0].columns.join(","), fks[0].references.name.as_str(), fks[0].on_delete), ("fk_customer", "customer_id".to_string(), "customers", Some(puricat_core::db::table_design::FkAction::Cascade)));
+        // The key works: a customer's orders go with the customer.
+        conn.execute("DELETE FROM customers WHERE id = 1").await.unwrap();
+        let left: i64 = sqlx::query("SELECT COUNT(*) FROM orders").fetch_one(&mut conn).await.unwrap().get(0);
+        assert_eq!(left, 1);
+
+        session.alter_table(&change(&d, None, "orders", json!([{ "kind": "dropForeignKey", "name": "fk_customer" }]))).await.unwrap();
+        assert!(session.foreign_keys(&table).await.unwrap().is_empty());
+        session.close().await;
+    })
+    .await;
+    admin
+        .execute(format!("DROP DATABASE IF EXISTS `{db}`").as_str())
+        .await
+        .unwrap();
+    outcome.unwrap();
+}
+
+#[tokio::test]
+async fn postgres_column_changes_and_foreign_keys() {
+    let Some((profile, password)) = target(Engine::Postgres, "PURICAT_TEST_POSTGRES") else {
+        eprintln!("skipped: PURICAT_TEST_POSTGRES is not set");
+        return;
+    };
+    let opts = |database: &str| {
+        let mut o = sqlx::postgres::PgConnectOptions::new()
+            .host(&profile.host)
+            .port(profile.port)
+            .username(&profile.username)
+            .database(database);
+        if let Some(pw) = &password {
+            o = o.password(pw);
+        }
+        o
+    };
+    let mut admin = sqlx::PgConnection::connect_with(&opts("postgres"))
+        .await
+        .unwrap();
+    let db = scratch_name();
+    admin
+        .execute(format!("CREATE DATABASE \"{db}\"").as_str())
+        .await
+        .unwrap();
+    let (d, o) = (db.clone(), opts(&db));
+    let (p, pw) = (profile.clone(), password.clone());
+
+    let outcome = tokio::spawn(async move {
+        let session = Session::connect(&p, pw.as_deref()).await.unwrap();
+        let mut conn = sqlx::PgConnection::connect_with(&o).await.unwrap();
+        conn.execute(
+            "CREATE TABLE customers (id int PRIMARY KEY);
+             CREATE TABLE orders (id int PRIMARY KEY, customer_id int, qty text NOT NULL DEFAULT '1');
+             COMMENT ON COLUMN orders.qty IS 'จำนวน';
+             INSERT INTO customers VALUES (1), (2); INSERT INTO orders VALUES (1, 1, '5'), (2, 2, '7');",
+        )
+        .await
+        .unwrap();
+        let table = TableRef { database: d.clone(), schema: Some("public".into()), name: "orders".into() };
+        session
+            .alter_table(&change(&d, Some("public"), "orders", json!([
+                { "kind": "changeColumn", "name": "qty", "type": { "type": "integer" }, "default": { "kind": "value", "value": "0" }, "comment": "" },
+                { "kind": "addForeignKey", "name": "fk_c", "columns": ["customer_id"], "references": { "database": d, "schema": "public", "name": "customers" }, "refColumns": ["id"], "onDelete": "setNull" }
+            ])))
+            .await
+            .unwrap();
+        let q = session.column_definitions(&table).await.unwrap().into_iter().find(|c| c.name == "qty").unwrap();
+        assert_eq!((q.column_type.as_str(), q.default.as_deref(), q.comment.as_deref(), q.nullable), ("integer", Some("0"), None, false));
+        let sum: i64 = sqlx::query("SELECT SUM(qty)::bigint FROM orders").fetch_one(&mut conn).await.unwrap().get(0);
+        assert_eq!(sum, 12, "the text values were converted");
+        let fks = session.foreign_keys(&table).await.unwrap();
+        assert_eq!((fks.len(), fks[0].on_delete), (1, Some(puricat_core::db::table_design::FkAction::SetNull)));
+        conn.execute("DELETE FROM customers WHERE id = 2").await.unwrap();
+        let nulls: i64 = sqlx::query("SELECT COUNT(*) FROM orders WHERE customer_id IS NULL").fetch_one(&mut conn).await.unwrap().get(0);
+        assert_eq!(nulls, 1);
+        // A conversion that fails leaves the column as it was: one transaction.
+        conn.execute("ALTER TABLE orders ADD COLUMN code text; UPDATE orders SET code = 'x'").await.unwrap();
+        let failed = session
+            .alter_table(&change(&d, Some("public"), "orders", json!([
+                { "kind": "changeColumn", "name": "qty", "comment": "จะไม่เกิด" },
+                { "kind": "changeColumn", "name": "code", "type": { "type": "integer" } }
+            ])))
+            .await
+            .unwrap_err();
+        assert!(failed.to_string().contains("invalid input syntax"), "{failed}");
+        let q = session.column_definitions(&table).await.unwrap().into_iter().find(|c| c.name == "qty").unwrap();
+        assert_eq!(q.comment, None, "the comment of the failed change outlived it");
+        session.alter_table(&change(&d, Some("public"), "orders", json!([{ "kind": "dropForeignKey", "name": "fk_c" }]))).await.unwrap();
+        assert!(session.foreign_keys(&table).await.unwrap().is_empty());
+        session.close().await;
+    })
+    .await;
+    admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)").as_str())
+        .await
+        .unwrap();
+    outcome.unwrap();
+}

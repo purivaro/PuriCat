@@ -683,12 +683,46 @@ export interface IndexInfo {
   primary: boolean;
 }
 
+export interface ColumnDefinition {
+  name: string;
+  columnType: string;
+  nullable: boolean;
+  default: string | null;
+  defaultExpression: boolean;
+  extra: string;
+  comment: string | null;
+  charset: string | null;
+  collation: string | null;
+  generated: boolean;
+}
+
+export type FkAction = "noAction" | "restrict" | "cascade" | "setNull";
+
+export interface ForeignKeyInfo {
+  name: string;
+  columns: string[];
+  references: TableRef;
+  refColumns: string[];
+  onDelete: FkAction | null;
+  onUpdate: FkAction | null;
+}
+
+export interface NewType {
+  type: string;
+  length: number | null;
+  scale: number | null;
+  unsigned: boolean;
+}
+
 export type TableEdit =
   | { kind: "addColumn"; column: ColumnSpec }
   | { kind: "dropColumn"; name: string }
   | { kind: "renameColumn"; from: string; to: string }
   | { kind: "addIndex"; name: string | null; columns: string[]; unique: boolean }
-  | { kind: "dropIndex"; name: string };
+  | { kind: "dropIndex"; name: string }
+  | { kind: "changeColumn"; name: string; type?: NewType; nullable?: boolean; default?: ColumnDefault; comment?: string }
+  | { kind: "addForeignKey"; name: string | null; columns: string[]; references: TableRef; refColumns: string[]; onDelete: FkAction; onUpdate: FkAction }
+  | { kind: "dropForeignKey"; name: string };
 
 export interface AlterTable {
   table: TableRef;

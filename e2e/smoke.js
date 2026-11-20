@@ -1640,6 +1640,59 @@
     if (alteredColumns !== "id,ชื่อสินค้า,unit_price,qty") throw new Error(`after the change the server has ${alteredColumns}`);
     if (!/^PRIMARY:true:id \S+:true:ชื่อสินค้า$/.test(alteredIndexes)) throw new Error(`after the change the indexes are ${alteredIndexes}`);
     log.push({ stage: "alter-table-done", alteredColumns, alteredIndexes });
+    // Change a column that is there (type, default, comment) and make a foreign key to another table.
+    const newTableRef = { database: "puricat_e2e", schema: null, name: "e2e_new_table" };
+    const openAlter = async (what) => {
+      await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+      await rightClick(await waitFor(() => treeRow("e2e_new_table"), "the table in the explorer", 15000));
+      await click(await waitFor(() => menuItem("Change table…"), "the change item"), "change table");
+      await waitFor(() => alterDialog()?.querySelector('[data-existing-column="qty"]'), `the change form ${what}`, 20000);
+    };
+    await openAlter("for a column change");
+    await click(alterDialog().querySelector('[data-change-column="qty"]'), "change qty");
+    const qtyEdit = () => alterDialog().querySelector('[data-column-edit="qty"]');
+    await setChoice(await waitFor(() => qtyEdit()?.querySelector("[data-column-edit-type]"), "the column's change fields"), "INT");
+    await click(withText('[data-column-edit="qty"] label', "Unsigned").querySelector("input"), "unsigned");
+    await setChoice(qtyEdit().querySelector("[data-column-edit-default]"), "value");
+    await type(await waitFor(() => qtyEdit().querySelector("[data-column-edit-default-value]"), "the default value field"), "1");
+    await type(qtyEdit().querySelector("[data-column-edit-comment]"), "how many");
+    const renameWhileChanging = alterDialog().querySelector('[data-existing-column="qty"] input').disabled;
+    await click(alterDialog().querySelector("[data-alter-add-foreign-key]"), "add a foreign key");
+    const fkDraft = () => alterDialog().querySelector('[data-new-foreign-key="0"]');
+    await click(await waitFor(() => fkDraft()?.querySelector('[data-fk-column="qty"]'), "the key's columns"), "key on qty");
+    await waitFor(() => fkDraft().querySelector('[data-fk-table] option[value="customers"]'), "the tables to refer to", 15000);
+    const applyUnfinishedKey = alterDialog().querySelector("[data-alter-apply]").disabled;
+    await setChoice(fkDraft().querySelector("[data-fk-table]"), "customers");
+    await click(await waitFor(() => fkDraft().querySelector('[data-fk-ref-column="id"]'), "the customers' columns", 15000), "refers to id");
+    await setChoice(fkDraft().querySelector('[data-fk-action="onDelete"]'), "setNull");
+    const expectedChange =
+      "ALTER TABLE `puricat_e2e`.`e2e_new_table`\n  MODIFY COLUMN `qty` INT UNSIGNED NULL DEFAULT '1' COMMENT 'how many',\n  ADD FOREIGN KEY (`qty`) REFERENCES `puricat_e2e`.`customers` (`id`) ON DELETE SET NULL ON UPDATE NO ACTION";
+    await waitFor(() => alterDialog().querySelector("[data-ddl-preview]:not([aria-busy=true])")?.textContent === expectedChange, "the column change statement", 15000).catch(() => {
+      throw new Error(`the change form shows: ${alterDialog().querySelector("[data-ddl-preview], [data-ddl-preview-empty]")?.textContent}`);
+    });
+    await stage("alter-column", { renameWhileChanging, applyUnfinishedKey, expectedChange });
+    if (!renameWhileChanging) throw new Error("a column could be renamed and changed in one go");
+    if (!applyUnfinishedKey) throw new Error("the change could be applied with an unfinished foreign key");
+    await waitFor(() => !alterDialog().querySelector("[data-alter-apply]").disabled, "apply enabled");
+    await click(alterDialog().querySelector("[data-alter-apply]"), "apply the column change");
+    await waitFor(() => !alterDialog(), "the change form to close", 15000);
+    const qtyDef = (await invoke("column_definitions", { id: mysqlConnId, table: newTableRef })).find((c) => c.name === "qty");
+    const madeKeys = await invoke("foreign_keys", { id: mysqlConnId, table: newTableRef });
+    if (qtyDef.columnType !== "int unsigned" || qtyDef.default !== "1" || qtyDef.comment !== "how many" || !qtyDef.nullable) throw new Error(`qty is now ${JSON.stringify(qtyDef)}`);
+    if (madeKeys.length !== 1 || madeKeys[0].references.name !== "customers" || madeKeys[0].onDelete !== "setNull") throw new Error(`the keys are ${JSON.stringify(madeKeys)}`);
+    // The key shows in the form, and dropping it needs no typed name.
+    await openAlter("for dropping the key");
+    await click(await waitFor(() => alterDialog().querySelector(`[data-drop-foreign-key="${madeKeys[0].name}"]`), "the key in the form"), "drop the key");
+    const expectedDropKey = `ALTER TABLE \`puricat_e2e\`.\`e2e_new_table\`\n  DROP FOREIGN KEY \`${madeKeys[0].name}\``;
+    await waitFor(() => alterDialog().querySelector("[data-ddl-preview]:not([aria-busy=true])")?.textContent === expectedDropKey, "the drop key statement", 15000).catch(() => {
+      throw new Error(`the change form shows: ${alterDialog().querySelector("[data-ddl-preview], [data-ddl-preview-empty]")?.textContent}`);
+    });
+    await waitFor(() => !alterDialog().querySelector("[data-alter-apply]").disabled, "apply enabled without a typed name");
+    await click(alterDialog().querySelector("[data-alter-apply]"), "apply the key drop");
+    await waitFor(() => !alterDialog(), "the change form to close", 15000);
+    const keysLeft = await invoke("foreign_keys", { id: mysqlConnId, table: newTableRef });
+    if (keysLeft.length !== 0) throw new Error(`keys left: ${JSON.stringify(keysLeft)}`);
+    log.push({ stage: "alter-column-done", qty: qtyDef.columnType, key: madeKeys[0].name, keysLeft: keysLeft.length });
     // Put things back for the later stages: the table goes, and so does its tab.
     await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the new table's tab");
     await invoke("run_sql", { id: mysqlConnId, tab: "e2e-drop-new", database: "puricat_e2e", sql: "DROP TABLE puricat_e2e.e2e_new_table", options: { maxRows: 10, changeLimit: null } });

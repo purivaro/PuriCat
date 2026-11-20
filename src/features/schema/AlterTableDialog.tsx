@@ -1,4 +1,4 @@
-import { Columns3, KeyRound, Lock, Plus, Trash2, TriangleAlert, Undo2 } from "lucide-react";
+import { Columns3, KeyRound, Lock, Pencil, Plus, Trash2, TriangleAlert, Undo2 } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -7,18 +7,34 @@ import { toast } from "sonner";
 import { Button, IconButton, Input, Spinner } from "../../components/ui/primitives";
 import { cn } from "../../lib/cn";
 import { errorMessage, ipc } from "../../lib/ipc";
-import type { AlterTable, ColumnMeta, ConnectionView, IndexInfo, TableRef, TypeChoice } from "../../lib/types";
+import type { AlterTable, ColumnDefinition, ColumnMeta, ConnectionView, ForeignKeyInfo, IndexInfo, TableEdit, TableRef, TypeChoice } from "../../lib/types";
 import { nodeKey, useConnections } from "../../stores/connections";
 import { useUi } from "../../stores/ui";
 import { useWorkspace } from "../../stores/workspace";
-import { type ColumnChange, columnsAfter, type IndexDraft, indexesLosing, newIndex, startColumns, tableEdits } from "./alterTable";
+import {
+  type ColumnChange,
+  columnEdit,
+  type ColumnEditDraft,
+  columnsAfter,
+  type IndexDraft,
+  indexesLosing,
+  type KeyDraft,
+  keyEdit,
+  keyReady,
+  newIndex,
+  startColumns,
+  startEdit,
+  tableEdits,
+} from "./alterTable";
+import { ColumnEdit } from "./ColumnEdit";
 import { ColumnsEditor } from "./ColumnsEditor";
+import { ForeignKeys } from "./ForeignKeys";
 import type { ColumnDraft } from "./newTable";
 import { Failure, Footer, Header, Notice } from "./parts";
 
 /**
- * "Change table…": rename or drop the columns that are there, add columns, drop and make
- * indexes. The changes go out as one: one statement on MySQL, one transaction on PostgreSQL.
+ * "Change table…": rename, change or drop the columns that are there, add columns, drop and
+ * make indexes and foreign keys. The changes go out as one: one statement on MySQL, one transaction on PostgreSQL.
  * As in the other forms, the statements are the backend's, shown before they run.
  */
 export function AlterTableDialog() {
@@ -64,21 +80,36 @@ function Form({
   const mysql = connection.engine === "mysql";
   const production = connection.environment === "production";
 
-  const [loaded, setLoaded] = useState<{ columns: ColumnMeta[]; indexes: IndexInfo[]; types: TypeChoice[] } | null>(null);
+  const [loaded, setLoaded] = useState<{
+    columns: ColumnMeta[];
+    definitions: ColumnDefinition[];
+    indexes: IndexInfo[];
+    keys: ForeignKeyInfo[];
+    types: TypeChoice[];
+  } | null>(null);
   const [existing, setExisting] = useState<ColumnChange[]>([]);
   const [added, setAdded] = useState<ColumnDraft[]>([]);
   const [droppedIndexes, setDroppedIndexes] = useState<string[]>([]);
   const [indexes, setIndexes] = useState<IndexDraft[]>([]);
+  const [changes, setChanges] = useState<Record<string, ColumnEditDraft>>({});
+  const [droppedKeys, setDroppedKeys] = useState<string[]>([]);
+  const [keys, setKeys] = useState<KeyDraft[]>([]);
   const [confirm, setConfirm] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let stale = false;
-    Promise.all([ipc.describeTable(connection.id, table), ipc.tableIndexes(connection.id, table), ipc.columnTypes(connection.id)])
-      .then(([meta, idx, types]) => {
+    Promise.all([
+      ipc.describeTable(connection.id, table),
+      ipc.columnDefinitions(connection.id, table),
+      ipc.tableIndexes(connection.id, table),
+      ipc.foreignKeys(connection.id, table),
+      ipc.columnTypes(connection.id),
+    ])
+      .then(([meta, definitions, idx, fks, types]) => {
         if (stale) return;
-        setLoaded({ columns: meta.columns, indexes: idx, types });
+        setLoaded({ columns: meta.columns, definitions, indexes: idx, keys: fks, types });
         setExisting(startColumns(meta.columns));
       })
       .catch((e: unknown) => !stale && setError(errorMessage(e)));
@@ -87,10 +118,16 @@ function Form({
     };
   }, [connection.id, table]);
 
-  const edits = useMemo(
-    () => tableEdits(table.database, table.schema, table.name, existing, added, droppedIndexes, indexes),
-    [table, existing, added, droppedIndexes, indexes],
-  );
+  const edits = useMemo(() => {
+    const changed = Object.entries(changes)
+      .map(([name, d]) => {
+        const def = loaded?.definitions.find((c) => c.name === name);
+        return def ? columnEdit(def, d, loaded!.types) : null;
+      })
+      .filter((e): e is TableEdit => e !== null);
+    const made = keys.filter(keyReady).map((k) => keyEdit(table, k));
+    return tableEdits(table.database, table.schema, table.name, existing, added, droppedIndexes, indexes, changed, droppedKeys, made);
+  }, [table, existing, added, droppedIndexes, indexes, changes, droppedKeys, keys, loaded]);
   const spec = useMemo<AlterTable>(() => ({ table, edits }), [table, edits]);
   const drops = existing.filter((c) => c.drop).map((c) => c.name);
   const available = columnsAfter(existing, added);
@@ -114,7 +151,8 @@ function Form({
 
   const current = plan?.spec === spec;
   const confirmed = drops.length === 0 || confirm === table.name;
-  const ready = !!plan && current && "sql" in plan && confirmed && !connection.readOnly && !busy;
+  const unfinishedKeys = keys.some((k) => !keyReady(k));
+  const ready = !!plan && current && "sql" in plan && confirmed && !unfinishedKeys && !connection.readOnly && !busy;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -138,6 +176,13 @@ function Form({
   };
 
   const setColumn = (i: number, change: Partial<ColumnChange>) => setExisting((l) => l.map((c, j) => (j === i ? { ...c, ...change } : c)));
+  const setChange = (name: string, change: Partial<ColumnEditDraft> | null) =>
+    setChanges((m) => {
+      const next = { ...m };
+      if (change === null) delete next[name];
+      else next[name] = { ...m[name]!, ...change };
+      return next;
+    });
   const setIndex = (i: number, change: Partial<IndexDraft>) => setIndexes((l) => l.map((x, j) => (j === i ? { ...x, ...change } : x)));
   const section = "text-[11px] font-semibold tracking-wider text-fg-subtle uppercase";
   const place = [table.database, table.schema, table.name].filter(Boolean).join(" › ");
@@ -173,44 +218,79 @@ function Form({
               <div className="overflow-hidden rounded-xl border border-border">
                 {existing.map((c, i) => {
                   const meta = loaded.columns[i]!;
+                  const def = loaded.definitions.find((d) => d.name === c.name);
+                  const editing = changes[c.name];
+                  const renaming = c.rename.trim() !== "" && c.rename.trim() !== c.name;
                   return (
-                    <div
-                      key={c.name}
-                      data-existing-column={c.name}
-                      className={cn("flex items-center gap-3 border-b border-border px-3 py-1.5 text-xs last:border-0", c.drop && "bg-danger-soft/50")}
-                    >
-                      <span className="w-4 shrink-0">{meta.primaryKey && <KeyRound className="size-3.5 text-fg-subtle" />}</span>
-                      <span className={cn("w-56 truncate font-medium", c.drop && "text-danger line-through")}>{c.name}</span>
-                      <span className="w-40 truncate font-mono text-[11px] text-fg-muted">{meta.dataType}</span>
-                      <span className="w-20 text-fg-subtle">{meta.nullable ? "NULL" : "NOT NULL"}</span>
-                      <span className="w-56">
-                        {!c.drop && (
-                          <Input
-                            aria-label={t("schema.renameTo", { name: c.name })}
-                            placeholder={t("schema.renamePlaceholder")}
-                            value={c.rename}
-                            onChange={(e) => setColumn(i, { rename: e.target.value })}
-                            className="h-7"
-                          />
+                    <div key={c.name} className="border-b border-border last:border-0">
+                      <div data-existing-column={c.name} className={cn("flex items-center gap-3 px-3 py-1.5 text-xs", c.drop && "bg-danger-soft/50")}>
+                        <span className="w-4 shrink-0">{meta.primaryKey && <KeyRound className="size-3.5 text-fg-subtle" />}</span>
+                        <span className={cn("w-48 shrink-0 truncate font-medium", c.drop && "text-danger line-through")}>{c.name}</span>
+                        <span className="w-40 shrink-0 truncate font-mono text-[11px] text-fg-muted" title={def?.columnType ?? meta.dataType}>
+                          {def?.columnType ?? meta.dataType}
+                        </span>
+                        <span className="w-20 shrink-0 text-fg-subtle">{meta.nullable ? "NULL" : "NOT NULL"}</span>
+                        <span className="w-40 shrink-0 truncate text-[11px] text-fg-subtle" title={def?.comment ?? undefined}>
+                          {def?.default !== null && def?.default !== undefined ? `= ${def.default}` : ""}
+                        </span>
+                        <span className="w-48 shrink-0">
+                          {!c.drop && (
+                            <Input
+                              aria-label={t("schema.renameTo", { name: c.name })}
+                              placeholder={t("schema.renamePlaceholder")}
+                              value={c.rename}
+                              disabled={!!editing}
+                              title={editing ? t("schema.renameOrChange") : undefined}
+                              onChange={(e) => setColumn(i, { rename: e.target.value })}
+                              className="h-7"
+                            />
+                          )}
+                        </span>
+                        <span className="flex-1" />
+                        {!c.drop && !editing && def && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            data-change-column={c.name}
+                            icon={<Pencil className="size-3.5" />}
+                            disabled={renaming || def.generated}
+                            title={def.generated ? t("schema.generatedStays") : renaming ? t("schema.renameOrChange") : undefined}
+                            onClick={() => setChanges((m) => ({ ...m, [c.name]: startEdit(def) }))}
+                          >
+                            {t("schema.changeColumn")}
+                          </Button>
                         )}
-                      </span>
-                      <span className="flex-1" />
-                      {c.drop ? (
-                        <Button size="sm" variant="ghost" icon={<Undo2 className="size-3.5" />} onClick={() => setColumn(i, { drop: false })}>
-                          {t("schema.keepColumn")}
-                        </Button>
-                      ) : (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          data-drop-column={c.name}
-                          icon={<Trash2 className="size-3.5" />}
-                          disabled={meta.primaryKey}
-                          title={meta.primaryKey ? t("schema.keyColumnStays") : undefined}
-                          onClick={() => setColumn(i, { drop: true, rename: "" })}
-                        >
-                          {t("schema.dropColumn")}
-                        </Button>
+                        {c.drop ? (
+                          <Button size="sm" variant="ghost" icon={<Undo2 className="size-3.5" />} onClick={() => setColumn(i, { drop: false })}>
+                            {t("schema.keepColumn")}
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            data-drop-column={c.name}
+                            icon={<Trash2 className="size-3.5" />}
+                            disabled={meta.primaryKey}
+                            title={meta.primaryKey ? t("schema.keyColumnStays") : undefined}
+                            onClick={() => {
+                              setColumn(i, { drop: true, rename: "" });
+                              setChange(c.name, null);
+                            }}
+                          >
+                            {t("schema.dropColumn")}
+                          </Button>
+                        )}
+                      </div>
+                      {editing && def && (
+                        <ColumnEdit
+                          def={def}
+                          draft={editing}
+                          set={(change) => setChange(c.name, change)}
+                          types={loaded.types}
+                          mysql={mysql}
+                          primary={meta.primaryKey}
+                          onCancel={() => setChange(c.name, null)}
+                        />
                       )}
                     </div>
                   );
@@ -344,6 +424,21 @@ function Form({
                   {t("schema.addIndex")}
                 </Button>
               </div>
+            </section>
+
+            <section className="flex flex-col gap-2">
+              <h3 className={section}>{t("schema.foreignKeys")}</h3>
+              <ForeignKeys
+                connectionId={connection.id}
+                table={table}
+                keys={loaded.keys}
+                dropped={droppedKeys}
+                setDropped={setDroppedKeys}
+                drafts={keys}
+                setDrafts={setKeys}
+                available={available}
+              />
+              {unfinishedKeys && <p className="text-[11px] text-fg-subtle">{t("schema.fkUnfinished")}</p>}
             </section>
 
             <div className="flex flex-col gap-1">

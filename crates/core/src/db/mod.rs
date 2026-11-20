@@ -610,9 +610,148 @@ impl Session {
             .collect())
     }
 
+    /// The columns of a table as the server keeps them, for the change form.
+    pub async fn column_definitions(
+        &self,
+        table: &TableRef,
+    ) -> Result<Vec<table_design::ColumnDefinition>> {
+        let rows = match self {
+            Session::MySql(s) => {
+                s.query_text(
+                    "SELECT COLUMN_NAME, CONVERT(COLUMN_TYPE USING utf8mb4), IS_NULLABLE, CONVERT(COLUMN_DEFAULT USING utf8mb4), \
+                       CONVERT(EXTRA USING utf8mb4), CONVERT(COLUMN_COMMENT USING utf8mb4), CHARACTER_SET_NAME, COLLATION_NAME, \
+                       CASE WHEN EXTRA LIKE '%GENERATED%' AND EXTRA <> 'DEFAULT_GENERATED' AND EXTRA NOT LIKE 'DEFAULT_GENERATED on update%' THEN '1' ELSE '0' END \
+                     FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+                    &[Some(table.database.clone()), Some(table.name.clone())],
+                )
+                .await?
+            }
+            Session::Postgres(s) => {
+                s.query_text(
+                    &table.database,
+                    "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod), CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END, \
+                       pg_get_expr(d.adbin, d.adrelid), '', col_description(a.attrelid, a.attnum), NULL, NULL, \
+                       CASE WHEN a.attidentity <> '' OR a.attgenerated <> '' THEN '1' ELSE '0' END \
+                     FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                       LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                     WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+                    &[Some(require_schema(table.schema.as_deref())?.to_string()), Some(table.name.clone())],
+                )
+                .await?
+            }
+            Session::Sqlite(_) => return Err(Error::Unsupported("The table form is for MySQL and PostgreSQL".into())),
+        };
+        let postgres = matches!(self, Session::Postgres(_));
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let at = |i: usize| r.get(i).cloned().flatten();
+                let extra = at(4).unwrap_or_default();
+                Some(table_design::ColumnDefinition {
+                    name: at(0)?,
+                    column_type: at(1).unwrap_or_default(),
+                    nullable: at(2).as_deref() == Some("YES"),
+                    default: at(3),
+                    default_expression: postgres || extra.contains("DEFAULT_GENERATED"),
+                    extra,
+                    comment: at(5).filter(|c| !c.is_empty()),
+                    charset: at(6),
+                    collation: at(7),
+                    generated: at(8).as_deref() == Some("1"),
+                })
+            })
+            .collect())
+    }
+
+    /// The foreign keys of a table.
+    pub async fn foreign_keys(
+        &self,
+        table: &TableRef,
+    ) -> Result<Vec<table_design::ForeignKeyInfo>> {
+        let rows = match self {
+            Session::MySql(s) => {
+                s.query_text(
+                    "SELECT k.CONSTRAINT_NAME, GROUP_CONCAT(k.COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\n'), \
+                       k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, \
+                       GROUP_CONCAT(k.REFERENCED_COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\n'), r.DELETE_RULE, r.UPDATE_RULE \
+                     FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+                       ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME \
+                     WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL \
+                     GROUP BY k.CONSTRAINT_NAME, k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, r.DELETE_RULE, r.UPDATE_RULE ORDER BY 1",
+                    &[Some(table.database.clone()), Some(table.name.clone())],
+                )
+                .await?
+            }
+            Session::Postgres(s) => {
+                s.query_text(
+                    &table.database,
+                    "SELECT c.conname::text, \
+                       array_to_string(ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(n, o) \
+                         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.o), E'\n'), \
+                       fn.nspname::text, ft.relname::text, \
+                       array_to_string(ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY k(n, o) \
+                         JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.n ORDER BY k.o), E'\n'), \
+                       c.confdeltype::text, c.confupdtype::text \
+                     FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+                       JOIN pg_class ft ON ft.oid = c.confrelid JOIN pg_namespace fn ON fn.oid = ft.relnamespace \
+                     WHERE c.contype = 'f' AND n.nspname = $1 AND t.relname = $2 ORDER BY 1",
+                    &[Some(require_schema(table.schema.as_deref())?.to_string()), Some(table.name.clone())],
+                )
+                .await?
+            }
+            Session::Sqlite(_) => return Err(Error::Unsupported("The table form is for MySQL and PostgreSQL".into())),
+        };
+        let postgres = matches!(self, Session::Postgres(_));
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let at = |i: usize| r.get(i).cloned().flatten();
+                let list = |i: usize| {
+                    at(i)
+                        .unwrap_or_default()
+                        .split('\n')
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                };
+                let schema = at(2);
+                Some(table_design::ForeignKeyInfo {
+                    name: at(0)?,
+                    columns: list(1),
+                    references: TableRef {
+                        database: if postgres {
+                            table.database.clone()
+                        } else {
+                            schema.clone().unwrap_or_default()
+                        },
+                        schema: if postgres { schema } else { None },
+                        name: at(3)?,
+                    },
+                    ref_columns: list(4),
+                    on_delete: at(5).and_then(|a| table_design::FkAction::parse(&a)),
+                    on_update: at(6).and_then(|a| table_design::FkAction::parse(&a)),
+                })
+            })
+            .collect())
+    }
+
+    /// The statements `alter_table` would run: built with what the server says of the
+    /// columns now, which a MySQL change of a column says again.
+    pub async fn alter_table_sql(&self, spec: &table_design::AlterTable) -> Result<Vec<String>> {
+        let changes = spec
+            .edits
+            .iter()
+            .any(|e| matches!(e, table_design::TableEdit::ChangeColumn { .. }));
+        let current = if changes {
+            self.column_definitions(&spec.table).await?
+        } else {
+            Vec::new()
+        };
+        table_design::alter_table(self.engine(), spec, &current)
+    }
+
     /// Change a table from the table form. Returns the statements that ran.
     pub async fn alter_table(&self, spec: &table_design::AlterTable) -> Result<Vec<String>> {
-        let statements = table_design::alter_table(self.engine(), spec)?;
+        let statements = self.alter_table_sql(spec).await?;
         match self {
             Session::MySql(s) => s.execute_statement(&statements[0]).await?,
             Session::Postgres(s) => {

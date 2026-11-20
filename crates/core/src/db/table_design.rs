@@ -245,27 +245,28 @@ fn unsupported(engine: Engine) -> Error {
     ))
 }
 
-/// One column's definition, after the name.
-fn column_sql(
+/// A column type from the list, with what it takes in parentheses, and MySQL's `UNSIGNED`.
+fn type_sql<'a>(
     engine: Engine,
-    choices: &[TypeChoice],
-    c: &ColumnSpec,
+    choices: &'a [TypeChoice],
+    type_name: &str,
+    length: Option<u32>,
+    scale: Option<u32>,
+    unsigned: bool,
     name: &str,
-) -> Result<String> {
+) -> Result<(String, &'a TypeChoice)> {
     let choice = choices
         .iter()
-        .find(|t| t.name == c.type_name)
-        .ok_or_else(|| {
-            Error::Invalid(format!("“{}” is not a type the form offers", c.type_name))
-        })?;
+        .find(|t| t.name == type_name)
+        .ok_or_else(|| Error::Invalid(format!("“{type_name}” is not a type the form offers")))?;
     let mut sql = choice.name.to_string();
     match choice.params {
         Params::None => {
-            if c.length.is_some() || c.scale.is_some() {
+            if length.is_some() || scale.is_some() {
                 return Err(Error::Invalid(format!("{} takes no length", choice.name)));
             }
         }
-        Params::Length { required, max, .. } => match c.length {
+        Params::Length { required, max, .. } => match length {
             Some(n) if n == 0 || n > max => {
                 return Err(Error::Invalid(format!(
                     "The length of {} is from 1 to {max}; {n} is not",
@@ -282,13 +283,13 @@ fn column_sql(
             None => {}
         },
         Params::Precision { max, .. } => {
-            let p = c.length.ok_or_else(|| {
+            let p = length.ok_or_else(|| {
                 Error::Invalid(format!(
                     "{} needs a precision (column “{name}”)",
                     choice.name
                 ))
             })?;
-            let s = c.scale.unwrap_or(0);
+            let s = scale.unwrap_or(0);
             if p == 0 || p > max || s > p {
                 return Err(Error::Invalid(format!(
                     "{}({p}, {s}) is not possible: the precision is from 1 to {max}, and the scale at most the precision",
@@ -298,7 +299,7 @@ fn column_sql(
             sql.push_str(&format!("({p}, {s})"));
         }
     }
-    if c.unsigned {
+    if unsigned {
         if engine != Engine::Mysql || !matches!(choice.family, Family::Integer | Family::Number) {
             return Err(Error::Invalid(format!(
                 "Only a MySQL number can be unsigned (column “{name}”)"
@@ -306,6 +307,25 @@ fn column_sql(
         }
         sql.push_str(" UNSIGNED");
     }
+    Ok((sql, choice))
+}
+
+/// One column's definition, after the name.
+fn column_sql(
+    engine: Engine,
+    choices: &[TypeChoice],
+    c: &ColumnSpec,
+    name: &str,
+) -> Result<String> {
+    let (mut sql, choice) = type_sql(
+        engine,
+        choices,
+        &c.type_name,
+        c.length,
+        c.scale,
+        c.unsigned,
+        name,
+    )?;
     if c.auto {
         if choice.family != Family::Integer {
             return Err(Error::Invalid(format!(
@@ -478,6 +498,88 @@ pub struct IndexInfo {
     pub primary: bool,
 }
 
+/// A column as the server keeps it: everything a MySQL `MODIFY COLUMN` must say again so
+/// that what is not being changed stays as it was.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnDefinition {
+    pub name: String,
+    /// MySQL's `COLUMN_TYPE` (`int unsigned`, `varchar(120)`); PostgreSQL's `format_type`.
+    pub column_type: String,
+    pub nullable: bool,
+    /// As the server shows it; `None` when there is none.
+    pub default: Option<String>,
+    /// The default is an expression (MySQL `DEFAULT_GENERATED`; on PostgreSQL always).
+    pub default_expression: bool,
+    /// MySQL's `EXTRA`.
+    pub extra: String,
+    pub comment: Option<String>,
+    pub charset: Option<String>,
+    pub collation: Option<String>,
+    /// A generated or (PostgreSQL) identity column.
+    pub generated: bool,
+}
+
+/// What happens to referencing rows when the referenced row goes or changes.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum FkAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+impl FkAction {
+    fn sql(self) -> &'static str {
+        match self {
+            FkAction::NoAction => "NO ACTION",
+            FkAction::Restrict => "RESTRICT",
+            FkAction::Cascade => "CASCADE",
+            FkAction::SetNull => "SET NULL",
+        }
+    }
+
+    /// From MySQL's `DELETE_RULE` text or PostgreSQL's one-letter code.
+    pub fn parse(text: &str) -> Option<FkAction> {
+        match text.trim().to_ascii_uppercase().as_str() {
+            "NO ACTION" | "A" => Some(FkAction::NoAction),
+            "RESTRICT" | "R" => Some(FkAction::Restrict),
+            "CASCADE" | "C" => Some(FkAction::Cascade),
+            "SET NULL" | "N" => Some(FkAction::SetNull),
+            _ => None,
+        }
+    }
+}
+
+/// A foreign key of a table, as the server lists it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub references: TableRef,
+    pub ref_columns: Vec<String>,
+    /// `None`: an action the form does not offer (SET DEFAULT).
+    pub on_delete: Option<FkAction>,
+    pub on_update: Option<FkAction>,
+}
+
+/// A column type chosen in the form for a column that changes.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NewType {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[serde(default)]
+    pub length: Option<u32>,
+    #[serde(default)]
+    pub scale: Option<u32>,
+    #[serde(default)]
+    pub unsigned: bool,
+}
+
 /// One change of the table form's "Edit table…".
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(
@@ -506,6 +608,34 @@ pub enum TableEdit {
     DropIndex {
         name: String,
     },
+    /// What is `None` stays as it is.
+    ChangeColumn {
+        name: String,
+        #[serde(default, rename = "type")]
+        new_type: Option<NewType>,
+        #[serde(default)]
+        nullable: Option<bool>,
+        /// `Some(DefaultValue::None)` removes the default.
+        #[serde(default)]
+        default: Option<DefaultValue>,
+        /// `Some("")` removes the comment.
+        #[serde(default)]
+        comment: Option<String>,
+    },
+    AddForeignKey {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+        references: TableRef,
+        ref_columns: Vec<String>,
+        #[serde(default)]
+        on_delete: FkAction,
+        #[serde(default)]
+        on_update: FkAction,
+    },
+    DropForeignKey {
+        name: String,
+    },
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]
@@ -531,8 +661,13 @@ impl AlterTable {
 /// The statements that make the changes, in the order they run. MySQL: one `ALTER TABLE`
 /// with a clause per change, which the server applies as one. PostgreSQL: one statement per
 /// change (and a `COMMENT ON` for an added column's comment), run together in one
-/// transaction.
-pub fn alter_table(engine: Engine, spec: &AlterTable) -> Result<Vec<String>> {
+/// transaction. `current` is what the server says of the table's columns now: a MySQL
+/// change of a column says again what is not being changed.
+pub fn alter_table(
+    engine: Engine,
+    spec: &AlterTable,
+    current: &[ColumnDefinition],
+) -> Result<Vec<String>> {
     let choices = types(engine)?;
     if spec.edits.is_empty() {
         return Err(Error::Invalid("Nothing is changed yet".into()));
@@ -676,6 +811,168 @@ pub fn alter_table(engine: Engine, spec: &AlterTable) -> Result<Vec<String>> {
                     )),
                 }
             }
+            TableEdit::ChangeColumn {
+                name,
+                new_type,
+                nullable,
+                default,
+                comment,
+            } => {
+                mark(name)?;
+                let def = current
+                    .iter()
+                    .find(|c| &c.name == name)
+                    .ok_or_else(|| Error::Invalid(format!("The table has no column “{name}”")))?;
+                if new_type.is_none()
+                    && nullable.is_none()
+                    && default.is_none()
+                    && comment.is_none()
+                {
+                    return Err(Error::Invalid(format!("Nothing is changed in “{name}”")));
+                }
+                match engine {
+                    Engine::Mysql => clauses.push(format!(
+                        "MODIFY COLUMN {} {}",
+                        quote(engine, name)?,
+                        mysql_modify(
+                            &choices,
+                            def,
+                            new_type.as_ref(),
+                            *nullable,
+                            default.as_ref(),
+                            comment.as_deref()
+                        )?
+                    )),
+                    _ => {
+                        let column = quote(engine, name)?;
+                        // PostgreSQL will not convert a default to another type: it goes
+                        // first, and the change must say what the default becomes.
+                        let default_dropped = new_type.is_some() && def.default.is_some();
+                        if default_dropped {
+                            if default.is_none() {
+                                return Err(Error::Invalid(format!(
+                                    "“{name}” has a default ({}); say what its default becomes when its type changes",
+                                    def.default.as_deref().unwrap_or_default()
+                                )));
+                            }
+                            statements.push(format!(
+                                "ALTER TABLE {qualified} ALTER COLUMN {column} DROP DEFAULT"
+                            ));
+                        }
+                        if let Some(t) = new_type {
+                            let (sql, _) = type_sql(
+                                engine,
+                                &choices,
+                                &t.type_name,
+                                t.length,
+                                t.scale,
+                                t.unsigned,
+                                name,
+                            )?;
+                            statements.push(format!("ALTER TABLE {qualified} ALTER COLUMN {column} TYPE {sql} USING {column}::{sql}"));
+                        }
+                        if let Some(n) = nullable {
+                            statements.push(format!(
+                                "ALTER TABLE {qualified} ALTER COLUMN {column} {} NOT NULL",
+                                if *n { "DROP" } else { "SET" }
+                            ));
+                        }
+                        if let Some(d) = default {
+                            if def.generated {
+                                return Err(Error::Invalid(format!("“{name}” is generated by the server and has no default to change")));
+                            }
+                            let set = match d {
+                                // Already dropped before the new type.
+                                DefaultValue::None if default_dropped => None,
+                                DefaultValue::None => Some("DROP DEFAULT".to_string()),
+                                DefaultValue::Null => Some("SET DEFAULT NULL".to_string()),
+                                DefaultValue::Value(v) => {
+                                    Some(format!("SET DEFAULT {}", literal("default value", v)?))
+                                }
+                                DefaultValue::CurrentTimestamp => {
+                                    Some("SET DEFAULT CURRENT_TIMESTAMP".to_string())
+                                }
+                            };
+                            if let Some(set) = set {
+                                statements.push(format!(
+                                    "ALTER TABLE {qualified} ALTER COLUMN {column} {set}"
+                                ));
+                            }
+                        }
+                        if let Some(c) = comment {
+                            after.push(format!(
+                                "COMMENT ON COLUMN {qualified}.{column} IS {}",
+                                if c.trim().is_empty() {
+                                    "NULL".to_string()
+                                } else {
+                                    literal("column comment", c.trim())?
+                                }
+                            ));
+                        }
+                    }
+                }
+            }
+            TableEdit::AddForeignKey {
+                name,
+                columns,
+                references,
+                ref_columns,
+                on_delete,
+                on_update,
+            } => {
+                if columns.is_empty() || columns.len() != ref_columns.len() {
+                    return Err(Error::Invalid("A foreign key pairs each of its columns with one column of the other table".into()));
+                }
+                if engine == Engine::Mysql && references.database != table.database {
+                    return Err(Error::Invalid(
+                        "The form makes a foreign key to a table of the same database".into(),
+                    ));
+                }
+                let quoted = |list: &[String]| -> Result<String> {
+                    Ok(list
+                        .iter()
+                        .map(|c| quote(engine, c))
+                        .collect::<Result<Vec<_>>>()?
+                        .join(", "))
+                };
+                let target = match engine {
+                    Engine::Mysql => format!(
+                        "{}.{}",
+                        ident::mysql(&references.database)?,
+                        ident::mysql(&references.name)?
+                    ),
+                    _ => format!(
+                        "{}.{}",
+                        ident::postgres(super::require_schema(references.schema.as_deref())?)?,
+                        ident::postgres(&references.name)?
+                    ),
+                };
+                let named = match clean(name) {
+                    Some(n) => {
+                        check_name(engine, "foreign key", n)?;
+                        format!("CONSTRAINT {} ", quote(engine, n)?)
+                    }
+                    None => String::new(),
+                };
+                let clause = format!(
+                    "ADD {named}FOREIGN KEY ({}) REFERENCES {target} ({}) ON DELETE {} ON UPDATE {}",
+                    quoted(columns)?,
+                    quoted(ref_columns)?,
+                    on_delete.sql(),
+                    on_update.sql()
+                );
+                match engine {
+                    Engine::Mysql => clauses.push(clause),
+                    _ => statements.push(format!("ALTER TABLE {qualified} {clause}")),
+                }
+            }
+            TableEdit::DropForeignKey { name } => match engine {
+                Engine::Mysql => clauses.push(format!("DROP FOREIGN KEY {}", quote(engine, name)?)),
+                _ => statements.push(format!(
+                    "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                    quote(engine, name)?
+                )),
+            },
         }
     }
     Ok(match engine {
@@ -688,6 +985,191 @@ pub fn alter_table(engine: Engine, spec: &AlterTable) -> Result<Vec<String>> {
             statements
         }
     })
+}
+
+/// A MySQL `EXTRA` that the form can say again: nothing else is kept on a changed column.
+fn mysql_extra(def: &ColumnDefinition) -> Result<(bool, Option<String>)> {
+    let mut rest = def.extra.to_string();
+    let auto = rest.to_ascii_lowercase().contains("auto_increment");
+    let mut on_update = None;
+    let lower = rest.to_ascii_lowercase();
+    if let Some(at) = lower.find("on update current_timestamp") {
+        let tail = &rest[at + "on update ".len()..];
+        let end = tail
+            .find(')')
+            .map(|i| i + 1)
+            .filter(|_| tail["current_timestamp".len()..].starts_with('('))
+            .unwrap_or("current_timestamp".len());
+        on_update = Some(tail[..end].to_ascii_uppercase());
+        rest.replace_range(at..at + "on update ".len() + end, "");
+    }
+    let rest = rest
+        .split_whitespace()
+        .filter(|w| {
+            !w.eq_ignore_ascii_case("auto_increment")
+                && !w.eq_ignore_ascii_case("DEFAULT_GENERATED")
+        })
+        .collect::<Vec<_>>();
+    if !rest.is_empty() || def.generated {
+        return Err(Error::Invalid(format!(
+            "“{}” has {} which the form cannot keep; change it in a query tab",
+            def.name,
+            if def.generated {
+                "a generated value".to_string()
+            } else {
+                format!("“{}”", rest.join(" "))
+            }
+        )));
+    }
+    if let Some(u) = &on_update {
+        let ok = u == "CURRENT_TIMESTAMP"
+            || (u.starts_with("CURRENT_TIMESTAMP(")
+                && u[18..u.len() - 1].bytes().all(|b| b.is_ascii_digit())
+                && u.ends_with(')'));
+        if !ok {
+            return Err(Error::Invalid(format!(
+                "“{}” has an ON UPDATE the form does not read",
+                def.name
+            )));
+        }
+    }
+    Ok((auto, on_update))
+}
+
+/// MySQL's `MODIFY COLUMN` rewrites a column whole: what is not changed is said again from
+/// what the server reported, or the change is refused.
+fn mysql_modify(
+    choices: &[TypeChoice],
+    def: &ColumnDefinition,
+    new_type: Option<&NewType>,
+    nullable: Option<bool>,
+    default: Option<&DefaultValue>,
+    comment: Option<&str>,
+) -> Result<String> {
+    let name = def.name.as_str();
+    let (auto, on_update) = mysql_extra(def)?;
+    let (mut sql, text, timestamp) = match new_type {
+        Some(t) => {
+            let (sql, choice) = type_sql(
+                Engine::Mysql,
+                choices,
+                &t.type_name,
+                t.length,
+                t.scale,
+                t.unsigned,
+                name,
+            )?;
+            if auto && choice.family != Family::Integer {
+                return Err(Error::Invalid(format!(
+                    "“{name}” numbers itself, so it stays an integer"
+                )));
+            }
+            (sql, choice.family == Family::Text, choice.timestamp)
+        }
+        None => {
+            // The server's own text for the type: kept as it is.
+            if def.column_type.contains(['\0', ';']) || def.column_type.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "The type of “{name}” cannot be said again; change it in a query tab"
+                )));
+            }
+            let lower = def.column_type.to_ascii_lowercase();
+            (
+                def.column_type.clone(),
+                def.charset.is_some(),
+                lower.starts_with("datetime") || lower.starts_with("timestamp"),
+            )
+        }
+    };
+    if text {
+        if let (Some(cs), Some(co)) = (&def.charset, &def.collation) {
+            sql.push_str(&format!(
+                " CHARACTER SET {} COLLATE {}",
+                charset_word(cs)?,
+                charset_word(co)?
+            ));
+        }
+    }
+    let nullable = nullable.unwrap_or(def.nullable);
+    sql.push_str(if nullable { " NULL" } else { " NOT NULL" });
+    match default {
+        Some(DefaultValue::None) => {}
+        Some(_) if auto => {
+            return Err(Error::Invalid(format!(
+                "“{name}” numbers itself and has no default"
+            )))
+        }
+        Some(DefaultValue::Null) => {
+            if !nullable {
+                return Err(Error::Invalid(format!(
+                    "NULL is not a default of a NOT NULL column (column “{name}”)"
+                )));
+            }
+            sql.push_str(" DEFAULT NULL");
+        }
+        Some(DefaultValue::Value(v)) => {
+            sql.push_str(&format!(" DEFAULT {}", literal("default value", v)?))
+        }
+        Some(DefaultValue::CurrentTimestamp) => {
+            if !timestamp {
+                return Err(Error::Invalid(format!(
+                    "CURRENT_TIMESTAMP is a default of a date-and-time column (column “{name}”)"
+                )));
+            }
+            sql.push_str(" DEFAULT CURRENT_TIMESTAMP");
+        }
+        // Kept: as the server shows it.
+        None => match &def.default {
+            None => {}
+            Some(d) if def.default_expression => {
+                let upper = d.trim().to_ascii_uppercase();
+                let timestamp_now = upper == "CURRENT_TIMESTAMP"
+                    || (upper.starts_with("CURRENT_TIMESTAMP(")
+                        && upper.ends_with(')')
+                        && upper[18..upper.len() - 1]
+                            .bytes()
+                            .all(|b| b.is_ascii_digit()));
+                if timestamp_now {
+                    sql.push_str(&format!(" DEFAULT {upper}"));
+                } else {
+                    return Err(Error::Invalid(format!(
+                        "The default of “{name}” is an expression the form does not repeat ({d}); change the column in a query tab"
+                    )));
+                }
+            }
+            Some(d) => sql.push_str(&format!(" DEFAULT {}", literal("current default", d)?)),
+        },
+    }
+    if auto {
+        sql.push_str(" AUTO_INCREMENT");
+    }
+    if let Some(u) = on_update {
+        sql.push_str(&format!(" ON UPDATE {u}"));
+    }
+    let comment = match comment {
+        Some(c) => clean(&Some(c.to_string())).map(str::to_string),
+        None => def.comment.clone().filter(|c| !c.is_empty()),
+    };
+    if let Some(c) = comment {
+        sql.push_str(&format!(" COMMENT {}", literal("column comment", &c)?));
+    }
+    Ok(sql)
+}
+
+/// A character set or collation name, as the server reported it.
+fn charset_word(value: &str) -> Result<&str> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        Ok(value)
+    } else {
+        Err(Error::Invalid(format!(
+            "“{value}” is not a character set or collation the form writes"
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -864,7 +1346,50 @@ mod tests {
             "edits": edits,
         }))
         .unwrap();
-        alter_table(engine, &spec)
+        alter_table(engine, &spec, &current())
+    }
+
+    fn current() -> Vec<ColumnDefinition> {
+        vec![
+            ColumnDefinition {
+                name: "id".into(),
+                column_type: "int unsigned".into(),
+                extra: "auto_increment".into(),
+                ..Default::default()
+            },
+            ColumnDefinition {
+                name: "title".into(),
+                column_type: "varchar(120)".into(),
+                charset: Some("utf8mb4".into()),
+                collation: Some("utf8mb4_unicode_ci".into()),
+                default: Some("ไม่มีชื่อ".into()),
+                comment: Some("ชื่อ".into()),
+                ..Default::default()
+            },
+            ColumnDefinition {
+                name: "at".into(),
+                column_type: "datetime(3)".into(),
+                default: Some("CURRENT_TIMESTAMP(3)".into()),
+                default_expression: true,
+                extra: "DEFAULT_GENERATED on update CURRENT_TIMESTAMP(3)".into(),
+                ..Default::default()
+            },
+            ColumnDefinition {
+                name: "v".into(),
+                column_type: "int".into(),
+                extra: "VIRTUAL GENERATED".into(),
+                generated: true,
+                ..Default::default()
+            },
+            ColumnDefinition {
+                name: "r".into(),
+                column_type: "double".into(),
+                default: Some("rand()".into()),
+                default_expression: true,
+                nullable: true,
+                ..Default::default()
+            },
+        ]
     }
 
     #[test]
@@ -936,5 +1461,91 @@ mod tests {
         assert!(err(Engine::Mysql, json!([{ "kind": "addColumn", "column": { "name": "a", "type": "INT); DROP TABLE x" } }])).contains("not a type"));
         let dropped: AlterTable = serde_json::from_value(json!({ "table": { "database": "d", "schema": null, "name": "t" }, "edits": [{ "kind": "dropColumn", "name": "x" }, { "kind": "dropIndex", "name": "i" }] })).unwrap();
         assert_eq!(dropped.dropped_columns(), ["x"]);
+    }
+
+    #[test]
+    fn a_mysql_change_says_again_what_it_does_not_change() {
+        // Only NULL changes: the type, charset, default and comment are said again.
+        assert_eq!(
+            alter(Engine::Mysql, json!([{ "kind": "changeColumn", "name": "title", "nullable": true }])).unwrap(),
+            ["ALTER TABLE `shop`.`orders`\n  MODIFY COLUMN `title` varchar(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT 'ไม่มีชื่อ' COMMENT 'ชื่อ'"]
+        );
+        // A new type, the comment removed: the default stays.
+        assert_eq!(
+            alter(Engine::Mysql, json!([{ "kind": "changeColumn", "name": "title", "type": { "type": "VARCHAR", "length": 200 }, "comment": "" }])).unwrap()[0],
+            "ALTER TABLE `shop`.`orders`\n  MODIFY COLUMN `title` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'ไม่มีชื่อ'"
+        );
+        // AUTO_INCREMENT and ON UPDATE are kept.
+        assert_eq!(
+            alter(Engine::Mysql, json!([{ "kind": "changeColumn", "name": "id", "type": { "type": "BIGINT", "unsigned": true } }, { "kind": "changeColumn", "name": "at", "nullable": true }])).unwrap()[0],
+            "ALTER TABLE `shop`.`orders`\n  MODIFY COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n  MODIFY COLUMN `at` datetime(3) NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)"
+        );
+        // What cannot be said again is refused, not dropped.
+        let err = |edit| alter(Engine::Mysql, json!([edit])).unwrap_err().to_string();
+        assert!(
+            err(json!({ "kind": "changeColumn", "name": "v", "nullable": true }))
+                .contains("generated")
+        );
+        assert!(
+            err(json!({ "kind": "changeColumn", "name": "r", "nullable": false }))
+                .contains("expression")
+        );
+        assert!(err(json!({ "kind": "changeColumn", "name": "id", "type": { "type": "VARCHAR", "length": 5 } })).contains("integer"));
+        assert!(err(json!({ "kind": "changeColumn", "name": "title" })).contains("Nothing"));
+        assert!(
+            err(json!({ "kind": "changeColumn", "name": "nope", "nullable": true }))
+                .contains("no column")
+        );
+    }
+
+    #[test]
+    fn a_postgres_change_is_one_statement_per_property() {
+        assert_eq!(
+            alter(Engine::Postgres, json!([{ "kind": "changeColumn", "name": "title", "type": { "type": "varchar", "length": 200 }, "nullable": false, "default": { "kind": "none" }, "comment": "" }])).unwrap(),
+            [
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"title\" DROP DEFAULT",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"title\" TYPE varchar(200) USING \"title\"::varchar(200)",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"title\" SET NOT NULL",
+                "COMMENT ON COLUMN \"public\".\"orders\".\"title\" IS NULL",
+            ]
+        );
+        // A new type for a column with a default: the form must say what the default becomes.
+        let quiet = alter(
+            Engine::Postgres,
+            json!([{ "kind": "changeColumn", "name": "title", "type": { "type": "text" } }]),
+        );
+        assert!(quiet
+            .unwrap_err()
+            .to_string()
+            .contains("say what its default becomes"));
+    }
+
+    #[test]
+    fn foreign_keys() {
+        let fk = json!([{ "kind": "addForeignKey", "name": "fk_customer", "columns": ["customer_id"], "references": { "database": "shop", "schema": "public", "name": "customers" }, "refColumns": ["id"], "onDelete": "cascade", "onUpdate": "noAction" }, { "kind": "dropForeignKey", "name": "fk_old" }]);
+        assert_eq!(
+            alter(Engine::Postgres, fk.clone()).unwrap(),
+            [
+                "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"fk_customer\" FOREIGN KEY (\"customer_id\") REFERENCES \"public\".\"customers\" (\"id\") ON DELETE CASCADE ON UPDATE NO ACTION",
+                "ALTER TABLE \"public\".\"orders\" DROP CONSTRAINT \"fk_old\"",
+            ]
+        );
+        assert_eq!(
+            alter(Engine::Mysql, fk).unwrap()[0],
+            "ALTER TABLE `shop`.`orders`\n  ADD CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `shop`.`customers` (`id`) ON DELETE CASCADE ON UPDATE NO ACTION,\n  DROP FOREIGN KEY `fk_old`"
+        );
+        let uneven = json!([{ "kind": "addForeignKey", "columns": ["a", "b"], "references": { "database": "shop", "schema": null, "name": "c" }, "refColumns": ["id"] }]);
+        assert!(alter(Engine::Mysql, uneven)
+            .unwrap_err()
+            .to_string()
+            .contains("pairs"));
+        let elsewhere = json!([{ "kind": "addForeignKey", "columns": ["a"], "references": { "database": "other", "schema": null, "name": "c" }, "refColumns": ["id"] }]);
+        assert!(alter(Engine::Mysql, elsewhere)
+            .unwrap_err()
+            .to_string()
+            .contains("same database"));
+        assert_eq!(FkAction::parse("SET NULL"), Some(FkAction::SetNull));
+        assert_eq!(FkAction::parse("c"), Some(FkAction::Cascade));
+        assert_eq!(FkAction::parse("d"), None);
     }
 }
