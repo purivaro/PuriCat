@@ -720,6 +720,20 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-20 (copy rows)
+
+macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0028](docs/adr/0028-copy-rows-between-connections.md).
+
+| Check | Result |
+|---|---|
+| `live_copy`: `copy_between_mysql_and_postgres` | Pass (after correcting the test's own date arithmetic). 2,503 MySQL rows read in pages of 1,000 (1,000, 1,000, 503, then 0) and written to PostgreSQL by upsert on the key: the ids, NULL notes, the last date, the sum of the decimals, Thai names and the target's default all as expected; a name too long for the target's `varchar(10)` left out and returned with its source values. A second copy finds every row unchanged. 2,502 rows copied back from PostgreSQL into MySQL with fewer columns. Copying a binary column is refused; the first page's check counts 1,000 to insert |
+| Unit tests | `copy::tests` (3): a page's statement per engine (text in key order, every column read when there is no key), and what a page cannot be (no columns, a size out of range, an unknown, binary or MySQL spatial column). `copyRows.test.ts` (4): what can be copied, pairing by name, the request, a row's label |
+| End-to-end stage `copy-rows`, full run | Pass on the first run, with an empty `problems` list and screenshots. MySQL's `customers` into a PostgreSQL table made for the test: the connection, database, schema and table chosen in the dialog (the PostgreSQL connection connected on choice), the columns paired by name (email and created_at, which the target lacks, not copied), upsert on the key, the first rows checked, every row copied and counted on PostgreSQL, the table dropped afterwards |
+| Screenshot | Looked at by hand (English, light). The choice said "Stop the import" in a copy; it says "Stop the copy" now, checked by the stage |
+| `pnpm check` | Pass (Vitest 133, core unit 160) |
+
+Not verified: SQLite as a source or a target, a remote server, a table of millions of rows (paging by offset), Stop through the window, Thai and dark, a Production target.
+
 ## Results — 2026-11-20 (large imports)
 
 macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0027](docs/adr/0027-large-imports-in-batches.md).

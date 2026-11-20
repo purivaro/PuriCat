@@ -91,6 +91,8 @@ pub fn run() {
             commands::analyze_paste,
             commands::apply_paste,
             commands::import_batch,
+            commands::copy_preview,
+            commands::copy_rows,
             commands::cancel_job,
             commands::analyze_sql,
             commands::run_sql,

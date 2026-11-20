@@ -36,4 +36,6 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 
 | [0027](0027-large-imports-in-batches.md) | Files larger than one run: imported in batches of 1,000 rows from the Smart Paste wizard (the first 10,000 previewed), each batch analysed as a paste and written in one transaction; a row that cannot be written stops the import or is left out, a refused batch written again row by row to find it; a report of the lines not written | Accepted | MySQL 9.3.0 and PostgreSQL 16.13 (live tests); through the window on MySQL |
 
+| [0028](0028-copy-rows-between-connections.md) | Copying rows into a table that exists on any connection: columns paired by name, the source read a page at a time as text (whole, NULL kept, in key order), each page written as a large import's batch (ADR 0027) with the same matching, stop-or-skip choice and report; binary columns not copied | Accepted | MySQL 9.3.0 ↔ PostgreSQL 16.13 both ways (live test); through the window MySQL → PostgreSQL |
+
 To add a record: copy the section layout of an existing one, use the next number, and add a row here. Do not rewrite an accepted record; supersede it with a new one.

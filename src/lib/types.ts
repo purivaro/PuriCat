@@ -178,6 +178,12 @@ export interface PasteRequest {
   skipProblems?: boolean;
 }
 
+/** The first page of a copy, analysed against the target without writing. */
+export interface CopyPreview {
+  analysis: PasteAnalysis;
+  rows: (string | null)[][];
+}
+
 export interface UniqueKey {
   name: string;
   columns: string[];
@@ -256,6 +262,15 @@ export interface BatchOutcome {
   /** Stopped by the user while rows were written one by one: the rest are in `failed`. */
   cancelled: boolean;
   elapsedMs: number;
+}
+
+/** One page of a copy into another table. */
+export interface CopyBatch {
+  /** Rows read from the source; fewer than asked for: it has no more. */
+  read: number;
+  outcome: BatchOutcome;
+  /** The source values of each row in `outcome.failed`, in the same order. */
+  failedRows: (string | null)[][];
 }
 
 export interface PasteAnalysis {

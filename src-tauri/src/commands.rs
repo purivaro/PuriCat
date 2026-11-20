@@ -919,6 +919,60 @@ pub async fn import_batch(
     result
 }
 
+/// Copying rows into another table: the first page of the source, analysed against the
+/// target as a paste. Writes nothing.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn copy_preview(
+    state: State<'_, AppState>,
+    source_id: String,
+    from: TableRef,
+    columns: Vec<String>,
+    target_id: String,
+    to: TableRef,
+    request: PasteRequest,
+    limit: usize,
+) -> Result<puricat_core::db::copy::CopyPreview> {
+    let source = state.session(&source_id).await?;
+    let target = state.session(&target_id).await?;
+    puricat_core::db::copy::preview(&source, &from, &columns, &target, &to, &request, limit).await
+}
+
+/// Copying rows into another table, one page: read from the source, written to the target as
+/// a batch of a large import. Refused when the target connection is read-only; `cancel_job`
+/// stops it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn copy_rows(
+    state: State<'_, AppState>,
+    source_id: String,
+    from: TableRef,
+    columns: Vec<String>,
+    target_id: String,
+    to: TableRef,
+    request: PasteRequest,
+    on_problem: puricat_core::db::smart::OnProblem,
+    offset: u64,
+    limit: usize,
+    job: String,
+) -> Result<puricat_core::db::copy::CopyBatch> {
+    if state.store.get_connection(&target_id).await?.read_only {
+        return Err(Error::Invalid(
+            "The connection to copy into is read-only. Turn off the read-only session in its settings to write to it.".into(),
+        ));
+    }
+    let source = state.session(&source_id).await?;
+    let target = state.session(&target_id).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    state.jobs.lock().unwrap().insert(job.clone(), stop.clone());
+    let result = puricat_core::db::copy::batch(
+        &source, &from, &columns, &target, &to, &request, on_problem, offset, limit, &stop,
+    )
+    .await;
+    state.jobs.lock().unwrap().remove(&job);
+    result
+}
+
 /// Ask a running job to stop. It rolls back at the next statement boundary.
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, job: String) {

@@ -2,6 +2,7 @@ import {
   Activity,
   ChevronRight,
   Columns3,
+  CopyPlus,
   CircleAlert,
   Copy,
   Database,
@@ -285,6 +286,11 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                         {o.kind === "table" && connection.engine !== "sqlite" && (
                           <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askAlterTable({ connection, table })}>
                             <Columns3 className="size-3.5" /> {t("schema.alterTable")}
+                          </ContextMenu.Item>
+                        )}
+                        {o.kind === "table" && (
+                          <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askCopy({ connection, table })}>
+                            <CopyPlus className="size-3.5" /> {t("copy.menu")}
                           </ContextMenu.Item>
                         )}
                         {o.kind === "table" && (
