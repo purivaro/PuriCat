@@ -40,7 +40,9 @@ import type {
   PasswordChange,
   PasteAnalysis,
   OnProblem,
+  ParamValue,
   PasteRequest,
+  Plan,
   PickedFile,
   QueryPreview,
   RestorePlan,
@@ -143,7 +145,13 @@ export const ipc = {
     database: string | null,
     sql: string,
     options: { maxRows: number; changeLimit: number | null },
-  ) => invoke<RunOutcome>("run_sql", { id, tab, database, sql, options }),
+    params?: Record<string, ParamValue>,
+  ) => invoke<RunOutcome>("run_sql", { id, tab, database, sql, options, params: params ?? null }),
+  /** The named parameters (`:name`) of a script, each once, in order. */
+  sqlParameters: (id: string, sql: string) => invoke<string[]>("sql_parameters", { id, sql }),
+  /** EXPLAIN one statement on a connection of its own; `analyze` runs it (reads only). `cancelJob(job)` stops it. */
+  explainSql: (id: string, database: string | null, sql: string, params: Record<string, ParamValue> | null, analyze: boolean, job: string) =>
+    invoke<Plan>("explain_sql", { id, database, sql, params, analyze, job }),
   cancelSql: (tab: string) => invoke<void>("cancel_sql", { tab }),
   closeConsole: (tab: string) => invoke<void>("close_console", { tab }),
   listHistory: (id: string, limit: number) => invoke<HistoryEntry[]>("list_history", { id, limit }),

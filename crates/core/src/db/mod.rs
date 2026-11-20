@@ -6,6 +6,7 @@
 pub mod console;
 pub mod copy;
 pub mod ddl;
+pub mod explain;
 pub mod export;
 pub mod filter;
 pub mod find;
@@ -1233,6 +1234,82 @@ impl Session {
             Session::Postgres(s) => s.unique_keys(table).await,
             Session::Sqlite(s) => s.unique_keys(table).await,
         }
+    }
+
+    /// EXPLAIN for one statement, on a connection of its own on `database` (the tab's own
+    /// connection keeps its results for export). `analyze` runs the statement, so only a
+    /// statement that reads is accepted. Setting `stop` interrupts it on the server.
+    pub async fn explain(
+        &self,
+        database: Option<&str>,
+        sql: &str,
+        analyze: bool,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<explain::Plan> {
+        use std::sync::atomic::Ordering;
+        let engine = self.engine();
+        let statement = explain::statement(engine, sql, analyze)?;
+        let started = Instant::now();
+        let mut console = self.open_reader(database).await?;
+        let canceller = console.canceller();
+        let options = console::RunOptions {
+            max_rows: 10_000,
+            change_limit: None,
+        };
+        let never = std::sync::atomic::AtomicBool::new(false);
+        // A server without FORMAT=TREE (MariaDB, MySQL before 8.0.16) gives the classic table.
+        let tries: &[bool] = if engine == Engine::Mysql && !analyze {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        let mut failure = None;
+        for &classic in tries {
+            let explain_sql = explain::explain_sql(engine, &statement, analyze, classic);
+            let (outcome, asked) = {
+                let run = console.run(&explain_sql, &options, &never);
+                tokio::pin!(run);
+                let mut asked = false;
+                let outcome = loop {
+                    tokio::select! {
+                        outcome = &mut run => break outcome,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if !asked => {
+                            if stop.load(Ordering::Relaxed) {
+                                asked = true;
+                                let _ = canceller.cancel().await;
+                            }
+                        }
+                    }
+                };
+                (outcome, asked)
+            };
+            let outcome = outcome?;
+            if asked {
+                return Err(Error::Conflict("Stopped".into()));
+            }
+            let Some(first) = outcome.statements.first() else {
+                return Err(Error::Database("The server gave no plan".into()));
+            };
+            if first.status != console::Status::Ok {
+                failure = first.message.clone();
+                continue;
+            }
+            let Some(result) = first.results.first() else {
+                return Err(Error::Database("The server gave no plan".into()));
+            };
+            let set = console.result(result.id)?;
+            let (text, scans) = explain::read(engine, set, classic);
+            return Ok(explain::Plan {
+                statement,
+                text,
+                scans,
+                analyzed: analyze,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+        Err(Error::Database(
+            failure.unwrap_or_else(|| "The server gave no plan".into()),
+        ))
     }
 
     /// Copying rows, the reading half: rows `offset..offset + limit` of `table`, the given

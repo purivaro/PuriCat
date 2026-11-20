@@ -720,6 +720,20 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-21 (explain and parameters)
+
+macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0029](docs/adr/0029-explain-and-query-parameters.md).
+
+| Check | Result |
+|---|---|
+| `live_explain`: `mysql_explain_and_parameters`, `postgres_explain_and_parameters` | Pass. A query on an unindexed column: the plan holds `Table scan on t` / `Seq Scan on t` and lists it; a query by the key: no whole-table read (PostgreSQL needed 20,000 rows before it preferred the key, rightly: on 200 rows it reads the table). A measured count carries `actual` times. A DELETE is explained and not run (the rows are all there afterwards); measuring it is refused; two statements are refused. Parameter values — a quote, a backslash, Thai text, a negative number (`:n + 1` gives -4), NULL — come back from each server exactly as typed, and `':text'` in quotes stays a string |
+| Unit tests | `script::tests` (2 new): which colons are parameters (not in strings, comments, quoted names, dollar quotes, `::`, `:=`, `arr[a:b]`), and the literals per engine (doubled quote, hex on MySQL and `E''` on PostgreSQL for a backslash, a negative number in brackets, NULL, a missing value, a number that is not one, NUL refused). `explain::tests` (2): the statements per engine and the refusals, the plan text and the whole-table reads of MySQL's tree and table, PostgreSQL and SQLite. `params.test.ts` (3) |
+| End-to-end stages `sql-params-ask`, `sql-params`, `sql-explain` (MySQL), full run | Pass, three times, with an empty `problems` list and screenshots. The values of `:status` and `:upto` asked for (shown as text and number), written in (`status = 'Pending' AND id <= 10`), three Pending rows; asked again with the same values; Cancel runs nothing. The plan of a query on `note`: `Table scan on orders` marked and listed; measured, with `actual` times |
+| Screenshots | Looked at by hand (English, light). The first showed the value kind cut off ("Automatic (Text"); the select is wider now |
+| `pnpm check` | Pass (Vitest 136, core unit 164) |
+
+Not verified: PostgreSQL and SQLite through the window, MariaDB (the classic table), Stop during a measured run, Thai and dark.
+
 ## Results — 2026-11-20 (copy rows)
 
 macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0028](docs/adr/0028-copy-rows-between-connections.md).

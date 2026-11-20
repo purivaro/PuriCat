@@ -38,4 +38,6 @@ Status values: **Accepted** (decided; the record says whether it is implemented)
 
 | [0028](0028-copy-rows-between-connections.md) | Copying rows into a table that exists on any connection: columns paired by name, the source read a page at a time as text (whole, NULL kept, in key order), each page written as a large import's batch (ADR 0027) with the same matching, stop-or-skip choice and report; binary columns not copied | Accepted | MySQL 9.3.0 ↔ PostgreSQL 16.13 both ways (live test); through the window MySQL → PostgreSQL |
 
+| [0029](0029-explain-and-query-parameters.md) | EXPLAIN as the server's own plan text (MySQL `FORMAT=TREE` or the classic table, PostgreSQL text, SQLite query plan) with whole-table reads marked, on a connection of its own; `EXPLAIN ANALYZE` only for a statement that reads. `:name` parameters found by the splitter's scanner and written in as literals of the engine (hex on MySQL and `E''` on PostgreSQL for a backslash) | Accepted | MySQL 9.3.0 and PostgreSQL 16.13 (live tests); through the window on MySQL |
+
 To add a record: copy the section layout of an existing one, use the next number, and add a row here. Do not rewrite an accepted record; supersede it with a new one.

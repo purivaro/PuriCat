@@ -4,9 +4,10 @@
 //! run under the row-impact guard). It is never the only safeguard: read-only sessions are
 //! enforced by the server, and the impact guard measures what a statement actually did.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::Engine;
+use crate::{Error, Result};
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -42,8 +43,21 @@ pub struct Statement {
 fn scan(
     engine: Engine,
     sql: &str,
+    on_word: impl FnMut(&str, usize, usize),
+    on_end: impl FnMut(usize),
+) {
+    scan_all(engine, sql, on_word, on_end, |_, _| {});
+}
+
+/// [`scan`], also reporting each named parameter (`:name`) with the place of its colon.
+/// Not a parameter: PostgreSQL's `::` cast, MySQL's `:=`, and a colon right after a word or
+/// a number (`arr[a:b]`).
+fn scan_all(
+    engine: Engine,
+    sql: &str,
     mut on_word: impl FnMut(&str, usize, usize),
     mut on_end: impl FnMut(usize),
+    mut on_param: impl FnMut(&str, usize),
 ) {
     let bytes = sql.as_bytes();
     let mysql = engine == Engine::Mysql;
@@ -148,6 +162,27 @@ fn scan(
                 depth = 0;
                 i += 1;
             }
+            b':' => {
+                let next = bytes.get(i + 1).copied();
+                let after_word =
+                    i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+                if matches!(next, Some(b':' | b'=')) {
+                    i += 2;
+                } else if !after_word && next.is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                {
+                    let start = i + 1;
+                    let mut end = start;
+                    while end < bytes.len()
+                        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                    {
+                        end += 1;
+                    }
+                    on_param(&sql[start..end], i);
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
             _ if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = i;
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -158,6 +193,104 @@ fn scan(
             _ => i += 1,
         }
     }
+}
+
+/// The named parameters (`:name`) of a script, outside strings, comments and quoted names,
+/// each once, in the order they first appear.
+pub fn parameters(engine: Engine, sql: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    scan_all(
+        engine,
+        sql,
+        |_, _, _| {},
+        |_| {},
+        |name, _| {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        },
+    );
+    names
+}
+
+/// What a parameter stands for.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum ParamValue {
+    /// A string literal.
+    Text(String),
+    /// A number, written as it is.
+    Number(String),
+    Null,
+}
+
+/// The script with each `:name` replaced by its value written as a literal of the engine:
+/// a quoted string (the quote doubled; on MySQL a string with a backslash is written in hex,
+/// which reads the same whatever `sql_mode` says, and on PostgreSQL as `E'…'`), a number, or
+/// `NULL`. Strings, comments and quoted names are left as they are.
+pub fn bind(
+    engine: Engine,
+    sql: &str,
+    values: &std::collections::HashMap<String, ParamValue>,
+) -> Result<String> {
+    let mut places = Vec::new();
+    scan_all(
+        engine,
+        sql,
+        |_, _, _| {},
+        |_| {},
+        |name, at| places.push((name.to_string(), at)),
+    );
+    let mut out = String::with_capacity(sql.len());
+    let mut from = 0;
+    for (name, at) in places {
+        let value = values
+            .get(&name)
+            .ok_or_else(|| Error::Invalid(format!("No value was given for :{name}")))?;
+        out.push_str(&sql[from..at]);
+        out.push_str(&literal(engine, &name, value)?);
+        from = at + 1 + name.len();
+    }
+    out.push_str(&sql[from..]);
+    Ok(out)
+}
+
+fn literal(engine: Engine, name: &str, value: &ParamValue) -> Result<String> {
+    Ok(match value {
+        ParamValue::Null => "NULL".to_string(),
+        ParamValue::Number(text) => {
+            let text = text.trim();
+            if !super::filter::is_number(text) {
+                return Err(Error::Invalid(format!(
+                    "“{text}” given for :{name} is not a number"
+                )));
+            }
+            // In brackets when negative: `x-:n` must not become `x--5`, a comment.
+            if text.starts_with('-') {
+                format!("({text})")
+            } else {
+                text.to_string()
+            }
+        }
+        ParamValue::Text(text) => {
+            if text.contains('\0') {
+                return Err(Error::Invalid(format!(
+                    "The value of :{name} holds a NUL character"
+                )));
+            }
+            let doubled = text.replace('\'', "''");
+            match engine {
+                Engine::Mysql if text.contains('\\') => {
+                    let hex: String = text.bytes().map(|b| format!("{b:02X}")).collect();
+                    format!("_utf8mb4 X'{hex}'")
+                }
+                Engine::Postgres if text.contains('\\') => {
+                    format!("E'{}'", doubled.replace('\\', "\\\\"))
+                }
+                _ => format!("'{doubled}'"),
+            }
+        }
+    })
 }
 
 /// Split a script on semicolons that are not inside strings, comments or dollar quotes.
@@ -809,5 +942,61 @@ mod tests {
         );
         assert_eq!(q("CREATE TABLE t (a int)"), None);
         assert_eq!(q("CREATE VIEW v AS ;"), None);
+    }
+
+    #[test]
+    fn parameters_are_names_after_a_colon_outside_strings_and_comments() {
+        let sql = "SELECT * FROM t WHERE a = :id AND b = ':no' -- :nor\n AND c::text = :Name AND d = :id; /* :x */ SET @v := 1; SELECT arr[a:b]";
+        assert_eq!(parameters(Engine::Postgres, sql), ["id", "Name"]);
+        assert_eq!(
+            parameters(Engine::Mysql, "SELECT :a, ':b', \":c\", `:d` # :e\n, :f"),
+            ["a", "f"]
+        );
+        // A PostgreSQL dollar-quoted body is a string.
+        assert_eq!(
+            parameters(
+                Engine::Postgres,
+                "DO $$ BEGIN x := :inside; END $$; SELECT :out"
+            ),
+            ["out"]
+        );
+        assert!(parameters(Engine::Sqlite, "SELECT 1").is_empty());
+    }
+
+    #[test]
+    fn a_value_becomes_a_literal_of_the_engine() {
+        use std::collections::HashMap;
+        let values: HashMap<String, ParamValue> = [
+            ("name".to_string(), ParamValue::Text("O'Neil".into())),
+            ("n".to_string(), ParamValue::Number(" 42 ".into())),
+            ("neg".to_string(), ParamValue::Number("-5".into())),
+            ("none".to_string(), ParamValue::Null),
+            ("path".to_string(), ParamValue::Text("C:\\temp".into())),
+        ]
+        .into();
+        let sql = "SELECT * FROM t WHERE a = :name AND b = :n AND c = x-:neg AND d IS :none AND e = :path AND f = ':name' AND g::int = :n";
+        assert_eq!(
+            bind(Engine::Postgres, sql, &values).unwrap(),
+            "SELECT * FROM t WHERE a = 'O''Neil' AND b = 42 AND c = x-(-5) AND d IS NULL AND e = E'C:\\\\temp' AND f = ':name' AND g::int = 42"
+        );
+        let mysql = bind(Engine::Mysql, "SELECT :name, :path", &values).unwrap();
+        assert_eq!(mysql, "SELECT 'O''Neil', _utf8mb4 X'433A5C74656D70'");
+        assert_eq!(
+            bind(Engine::Sqlite, "SELECT :path", &values).unwrap(),
+            "SELECT 'C:\\temp'"
+        );
+        // Every parameter needs a value; a number must be one; NUL is refused.
+        assert!(bind(Engine::Mysql, "SELECT :missing", &values).is_err());
+        let bad: HashMap<String, ParamValue> =
+            [("n".to_string(), ParamValue::Number("4x".into()))].into();
+        assert!(bind(Engine::Mysql, "SELECT :n", &bad).is_err());
+        let nul: HashMap<String, ParamValue> =
+            [("t".to_string(), ParamValue::Text("a\0b".into()))].into();
+        assert!(bind(Engine::Mysql, "SELECT :t", &nul).is_err());
+        // Without parameters the script is unchanged.
+        assert_eq!(
+            bind(Engine::Mysql, "SELECT 1", &HashMap::new()).unwrap(),
+            "SELECT 1"
+        );
     }
 }
