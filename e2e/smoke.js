@@ -1772,6 +1772,7 @@
     await setChoice(await waitFor(() => copyDialog().querySelector('[data-copy-table] option[value="copied"]') && copyDialog().querySelector("[data-copy-table]"), "its tables", 20000), "copied");
     await waitFor(() => copyDialog().querySelector('[data-copy-column="email"] select'), "the columns paired", 20000);
     const paired = all("[data-copy-column]").map((r) => `${r.dataset.copyColumn}>${r.querySelector("select")?.value || "-"}`).join(" ");
+    if (!exact('[data-copy-rows] [role="radio"]', "Stop the copy")) throw new Error("the copy's choice does not say “Stop the copy”");
     await click(exact('[data-copy-rows] [role="radio"]', "Upsert"), "upsert on the key");
     await click(copyDialog().querySelector("[data-copy-check]"), "check the first rows");
     await waitFor(() => copyDialog().querySelector("[data-copy-preview]"), "the first rows checked", 20000);

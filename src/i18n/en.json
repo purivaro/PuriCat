@@ -923,6 +923,7 @@
   },
   "copy": {
     "menu": "Copy rows to…",
+    "onProblemStop": "Stop the copy",
     "title": "Copy rows of {{place}}",
     "into": "Into",
     "connection": "Connection",

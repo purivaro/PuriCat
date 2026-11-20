@@ -413,7 +413,7 @@ function Copier({ connection, table, onBusy, onDone }: { connection: ConnectionV
                   value={onProblem}
                   onChange={(v) => !locked && setOnProblem(v)}
                   options={[
-                    { value: "stop", label: t("smart.onProblemStop") },
+                    { value: "stop", label: t("copy.onProblemStop") },
                     { value: "skip", label: t("smart.onProblemSkip") },
                   ]}
                 />
