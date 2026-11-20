@@ -80,6 +80,8 @@ pub fn run() {
             commands::table_indexes,
             commands::plan_alter_table,
             commands::alter_table,
+            commands::column_definitions,
+            commands::foreign_keys,
             commands::list_processes,
             commands::plan_end_process,
             commands::end_process,

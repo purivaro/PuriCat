@@ -720,6 +720,22 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-20 (column changes and foreign keys)
+
+macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0025](docs/adr/0025-new-table-form.md), section "Changing a column, and foreign keys".
+
+| Check | Result |
+|---|---|
+| `live_table_design`: `mysql_column_changes_and_foreign_keys` | Pass. Only NULL changed on a column with a default, a comment, a collation and `ON UPDATE CURRENT_TIMESTAMP(3)`, and on `id` the type made `BIGINT`: afterwards the server still has the default, the comment, the collation, the on-update and `AUTO_INCREMENT`. A foreign key with `ON DELETE CASCADE` made, listed by `foreign_keys`, shown to delete the referencing row, then dropped |
+| `live_table_design`: `postgres_column_changes_and_foreign_keys` | Pass. A `text` column with a default and a comment changed to `integer` with a new default and the comment removed: the values converted (their sum checked), the default and comment as asked. A key with `ON DELETE SET NULL` made and shown to work. A conversion that fails (`'abc'` to integer) leaves the earlier comment change of the same unit undone. The key dropped |
+| Unit tests | `table_design::tests` (3 new, 1 extended): the MySQL statement says again everything a change leaves alone, PostgreSQL one statement per property with the default dropped before a type change, what a change cannot be (nothing to change, a generated column, an expression default, a type change that keeps a PostgreSQL default), foreign keys (clauses, uneven columns, another database refused, the actions read back). `alterTable.test.ts` (3 new): only what differs is sent, a key is left out until both sides are chosen, the order (keys dropped first, made last) |
+| End-to-end stage `alter-column` (MySQL), as a partial script | Pass on the first run, and again with screenshots. On the table the earlier stages made: `qty` changed to `INT UNSIGNED` with a default and a comment, the rename box disabled while the column is being changed, Apply disabled while the new key has no table, a key to `customers (id)` with `ON DELETE SET NULL`, the exact `ALTER TABLE`; afterwards the server's definition of `qty` and its key. Then the key shown in the form, dropped without a typed name, and gone from the server |
+| Screenshot | Looked at by hand (English, light). It showed the rename box of a column without a Change button out of line with the others (the fixed-width cells shrank); fixed |
+| `e2e/run.sh` (dev-server mode), full | Pass, with an empty `problems` list and screenshots (80 stages), started once the Mac had been idle for a minute. Five earlier runs stopped in stages this change does not touch (the update dialog, saved scripts), each while the Mac was in use: the test window floats on top, so a click on the screen lands on it |
+| `pnpm check` | Pass (Vitest 122, core unit 150) |
+
+Not verified: PostgreSQL through the window, a Production connection, Thai and dark, MariaDB, a self-referencing key through the window, a key action `SET DEFAULT` read from a server.
+
 ## Results — 2026-11-20 (change table)
 
 macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0025](docs/adr/0025-new-table-form.md), section "Changing a table".

@@ -50,6 +50,8 @@ import type {
   TypeChoice,
   NewTable,
   IndexInfo,
+  ColumnDefinition,
+  ForeignKeyInfo,
   AlterTable,
   EndProcess,
   SortSpec,
@@ -193,6 +195,8 @@ export const ipc = {
   /** The statements `createTable` would run, in order. Runs nothing. */
   planCreateTable: (id: string, spec: NewTable) => invoke<string[]>("plan_create_table", { id, spec }),
   createTable: (id: string, spec: NewTable) => invoke<string[]>("create_table", { id, spec }),
+  columnDefinitions: (id: string, table: TableRef) => invoke<ColumnDefinition[]>("column_definitions", { id, table }),
+  foreignKeys: (id: string, table: TableRef) => invoke<ForeignKeyInfo[]>("foreign_keys", { id, table }),
   tableIndexes: (id: string, table: TableRef) => invoke<IndexInfo[]>("table_indexes", { id, table }),
   /** The statements `alterTable` would run. Runs nothing. */
   planAlterTable: (id: string, spec: AlterTable) => invoke<string[]>("plan_alter_table", { id, spec }),

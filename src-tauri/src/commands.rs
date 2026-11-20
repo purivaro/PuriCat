@@ -693,8 +693,27 @@ pub async fn plan_alter_table(
     id: String,
     spec: puricat_core::db::table_design::AlterTable,
 ) -> Result<Vec<String>> {
-    let engine = state.store.get_connection(&id).await?.engine;
-    puricat_core::db::table_design::alter_table(engine, &spec)
+    state.session(&id).await?.alter_table_sql(&spec).await
+}
+
+/// The columns of a table as the server keeps them, for the change form.
+#[tauri::command]
+pub async fn column_definitions(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+) -> Result<Vec<puricat_core::db::table_design::ColumnDefinition>> {
+    state.session(&id).await?.column_definitions(&table).await
+}
+
+/// The foreign keys of a table.
+#[tauri::command]
+pub async fn foreign_keys(
+    state: State<'_, AppState>,
+    id: String,
+    table: TableRef,
+) -> Result<Vec<puricat_core::db::table_design::ForeignKeyInfo>> {
+    state.session(&id).await?.foreign_keys(&table).await
 }
 
 /// Change a table. When a column is dropped, `confirm` must be the table's name, as typed.
