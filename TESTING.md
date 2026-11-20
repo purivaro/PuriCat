@@ -720,6 +720,22 @@ For the SQL console it covers MySQL only, with the text set programmatically. No
 - The unit tests of the agent chat use a shell script written to a fresh directory under the system temporary directory as the CLI, and remove it. Only the ignored `real_claude_cli_answers` starts the real Claude Code CLI: it sends one prompt ("Reply with exactly the word: pong") with the `haiku` alias on the account that CLI is signed in to, in a temporary working directory it removes. It sends no schema and touches no database.
 - Never point `PURICAT_TEST_*` at a server that holds real data. The tests need broad privileges and the guarantees above are only as good as the code.
 
+## Results — 2026-11-20 (find in database)
+
+macOS, local MySQL 9.3.0, PostgreSQL 16.13 and SQLite. Design: [ADR 0026](docs/adr/0026-find-in-database.md).
+
+| Check | Result |
+|---|---|
+| `live_find`: `mysql_find_in_database` | Pass on the first run. Contains, whatever the case: the rows per column and in all, and the same number from the table filter a result opens with; `%` found as itself; Thai text; starts with. Is exactly: `100` in an `INT UNSIGNED`, a `TINYINT`, a `BIGINT` and a `DECIMAL`; `12.5` not looked for in integer columns; `-1` not in an unsigned column; `300` not in a `TINYINT`. A table of binary columns not read; a table that is not there an error. Names in lower or upper case, `_` matched as itself |
+| `live_find`: `postgres_find_in_database` | Pass on the first run. `ILIKE`; a value inside a `text[]`; text never compared with a date, a boolean or an integer (the statement would fail); a number in `integer` and `numeric`; a `uuid`; `40000` not looked for in a `smallint`. Names in one schema, in every schema, and not in `pg_catalog` |
+| `sqlite`: `find_in_database` | Pass. Case for ASCII, Thai, `%`, a number in a `DECIMAL` column, a binary column left out, names of columns and of a view |
+| Unit tests | `find::tests` (7): the statement for a table (one pass, a count per column and in all), the columns an exact value is looked in per engine, a table with nowhere to look, refusals (empty, NUL, too long), reading the counts back, name patterns and their order. `find.test.ts` (4): the filter a result opens with (at most 20 columns), table labels, the tally, name groups |
+| End-to-end stages `find-data`, `find-names` (MySQL), full run | Pass, with an empty `problems` list and screenshots (98 log entries), started once the Mac had been idle for two minutes. A Thai value found in `customers.name` and `products.title`, one row each; `products` opened filtered to that row; the last search back with the dialog; `245.5` exactly in `products.price`; `ORDER_N` as a name: `orders.order_no`. An earlier full run stopped in the Smart Paste stage, which reads the system clipboard, while the Mac was in use |
+| Screenshots | Looked at by hand (English, light). They showed the focus on the header's close button when the dialog opened; the text box now takes it (checked by the stage, and in a second, partial run's screenshot) |
+| `pnpm check` | Pass (Vitest 126, core unit 156) |
+
+Not verified: PostgreSQL and SQLite through the window, Stop through the window, a Production connection, Thai and dark, MariaDB, large tables (how long a search takes, and the load on the server).
+
 ## Results — 2026-11-20 (column changes and foreign keys)
 
 macOS, local MySQL 9.3.0 and PostgreSQL 16.13. Design: [ADR 0025](docs/adr/0025-new-table-form.md), section "Changing a column, and foreign keys".
