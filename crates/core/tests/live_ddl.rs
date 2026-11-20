@@ -2,7 +2,9 @@
 //! Same opt-in environment variables and disposable-database rule as `live_db.rs`: every
 //! database created here is named `puricat_it_<random>…` and dropped again.
 
-use puricat_core::db::ddl::{AlterDatabase, DefinitionSource, Flush, NewDatabase, TableChange};
+use puricat_core::db::ddl::{
+    AlterDatabase, DefinitionSource, Flush, NewDatabase, TableChange, ViewSpec,
+};
 use puricat_core::db::{ObjectKind, Session, TableRef};
 use puricat_core::model::{ConnectionProfile, Engine};
 use puricat_core::Error;
@@ -46,6 +48,14 @@ fn change(value: serde_json::Value) -> AlterDatabase {
 
 fn table_change(value: serde_json::Value) -> TableChange {
     serde_json::from_value(value).expect("valid table change")
+}
+
+fn view(table: &TableRef, select: &str, replace: bool) -> ViewSpec {
+    ViewSpec {
+        table: table.clone(),
+        select: select.into(),
+        replace,
+    }
 }
 
 fn at(database: &str, schema: Option<&str>, name: &str) -> TableRef {
@@ -1087,6 +1097,380 @@ async fn postgres_table_menu() {
             .await
             .unwrap();
     }
+    outcome.expect("test body");
+}
+
+async fn my_count(admin: &mut sqlx::MySqlConnection, sql: &str) -> i64 {
+    sqlx::query(sql).fetch_one(admin).await.unwrap().get(0)
+}
+
+/// The view form on MySQL: create, read the query back, replace it, try a query.
+#[tokio::test]
+async fn mysql_view_form() {
+    let Some(t) = target(Engine::Mysql, "PURICAT_TEST_MYSQL") else {
+        eprintln!("skipped: PURICAT_TEST_MYSQL is not set");
+        return;
+    };
+    let mut opts = sqlx::mysql::MySqlConnectOptions::new()
+        .host(&t.profile.host)
+        .port(t.profile.port)
+        .username(&t.profile.username);
+    if let Some(pw) = &t.password {
+        opts = opts.password(pw);
+    }
+    let mut admin = sqlx::MySqlConnection::connect_with(&opts).await.unwrap();
+    let database = scratch_name();
+    let db = database.clone();
+
+    let outcome = tokio::spawn(async move {
+        let mut admin = sqlx::MySqlConnection::connect_with(&opts).await.unwrap();
+        let session = Session::connect(&t.profile, t.password.as_deref())
+            .await
+            .unwrap();
+        for sql in [
+            format!("CREATE DATABASE `{db}`"),
+            format!("CREATE TABLE `{db}`.orders (id INT PRIMARY KEY, total DECIMAL(10,2), note VARCHAR(20))"),
+            format!("INSERT INTO `{db}`.orders VALUES (1, 50, 'a'), (2, 150, 'b'), (3, 250, 'c')"),
+        ] {
+            admin.execute(sql.as_str()).await.unwrap();
+        }
+        let big = at(&db, None, "big orders");
+
+        // The table is named without its database: the view's database is where MySQL
+        // must look for it, whatever the session's own default database is.
+        let create = view(&big, "SELECT id, total FROM orders WHERE total > 100;", false);
+        let planned = session.view_statements_sql(&create).unwrap();
+        assert_eq!(
+            planned,
+            [format!("CREATE VIEW `{db}`.`big orders` AS\nSELECT id, total FROM orders WHERE total > 100")]
+        );
+        assert_eq!(objects(&session, &db, None).await, ["orders"], "planning runs nothing");
+        assert_eq!(session.save_view(&create).await.unwrap(), planned);
+        assert_eq!(objects(&session, &db, None).await, ["big orders", "orders"]);
+        assert_eq!(
+            my_count(&mut admin, &format!("SELECT COUNT(*) FROM `{db}`.`big orders`")).await,
+            2
+        );
+
+        // The query comes back as the server keeps it: rewritten, every name qualified.
+        let kept = session.view_select(&big).await.unwrap();
+        assert!(kept.to_lowercase().starts_with("select "), "{kept}");
+        assert!(kept.contains(&format!("`{db}`.`orders`")), "{kept}");
+        // ... and that text is itself a query the form accepts.
+        assert!(session.view_statements_sql(&view(&big, &kept, true)).is_ok());
+
+        // The same name again: the server's refusal, and the view is as it was.
+        assert!(matches!(session.save_view(&create).await, Err(Error::Database(_))));
+
+        // Another WHERE and one more column.
+        let replace = view(&big, "SELECT id, total, note FROM orders WHERE total > 200", true);
+        assert_eq!(
+            session.save_view(&replace).await.unwrap(),
+            [format!("CREATE OR REPLACE VIEW `{db}`.`big orders` AS\nSELECT id, total, note FROM orders WHERE total > 200")]
+        );
+        let columns = session.describe_table(&big).await.unwrap().columns;
+        assert_eq!(
+            columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["id", "total", "note"]
+        );
+        assert_eq!(
+            my_count(&mut admin, &format!("SELECT COUNT(*) FROM `{db}`.`big orders`")).await,
+            1
+        );
+
+        // A query that fails on the server leaves the view alone.
+        assert!(matches!(
+            session.save_view(&view(&big, "SELECT nothing FROM nowhere", true)).await,
+            Err(Error::Database(_))
+        ));
+        assert!(session.view_select(&big).await.unwrap().contains("200"));
+
+        // Trying a query: rows, read in the view's database; a statement that writes is
+        // refused before anything is sent, and the rows are still there.
+        let tried = session
+            .preview_select(&db, "SELECT id, note FROM orders ORDER BY id", 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            tried.result.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["id", "note"]
+        );
+        assert_eq!(
+            tried.result.rows,
+            [
+                [Some("1".to_string()), Some("a".to_string())],
+                [Some("2".to_string()), Some("b".to_string())]
+            ]
+        );
+        assert!(tried.result.capped, "a third row exists");
+        assert!(matches!(
+            session.preview_select(&db, "DELETE FROM orders", 10).await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            session.preview_select(&db, "SELECT 1; DELETE FROM orders", 10).await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            session.preview_select(&db, "SELECT nothing FROM nowhere", 10).await,
+            Err(Error::Database(_))
+        ));
+        assert_eq!(my_count(&mut admin, &format!("SELECT COUNT(*) FROM `{db}`.orders")).await, 3);
+
+        // A view that is not there.
+        assert!(matches!(
+            session.view_select(&at(&db, None, "missing")).await,
+            Err(Error::NotFound(_))
+        ));
+
+        // The save sends the statement as one prepared statement, and the server takes one
+        // statement at a time: a text that holds a second one is refused whatever the reading
+        // of the text made of it, and neither statement runs.
+        assert!(matches!(
+            session
+                .execute_one(
+                    &db,
+                    "CREATE VIEW `second` AS SELECT 1; CREATE TABLE made_by_second (a INT)"
+                )
+                .await,
+            Err(Error::Database(_))
+        ));
+        assert_eq!(objects(&session, &db, None).await, ["big orders", "orders"]);
+        // One statement goes through; a question mark inside a string is no parameter.
+        session
+            .execute_one(&db, "CREATE VIEW `asked` AS SELECT 'why?' AS q")
+            .await
+            .unwrap();
+        assert_eq!(
+            objects(&session, &db, None).await,
+            ["asked", "big orders", "orders"]
+        );
+
+        // `--` followed by a control character starts a comment for MySQL (its lexer asks
+        // "space or control character"), and for the reading of the text too. Read
+        // otherwise, the quote after an invisible control character would hide the second
+        // statement on the next line from that reading.
+        let commented = session
+            .preview_select(&db, "SELECT 1 AS x --\u{1} not SQL", 10)
+            .await
+            .unwrap();
+        assert_eq!(commented.result.rows, [[Some("1".to_string())]]);
+        let hidden = "SELECT id FROM orders --\u{1}'\n; CREATE TABLE made_by_second (a INT); -- '";
+        assert!(matches!(
+            session.view_statements_sql(&view(&big, hidden, true)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            session.preview_select(&db, hidden, 10).await,
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(
+            objects(&session, &db, None).await,
+            ["asked", "big orders", "orders"]
+        );
+        session.close().await;
+    })
+    .await;
+
+    admin
+        .execute(format!("DROP DATABASE IF EXISTS `{database}`").as_str())
+        .await
+        .unwrap();
+    outcome.expect("test body");
+}
+
+/// The view form on PostgreSQL, where `OR REPLACE` may add columns but not take one away,
+/// and where a `WITH` can hide a statement that writes.
+#[tokio::test]
+async fn postgres_view_form() {
+    let Some(t) = target(Engine::Postgres, "PURICAT_TEST_POSTGRES") else {
+        eprintln!("skipped: PURICAT_TEST_POSTGRES is not set");
+        return;
+    };
+    let mut opts = sqlx::postgres::PgConnectOptions::new()
+        .host(&t.profile.host)
+        .port(t.profile.port)
+        .username(&t.profile.username)
+        .database("postgres");
+    if let Some(pw) = &t.password {
+        opts = opts.password(pw);
+    }
+    let mut admin = sqlx::PgConnection::connect_with(&opts).await.unwrap();
+    let database = scratch_name();
+    let db = database.clone();
+
+    let outcome = tokio::spawn(async move {
+        let session = Session::connect(&t.profile, t.password.as_deref())
+            .await
+            .unwrap();
+        session
+            .create_database(&spec(json!({ "name": db })))
+            .await
+            .unwrap();
+        let mut inside = sqlx::PgConnection::connect_with(&opts.clone().database(&db))
+            .await
+            .unwrap();
+        inside
+            .execute(
+                "CREATE SCHEMA shop;
+                 CREATE TABLE shop.orders (id int PRIMARY KEY, total numeric(10,2), note text);
+                 INSERT INTO shop.orders VALUES (1, 50, 'a'), (2, 150, 'b'), (3, 250, 'c');",
+            )
+            .await
+            .unwrap();
+        let big = at(&db, Some("shop"), "big orders");
+
+        // Created inside the database that holds the schema, not the session's own.
+        let create = view(&big, "SELECT id, total FROM shop.orders WHERE total > 100", false);
+        let planned = session.view_statements_sql(&create).unwrap();
+        assert_eq!(
+            planned,
+            ["CREATE VIEW \"shop\".\"big orders\" AS\nSELECT id, total FROM shop.orders WHERE total > 100"]
+        );
+        assert_eq!(session.save_view(&create).await.unwrap(), planned);
+        assert_eq!(objects(&session, &db, Some("shop")).await, ["big orders", "orders"]);
+
+        // The query as PostgreSQL prints it, without the semicolon it ends with.
+        let kept = session.view_select(&big).await.unwrap();
+        assert!(kept.trim_start().to_lowercase().starts_with("select"), "{kept}");
+        assert!(kept.contains("100") && !kept.trim_end().ends_with(';'), "{kept}");
+        assert!(session.view_statements_sql(&view(&big, &kept, true)).is_ok());
+
+        // Another WHERE and a column added at the end.
+        let replace = view(&big, "SELECT id, total, note FROM shop.orders WHERE total > 200", true);
+        assert_eq!(
+            session.save_view(&replace).await.unwrap(),
+            ["CREATE OR REPLACE VIEW \"shop\".\"big orders\" AS\nSELECT id, total, note FROM shop.orders WHERE total > 200"]
+        );
+        let rows: i64 = sqlx::query("SELECT count(*) FROM shop.\"big orders\"")
+            .fetch_one(&mut inside)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(rows, 1);
+
+        // A column taken away: PostgreSQL refuses, and the view stays as it was.
+        let fewer = view(&big, "SELECT id FROM shop.orders", true);
+        match session.save_view(&fewer).await {
+            Err(Error::Database(message)) => assert!(message.contains("drop columns"), "{message}"),
+            other => panic!("expected the server's refusal, got {other:?}"),
+        }
+        let kept = session.view_select(&big).await.unwrap();
+        assert!(kept.contains("note") && kept.contains("200"), "{kept}");
+
+        // Trying a query: rows; a WITH that deletes is refused without touching the rows,
+        // by the reading of the text, and the server's read-only transaction stands behind it.
+        let tried = session
+            .preview_select(&db, "SELECT id, note FROM shop.orders ORDER BY id", 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            tried.result.rows,
+            [
+                [Some("1".to_string()), Some("a".to_string())],
+                [Some("2".to_string()), Some("b".to_string())]
+            ]
+        );
+        assert!(tried.result.capped);
+        let smuggled = "WITH gone AS (DELETE FROM shop.orders RETURNING id) SELECT id FROM gone";
+        assert!(matches!(
+            session.preview_select(&db, smuggled, 10).await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(session.view_statements_sql(&view(&big, smuggled, true)).is_err());
+        // A function that writes gets past the reading of the text; the transaction stops it.
+        inside
+            .execute(
+                "CREATE FUNCTION shop.wipe() RETURNS int LANGUAGE sql AS
+                 'DELETE FROM shop.orders; SELECT 1'",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.preview_select(&db, "SELECT shop.wipe()", 10).await,
+            Err(Error::Database(_))
+        ));
+        let left: i64 = sqlx::query("SELECT count(*) FROM shop.orders")
+            .fetch_one(&mut inside)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(left, 3);
+
+        // A materialized view is not a view this form edits.
+        inside
+            .execute("CREATE MATERIALIZED VIEW shop.totals AS SELECT sum(total) AS t FROM shop.orders")
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.view_select(&at(&db, Some("shop"), "totals")).await,
+            Err(Error::NotFound(_))
+        ));
+
+        // A read-only session is refused by the server.
+        let mut read_only = t.profile.clone();
+        read_only.read_only = true;
+        let guarded = Session::connect(&read_only, t.password.as_deref())
+            .await
+            .unwrap();
+        assert!(matches!(guarded.save_view(&replace).await, Err(Error::Database(_))));
+        guarded.close().await;
+
+        // The save goes through the extended protocol, which takes exactly one statement: a
+        // second one in the text is refused by the server, and neither runs.
+        assert!(matches!(
+            session
+                .execute_one(
+                    &db,
+                    "CREATE VIEW shop.second AS SELECT 1; CREATE TABLE shop.made_by_second (a int)"
+                )
+                .await,
+            Err(Error::Database(_))
+        ));
+        session
+            .execute_one(&db, "CREATE VIEW shop.asked AS SELECT 'why?' AS q")
+            .await
+            .unwrap();
+
+        // In a database where backslashes escape in plain strings (`standard_conforming_strings
+        // = off`, an old setting), the reading of the text and the server disagree about where
+        // a string ends: the query below is one SELECT to the first, and a SELECT and a CREATE
+        // TABLE to the second. Asked to take one statement, the server refuses the save.
+        inside
+            .execute(
+                format!("ALTER DATABASE \"{db}\" SET standard_conforming_strings = off").as_str(),
+            )
+            .await
+            .unwrap();
+        // A new session: its connections are opened after the change.
+        let fresh = Session::connect(&t.profile, t.password.as_deref())
+            .await
+            .unwrap();
+        let sneaky = view(
+            &at(&db, Some("shop"), "sneaky"),
+            "SELECT 'a\\'' AS x; CREATE TABLE shop.made_by_second (a int); --'",
+            false,
+        );
+        assert!(fresh.view_statements_sql(&sneaky).is_ok(), "one query to the reading of the text");
+        assert!(matches!(fresh.save_view(&sneaky).await, Err(Error::Database(_))));
+        fresh.close().await;
+        let names = objects(&session, &db, Some("shop")).await;
+        assert!(names.iter().any(|n| n == "asked"), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| ["second", "sneaky", "made_by_second"].contains(&n.as_str())),
+            "{names:?}"
+        );
+        inside.close().await.unwrap();
+        session.close().await;
+    })
+    .await;
+
+    admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)").as_str())
+        .await
+        .unwrap();
     outcome.expect("test body");
 }
 

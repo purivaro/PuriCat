@@ -18,6 +18,7 @@ import {
   RefreshCw,
   RotateCw,
   Search,
+  SquarePen,
   Star,
   StarOff,
   Table2,
@@ -222,6 +223,13 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                 </>
               }
               onClick={() => toggle(groupKey, !open)}
+              menu={
+                g.id === "views" ? (
+                  <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askViewTask({ kind: "new", connection, database, schema })}>
+                    <Eye className="size-3.5" /> {t("schema.newView")}
+                  </ContextMenu.Item>
+                ) : undefined
+              }
             />
             {open &&
               shown.map((o) => {
@@ -253,6 +261,12 @@ function Objects({ connection, database, schema, depth, query }: ObjectsProps) {
                           <Copy className="size-3.5" /> {t("explorer.copyName")}
                         </ContextMenu.Item>
                         <ContextMenu.Separator className={menuSeparatorClass} />
+                        {/* A view's query; a materialized view is stored data and is not edited here. */}
+                        {o.kind === "view" && (
+                          <ContextMenu.Item className={menuItemClass} onSelect={() => useUi.getState().askViewTask({ kind: "edit", connection, table })}>
+                            <SquarePen className="size-3.5" /> {t("schema.editView")}
+                          </ContextMenu.Item>
+                        )}
                         {/* SQLite cannot rename a view. */}
                         {(o.kind === "table" || connection.engine !== "sqlite") && (
                           <ContextMenu.Item className={menuItemClass} onSelect={() => ask("rename")}>
@@ -324,12 +338,20 @@ function Schemas({ connection, database, depth, query }: Omit<ObjectsProps, "sch
                 if (!open && !loaded) void loadObjects(connection.id, database, schema.name);
               }}
               menu={
-                <ContextMenu.Item
-                  className={menuItemClass}
-                  onSelect={() => void loadObjects(connection.id, database, schema.name)}
-                >
-                  <RefreshCw className="size-3.5" /> {t("common.refresh")}
-                </ContextMenu.Item>
+                <>
+                  {/* The server's own schemas are shown, not added to. */}
+                  {!schema.system && (
+                    <ContextMenu.Item
+                      className={menuItemClass}
+                      onSelect={() => useUi.getState().askViewTask({ kind: "new", connection, database, schema: schema.name })}
+                    >
+                      <Eye className="size-3.5" /> {t("schema.newView")}
+                    </ContextMenu.Item>
+                  )}
+                  <ContextMenu.Item className={menuItemClass} onSelect={() => void loadObjects(connection.id, database, schema.name)}>
+                    <RefreshCw className="size-3.5" /> {t("common.refresh")}
+                  </ContextMenu.Item>
+                </>
               }
             />
             {open && (
@@ -409,6 +431,15 @@ function Databases({ connection, query }: { connection: ConnectionView; query: s
                   <ContextMenu.Item className={menuItemClass} onSelect={() => openSqlFile(connection.id, db.name)}>
                     <FileCode2 className="size-3.5" /> {t("explorer.openSqlFile")}
                   </ContextMenu.Item>
+                  {/* Where a database holds its views itself; on PostgreSQL a schema does. */}
+                  {!hasSchemas && !db.system && (
+                    <ContextMenu.Item
+                      className={menuItemClass}
+                      onSelect={() => useUi.getState().askViewTask({ kind: "new", connection, database: db.name, schema: null })}
+                    >
+                      <Eye className="size-3.5" /> {t("schema.newView")}
+                    </ContextMenu.Item>
+                  )}
                   {/* A SQLite connection is one file: there are no databases to manage inside it. */}
                   {manageable && (
                     <>

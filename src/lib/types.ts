@@ -340,6 +340,21 @@ export type TableChange =
   | { action: "empty"; table: TableRef }
   | { action: "drop"; table: TableRef; kind: ObjectKind };
 
+/** A view to create, or to give another query, from the view form. */
+export interface ViewSpec {
+  /** Where the view is, and its name. */
+  table: TableRef;
+  /** The view's query only: what follows `AS`. */
+  select: string;
+  /** The view exists and gets this query instead of its own. */
+  replace: boolean;
+}
+
+/** The first rows of a query that was only tried, with how long that took. */
+export interface QueryPreview extends ResultPreview {
+  elapsedMs: number;
+}
+
 /** A database to create. Only the fields of the connection's engine are sent. */
 export interface NewDatabase {
   name: string;

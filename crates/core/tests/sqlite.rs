@@ -1760,3 +1760,156 @@ async fn table_menu() {
     ));
     session.close().await;
 }
+
+/// The view form: create, read the query back, replace it (drop and create, both or
+/// neither), try a query.
+#[tokio::test]
+async fn view_form() {
+    use puricat_core::db::ddl::ViewSpec;
+    let scratch = Scratch::new(
+        r#"
+        CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL, kept INT DEFAULT 0);
+        INSERT INTO notes (body, kept) VALUES ('a', 1), ('b', 0), ('c', 1);
+        "#,
+    )
+    .await;
+    let session = open(&scratch).await;
+    let spec = |name: &str, select: &str, replace| ViewSpec {
+        table: table(name),
+        select: select.into(),
+        replace,
+    };
+    let bodies = |name: &'static str| async {
+        session
+            .fetch_rows(
+                &table(name),
+                &serde_json::from_value(json!({ "offset": 0, "limit": 50 })).unwrap(),
+            )
+            .await
+            .map(|page| {
+                page.rows
+                    .into_iter()
+                    .map(|row| row[0].clone())
+                    .collect::<Vec<_>>()
+            })
+    };
+
+    // A new view, under a name that needs quoting.
+    let create = spec(
+        "kept notes",
+        "SELECT body FROM notes WHERE kept = 1 ORDER BY id;",
+        false,
+    );
+    let planned = session.view_statements_sql(&create).unwrap();
+    assert_eq!(
+        planned,
+        ["CREATE VIEW \"kept notes\" AS\nSELECT body FROM notes WHERE kept = 1 ORDER BY id"]
+    );
+    assert_eq!(session.save_view(&create).await.unwrap(), planned);
+    assert_eq!(bodies("kept notes").await.unwrap(), [some("a"), some("c")]);
+
+    // The query, without the statement around it.
+    assert_eq!(
+        session.view_select(&table("kept notes")).await.unwrap(),
+        "SELECT body FROM notes WHERE kept = 1 ORDER BY id"
+    );
+    assert!(matches!(
+        session.view_select(&table("notes")).await,
+        Err(Error::NotFound(_))
+    ));
+
+    // Another query: SQLite has no OR REPLACE, so the view is dropped and created again.
+    let replace = spec(
+        "kept notes",
+        "SELECT body, id FROM notes WHERE kept = 0",
+        true,
+    );
+    assert_eq!(
+        session.save_view(&replace).await.unwrap(),
+        [
+            "DROP VIEW \"kept notes\"".to_string(),
+            "CREATE VIEW \"kept notes\" AS\nSELECT body, id FROM notes WHERE kept = 0".to_string()
+        ]
+    );
+    assert_eq!(bodies("kept notes").await.unwrap(), [some("b")]);
+
+    // Both or neither: when the new statement fails, the old view is still there.
+    // (SQLite checks a view's tables when it is read, not when it is made, so the failure
+    // here is the name being taken by a table.)
+    let taken = spec("notes", "SELECT 1", true);
+    assert!(matches!(
+        session.save_view(&taken).await,
+        Err(Error::Database(_))
+    ));
+    let broken = ViewSpec {
+        select: "SELECT body FROM".into(),
+        ..replace.clone()
+    };
+    assert!(matches!(
+        session.save_view(&broken).await,
+        Err(Error::Database(_))
+    ));
+    assert_eq!(
+        session.view_select(&table("kept notes")).await.unwrap(),
+        "SELECT body, id FROM notes WHERE kept = 0"
+    );
+    assert_eq!(bodies("kept notes").await.unwrap(), [some("b")]);
+
+    // Trying a query reads on a handle that cannot write.
+    let tried = session
+        .preview_select("main", "SELECT id, body FROM notes ORDER BY id", 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        tried.result.rows,
+        [[some("1"), some("a")], [some("2"), some("b")]]
+    );
+    assert!(tried.result.capped);
+    for refused in ["DELETE FROM notes", "SELECT 1; DELETE FROM notes"] {
+        assert!(matches!(
+            session.preview_select("main", refused, 10).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    assert_eq!(bodies("notes").await.unwrap().len(), 3);
+
+    // One statement only: SQLite would run every statement of a text, so a semicolon
+    // inside it is refused before anything is sent; one statement with a final one runs.
+    assert!(matches!(
+        session
+            .execute_one(
+                "main",
+                "CREATE VIEW second AS SELECT 1; CREATE TABLE made_by_second (a INT)"
+            )
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    session
+        .execute_one("main", "CREATE VIEW asked AS SELECT 'why?' AS q;")
+        .await
+        .unwrap();
+    let names: Vec<String> = session
+        .list_objects("main", None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "asked"), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n == "second" || n == "made_by_second"),
+        "{names:?}"
+    );
+
+    // A file opened read-only refuses to save, saying how to change that.
+    let guarded = Session::connect(&profile(scratch.path(), true), None)
+        .await
+        .unwrap();
+    assert!(guarded.view_statements_sql(&replace).is_ok());
+    match guarded.save_view(&replace).await {
+        Err(Error::Invalid(message)) => assert!(message.contains("read-only"), "{message}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    guarded.close().await;
+    session.close().await;
+}

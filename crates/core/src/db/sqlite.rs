@@ -390,6 +390,61 @@ impl SqliteSession {
         Ok(())
     }
 
+    /// One statement, for [`super::Session::execute_one`]. SQLite runs every statement of the
+    /// text it is given, and only a semicolon can end one: a text with no semicolon but a
+    /// final one holds a single statement.
+    pub async fn execute_one(&self, database: &str, sql: &str) -> Result<()> {
+        if sql.trim_end().trim_end_matches(';').contains(';') {
+            return Err(Error::Invalid(
+                "A semicolon inside the statement is not accepted here".into(),
+            ));
+        }
+        self.execute_statement(database, sql).await
+    }
+
+    /// Run several such statements as one: all of them, or none.
+    pub async fn execute_all(&self, database: &str, statements: &[String]) -> Result<()> {
+        only_main(database)?;
+        if self.read_only {
+            return Err(Error::Invalid(
+                "This file is opened read-only. Turn off the read-only session in the connection's settings to change it.".into(),
+            ));
+        }
+        let pool = self.pool.clone();
+        // Dropped without a commit, the transaction is rolled back.
+        let mut tx = pool.begin().await.map_err(Error::database)?;
+        for sql in statements {
+            sqlx::query(sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(Error::database)?;
+        }
+        tx.commit().await.map_err(Error::database)
+    }
+
+    /// The query of a view: what follows `AS` in the statement the file keeps.
+    pub async fn view_select(&self, table: &TableRef) -> Result<String> {
+        only_main(&table.database)?;
+        let stored = self
+            .query_text(
+                "SELECT sql FROM main.sqlite_master WHERE type = 'view' AND name = ?",
+                &[Some(table.name.clone())],
+            )
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next().flatten())
+            .ok_or_else(|| Error::NotFound(format!("View {}", table.name)))?;
+        super::script::view_query(crate::model::Engine::Sqlite, &stored)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                Error::Invalid(format!(
+                    "The query of {} could not be told apart from its statement. Open its definition instead.",
+                    table.name
+                ))
+            })
+    }
+
     /// Run a read-only query whose columns are all text.
     pub async fn query_text(
         &self,

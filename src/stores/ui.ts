@@ -16,6 +16,11 @@ export interface TableTask {
   objectKind: ObjectKind;
 }
 
+/** A view to make in a database (or a schema of it), or one whose query is to be changed. */
+export type ViewTask =
+  | { kind: "new"; connection: ConnectionView; database: string; schema: string | null }
+  | { kind: "edit"; connection: ConnectionView; table: TableRef };
+
 interface UiState {
   /** `null` closed, `"new"` creating, otherwise the connection being edited. */
   connectionDialog: null | "new" | ConnectionView;
@@ -24,6 +29,7 @@ interface UiState {
   newDatabaseOn: ConnectionView | null;
   databaseTask: DatabaseTask | null;
   tableTask: TableTask | null;
+  viewTask: ViewTask | null;
   /** The database whose backup dialog is open. */
   backupOf: { connection: ConnectionView; database: string } | null;
   paletteOpen: boolean;
@@ -33,6 +39,7 @@ interface UiState {
   askNewDatabase: (connection: ConnectionView | null) => void;
   askDatabaseTask: (task: DatabaseTask | null) => void;
   askTableTask: (task: TableTask | null) => void;
+  askViewTask: (task: ViewTask | null) => void;
   askBackup: (target: { connection: ConnectionView; database: string } | null) => void;
   setPaletteOpen: (open: boolean) => void;
 }
@@ -43,6 +50,7 @@ export const useUi = create<UiState>((set) => ({
   newDatabaseOn: null,
   databaseTask: null,
   tableTask: null,
+  viewTask: null,
   backupOf: null,
   paletteOpen: false,
   openConnectionDialog: (target) => set({ connectionDialog: target ?? "new" }),
@@ -51,6 +59,7 @@ export const useUi = create<UiState>((set) => ({
   askNewDatabase: (newDatabaseOn) => set({ newDatabaseOn }),
   askDatabaseTask: (databaseTask) => set({ databaseTask }),
   askTableTask: (tableTask) => set({ tableTask }),
+  askViewTask: (viewTask) => set({ viewTask }),
   askBackup: (backupOf) => set({ backupOf }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));

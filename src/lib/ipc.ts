@@ -37,6 +37,7 @@ import type {
   PickedFile,
   RestorePlan,
   RowCount,
+  QueryPreview,
   RowFilter,
   RowPage,
   RunOutcome,
@@ -53,6 +54,7 @@ import type {
   UniqueKey,
   UpdateInfo,
   UpdateProgress,
+  ViewSpec,
 } from "./types";
 
 /** Backend errors arrive as `{ kind, message }`; anything else is normalised to that shape. */
@@ -151,6 +153,14 @@ export const ipc = {
   /** `typed` is what the user typed to confirm emptying or dropping; the backend checks it against the name. */
   applyTableChange: (id: string, change: TableChange, typed: string | null) =>
     invoke<string>("apply_table_change", { id, change, typed }),
+  /** The query of a view as the server keeps it now. */
+  viewSelect: (id: string, table: TableRef) => invoke<string>("view_select", { id, table }),
+  /** The exact statements `saveView` would run, in order. Runs nothing. */
+  planView: (id: string, spec: ViewSpec) => invoke<string[]>("plan_view", { id, spec }),
+  saveView: (id: string, spec: ViewSpec) => invoke<string[]>("save_view", { id, spec }),
+  /** The first rows of a view's query, read on a connection that cannot write. */
+  previewViewSelect: (id: string, database: string, select: string) =>
+    invoke<QueryPreview>("preview_view_select", { id, database, select }),
   planFlush: (id: string, what: FlushKind) => invoke<string>("plan_flush", { id, what }),
   flushServer: (id: string, what: FlushKind) => invoke<string>("flush_server", { id, what }),
   /** Shows the native Open dialog for a SQL file and gives its text. `null` when it was cancelled. */

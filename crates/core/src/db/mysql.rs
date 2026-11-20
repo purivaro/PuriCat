@@ -365,6 +365,52 @@ impl MySqlSession {
         Ok(())
     }
 
+    /// One statement, for [`super::Session::execute_one`]: with `database` as the session's
+    /// default one, on a connection of its own, because MySQL resolves the unqualified names
+    /// inside a view's query against the session's database, not against the database the
+    /// view is created in. The statement goes as a prepared statement, which MySQL takes one
+    /// statement at a time: a text that holds a second one is a syntax error to the server.
+    pub async fn execute_in(&self, database: &str, sql: &str) -> Result<()> {
+        let use_database = format!("USE {}", ident::mysql(database)?);
+        // Detached, so the default database does not stay behind on a pooled connection.
+        let mut conn = self.pool.acquire().await.map_err(Error::database)?.detach();
+        let mut result = conn.execute(use_database.as_str()).await.map(|_| ());
+        if result.is_ok() {
+            result = sqlx::query(sql)
+                .persistent(false)
+                .execute(&mut conn)
+                .await
+                .map(|_| ());
+        }
+        let _ = sqlx::Connection::close(conn).await;
+        result.map_err(Error::database)
+    }
+
+    /// The query of a view as the server keeps it: its own rewriting, with every name
+    /// qualified, not the text that was typed.
+    pub async fn view_select(&self, table: &TableRef) -> Result<String> {
+        self.query_text(
+            "SELECT VIEW_DEFINITION FROM information_schema.VIEWS
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            &[Some(table.database.clone()), Some(table.name.clone())],
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::NotFound(format!("View {}", table.name)))?
+        .into_iter()
+        .next()
+        .flatten()
+        .filter(|query| !query.trim().is_empty())
+        // The server hides the query from an account without the SHOW VIEW privilege.
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "The server does not show the query of {} to this account (it needs the SHOW VIEW privilege)",
+                table.name
+            ))
+        })
+    }
+
     /// Run a read-only query whose columns are all text.
     pub async fn query_text(
         &self,

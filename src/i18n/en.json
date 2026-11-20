@@ -1006,6 +1006,34 @@
     "holdsRows_other": "It holds about {{count}} rows.",
     "closesTab": "Its open tab will be closed.",
     "unsavedTable": "A tab of this table has unsaved changes. Save or discard them first.",
-    "prodTableWarning": "This runs on a PRODUCTION server."
+    "prodTableWarning": "This runs on a PRODUCTION server.",
+    "newView": "New view…",
+    "editView": "Edit view…",
+    "newViewTitle": "New view in {{place}}",
+    "editViewTitle": "Edit view “{{name}}”",
+    "viewNamePlaceholder": "e.g. big_orders",
+    "viewNameFixed": "To give a view another name, use Rename… in its menu.",
+    "viewQuery": "Query",
+    "viewQueryHint": "Only the SELECT — CREATE VIEW … AS is written around it.",
+    "viewQueryMysql": "MySQL keeps its own rewriting of a view's query, with every name spelled out, not the text that was typed. This is that text.",
+    "viewQueryPostgres": "A table that is not on the search path needs its schema, as in shop.orders.",
+    "viewTry": "Preview rows",
+    "viewTryHint": "Runs the query read-only and shows its first 100 rows.",
+    "viewTriedRows_one": "{{count}} row",
+    "viewTriedRows_other": "{{count}} rows",
+    "viewTriedFirst_one": "The first row, there are more",
+    "viewTriedFirst_other": "The first {{count}} rows, there are more",
+    "viewTriedNone": "No rows",
+    "viewTriedOutdated": "The query changed since this preview.",
+    "viewStatementEmpty": "Give the view a name and a query to see the statement.",
+    "viewEditNote": "Whatever reads this view keeps working only if its columns stay compatible.",
+    "viewEditNoteOn": {
+      "postgres": "PostgreSQL can add columns at the end, but not remove, rename or retype one: it refuses, and the view stays as it is.",
+      "sqlite": "SQLite cannot replace a view: it is dropped and created again, both in one transaction."
+    },
+    "viewCreate": "Create view",
+    "viewSave": "Save view",
+    "viewCreated": "View “{{name}}” created",
+    "viewSaved": "View “{{name}}” saved"
   }
 }

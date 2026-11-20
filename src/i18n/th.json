@@ -970,6 +970,32 @@
     "holdsRows_other": "มีข้อมูลประมาณ {{count}} แถว",
     "closesTab": "แท็บของตารางนี้ที่เปิดอยู่จะถูกปิด",
     "unsavedTable": "มีแท็บของตารางนี้ที่ยังไม่ได้บันทึกการแก้ไข กรุณาบันทึกหรือยกเลิกก่อน",
-    "prodTableWarning": "คำสั่งนี้จะรันบนเซิร์ฟเวอร์ที่ใช้งานจริง (PRODUCTION)"
+    "prodTableWarning": "คำสั่งนี้จะรันบนเซิร์ฟเวอร์ที่ใช้งานจริง (PRODUCTION)",
+    "newView": "view ใหม่…",
+    "editView": "แก้ไข view…",
+    "newViewTitle": "view ใหม่ใน {{place}}",
+    "editViewTitle": "แก้ไข view “{{name}}”",
+    "viewNamePlaceholder": "เช่น big_orders",
+    "viewNameFixed": "ถ้าต้องการเปลี่ยนชื่อ view ให้ใช้ “เปลี่ยนชื่อ…” ในเมนูของ view",
+    "viewQuery": "คิวรี",
+    "viewQueryHint": "ใส่เฉพาะ SELECT — ส่วน CREATE VIEW … AS โปรแกรมเขียนครอบให้",
+    "viewQueryMysql": "MySQL เก็บคิวรีของ view ในรูปที่มันเขียนใหม่เอง โดยใส่ชื่อเต็มทุกตัว ไม่ใช่ข้อความที่พิมพ์ไว้ตอนสร้าง ข้อความนี้คือฉบับที่ MySQL เก็บ",
+    "viewQueryPostgres": "ตารางที่ไม่ได้อยู่ใน search path ต้องระบุ schema ด้วย เช่น shop.orders",
+    "viewTry": "ดูตัวอย่างแถว",
+    "viewTryHint": "รันคิวรีแบบอ่านอย่างเดียว แล้วแสดง 100 แถวแรก",
+    "viewTriedRows_other": "{{count}} แถว",
+    "viewTriedFirst_other": "{{count}} แถวแรก ยังมีอีก",
+    "viewTriedNone": "ไม่มีแถว",
+    "viewTriedOutdated": "คิวรีถูกแก้หลังจากดูตัวอย่างครั้งนี้",
+    "viewStatementEmpty": "ใส่ชื่อและคิวรีของ view เพื่อดูคำสั่ง",
+    "viewEditNote": "สิ่งที่อ่านจาก view นี้จะยังทำงานได้ก็ต่อเมื่อคอลัมน์ยังเข้ากันได้กับของเดิม",
+    "viewEditNoteOn": {
+      "postgres": "PostgreSQL เพิ่มคอลัมน์ต่อท้ายได้ แต่ลบ เปลี่ยนชื่อ หรือเปลี่ยนชนิดคอลัมน์เดิมไม่ได้ ถ้าทำ เซิร์ฟเวอร์จะปฏิเสธและ view จะคงเดิม",
+      "sqlite": "SQLite แทนที่ view ไม่ได้ จึงลบแล้วสร้างใหม่ ทั้งสองขั้นอยู่ใน transaction เดียวกัน"
+    },
+    "viewCreate": "สร้าง view",
+    "viewSave": "บันทึก view",
+    "viewCreated": "สร้าง view “{{name}}” แล้ว",
+    "viewSaved": "บันทึก view “{{name}}” แล้ว"
   }
 }

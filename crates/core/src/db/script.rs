@@ -76,8 +76,13 @@ fn scan(
                 }
                 i += 1;
             }
+            // MySQL starts a `--` comment only when a space or a control character follows
+            // the dashes (its lexer asks `isspace || iscntrl`); `5--1` is a subtraction there.
             b'-' if bytes.get(i + 1) == Some(&b'-')
-                && (!mysql || bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace())) =>
+                && (!mysql
+                    || bytes
+                        .get(i + 2)
+                        .is_none_or(|b| b.is_ascii_whitespace() || b.is_ascii_control())) =>
             {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
@@ -361,6 +366,25 @@ pub fn single_read(engine: Engine, sql: &str) -> std::result::Result<Statement, 
     Ok(statement)
 }
 
+/// The query of a stored `CREATE VIEW … AS <query>` statement: what follows the first `AS`
+/// that stands outside parentheses, strings and comments (a column list has its own
+/// parentheses, and a quoted name is not a word). `None` when there is no such `AS`.
+pub fn view_query(engine: Engine, statement: &str) -> Option<&str> {
+    let mut after = None;
+    scan(
+        engine,
+        statement,
+        |word, depth, start| {
+            if after.is_none() && depth == 0 && word.eq_ignore_ascii_case("AS") {
+                after = Some(start + word.len());
+            }
+        },
+        |_| {},
+    );
+    let query = statement[after?..].trim().trim_end_matches(';').trim_end();
+    (!query.is_empty()).then_some(query)
+}
+
 /// Is this `CREATE TEMPORARY …` / `DROP TEMPORARY …`? Judged by position, so a table that
 /// happens to be called `temporary` is not mistaken for one.
 pub fn is_temporary_ddl(engine: Engine, statement: &str) -> bool {
@@ -569,6 +593,25 @@ mod tests {
     }
 
     #[test]
+    fn mysql_double_dash_comments_are_read_as_the_server_reads_them() {
+        // MySQL's lexer starts a `--` comment when a space or a control character follows
+        // the dashes. Read otherwise, the quote after an invisible control character would
+        // open a string that hides the second statement on the next line.
+        let hidden = "SELECT id FROM t --\u{1}'\n; DROP TABLE t; -- '";
+        assert_eq!(
+            texts(Engine::Mysql, hidden),
+            ["SELECT id FROM t --\u{1}'", "DROP TABLE t"]
+        );
+        assert!(single_read(Engine::Mysql, hidden).is_err());
+        for control in ['\u{0}', '\u{1}', '\u{b}', '\u{1f}', '\u{7f}', '\t', '\r'] {
+            let sql = format!("SELECT 1 --{control}'\n; SELECT 2");
+            assert_eq!(texts(Engine::Mysql, &sql).len(), 2, "{control:?}");
+        }
+        // Still not a comment: `--` followed by a letter or a digit is two minus signs.
+        assert_eq!(texts(Engine::Mysql, "SELECT 5--1; SELECT --x").len(), 2);
+    }
+
+    #[test]
     fn sqlite_scripts_are_read_the_way_sqlite_reads_them() {
         let split = |sql: &str| texts(Engine::Sqlite, sql);
         // Names in double quotes, backticks and brackets; a backslash escapes nothing.
@@ -749,5 +792,22 @@ mod tests {
             Engine::Mysql,
             "CREATE TABLE temporary (a int) COMMENT 'temporary'"
         ));
+    }
+
+    #[test]
+    fn the_query_of_a_stored_view() {
+        let q = |sql| view_query(Engine::Sqlite, sql);
+        assert_eq!(q("CREATE VIEW v AS SELECT 1 AS n"), Some("SELECT 1 AS n"));
+        assert_eq!(
+            q("create view if not exists \"a as b\" (x, y) as\n  select a, b from t;\n"),
+            Some("select a, b from t")
+        );
+        // An `AS` inside the column list, a string or a comment is not the one.
+        assert_eq!(
+            q("CREATE VIEW v /* as it was */ AS WITH w AS (SELECT 'x AS y') SELECT * FROM w"),
+            Some("WITH w AS (SELECT 'x AS y') SELECT * FROM w")
+        );
+        assert_eq!(q("CREATE TABLE t (a int)"), None);
+        assert_eq!(q("CREATE VIEW v AS ;"), None);
     }
 }

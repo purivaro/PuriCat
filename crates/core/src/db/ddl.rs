@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ident, ObjectKind, TableRef};
+use super::{ident, script, ObjectKind, TableRef};
 use crate::model::Engine;
 use crate::{Error, Result};
 
@@ -453,6 +453,74 @@ pub fn table_change(engine: Engine, change: &TableChange) -> Result<String> {
     }
 }
 
+/// A view to create, or to replace with another query, from the view form.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewSpec {
+    /// Where the view is, and its name.
+    pub table: TableRef,
+    /// The view's query only: what follows `AS`.
+    pub select: String,
+    /// The view exists and gets this query instead of its own.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// The query of a view, checked, without its final semicolon.
+///
+/// This is the one place where a form's text reaches a statement as SQL: a query cannot be
+/// bound or quoted. So the rule is another one than for names: the text must read as exactly
+/// one statement, and one that reads — the same test the read-only query path makes
+/// ([`script::single_read`]), which is also what lets the form preview its rows. Whatever is
+/// not that (two statements, a statement that writes, nothing but a comment) is refused
+/// before a statement exists. What the query may read is the server's to say.
+pub fn view_query(engine: Engine, select: &str) -> Result<String> {
+    if script::split(engine, select).is_empty() {
+        return Err(Error::Invalid("The view needs a query".into()));
+    }
+    let statement = script::single_read(engine, select)
+        .map_err(|why| Error::Invalid(format!("{why}. A view is one query that reads.")))?;
+    // SHOW and EXPLAIN read too, but a view cannot be made of them.
+    let first = select[statement.body..]
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if !matches!(first.as_str(), "SELECT" | "WITH" | "VALUES" | "TABLE") {
+        return Err(Error::Invalid(
+            "A view is made of a SELECT (or WITH … SELECT) query".into(),
+        ));
+    }
+    Ok(statement.text)
+}
+
+/// The statements that create the view of `spec`, or give it its new query, in the order
+/// they run. One statement, except on SQLite, which has no `OR REPLACE`: there the view is
+/// dropped and created again, and the caller runs the two in one transaction.
+pub fn view_statements(engine: Engine, spec: &ViewSpec) -> Result<Vec<String>> {
+    if engine == Engine::Sqlserver {
+        return Err(unsupported(engine));
+    }
+    let mut table = spec.table.clone();
+    if !spec.replace {
+        table.name = table.name.trim().to_string();
+        check_length(engine, "view", &table.name)?;
+    }
+    if table.name.is_empty() {
+        return Err(Error::Invalid("The view needs a name".into()));
+    }
+    let name = table_name(engine, &table)?;
+    let query = view_query(engine, &spec.select)?;
+    Ok(match (spec.replace, engine) {
+        (false, _) => vec![format!("CREATE VIEW {name} AS\n{query}")],
+        (true, Engine::Sqlite) => vec![
+            format!("DROP VIEW {name}"),
+            format!("CREATE VIEW {name} AS\n{query}"),
+        ],
+        (true, _) => vec![format!("CREATE OR REPLACE VIEW {name} AS\n{query}")],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +963,153 @@ mod tests {
         assert!(unsupported(
             Engine::Sqlserver,
             TableChange::Empty { table: my }
+        ));
+    }
+
+    fn view(table: TableRef, select: &str, replace: bool) -> ViewSpec {
+        ViewSpec {
+            table,
+            select: select.into(),
+            replace,
+        }
+    }
+
+    #[test]
+    fn view_statements_per_engine() {
+        let my = at("shop", None, "big orders");
+        let pg = at("app", Some("shop"), "big orders");
+        let lite = at("main", None, "big orders");
+        let select = "SELECT id, total FROM orders WHERE total > 100";
+
+        // a new view: the same words everywhere, the name as each engine addresses it
+        assert_eq!(
+            view_statements(Engine::Mysql, &view(my.clone(), select, false)).unwrap(),
+            [format!("CREATE VIEW `shop`.`big orders` AS\n{select}")]
+        );
+        assert_eq!(
+            view_statements(Engine::Postgres, &view(pg.clone(), select, false)).unwrap(),
+            [format!("CREATE VIEW \"shop\".\"big orders\" AS\n{select}")]
+        );
+        assert_eq!(
+            view_statements(Engine::Sqlite, &view(lite.clone(), select, false)).unwrap(),
+            [format!("CREATE VIEW \"big orders\" AS\n{select}")]
+        );
+
+        // another query for a view that exists
+        assert_eq!(
+            view_statements(Engine::Mysql, &view(my.clone(), select, true)).unwrap(),
+            [format!(
+                "CREATE OR REPLACE VIEW `shop`.`big orders` AS\n{select}"
+            )]
+        );
+        assert_eq!(
+            view_statements(Engine::Postgres, &view(pg.clone(), select, true)).unwrap(),
+            [format!(
+                "CREATE OR REPLACE VIEW \"shop\".\"big orders\" AS\n{select}"
+            )]
+        );
+        // SQLite has no OR REPLACE: drop, then create
+        assert_eq!(
+            view_statements(Engine::Sqlite, &view(lite.clone(), select, true)).unwrap(),
+            [
+                "DROP VIEW \"big orders\"".to_string(),
+                format!("CREATE VIEW \"big orders\" AS\n{select}")
+            ]
+        );
+
+        // the query is taken as written, without the semicolon that ends it; a comment
+        // that leads it stays; a new name is trimmed
+        assert_eq!(
+            view_statements(
+                Engine::Mysql,
+                &view(
+                    at("shop", None, "  v  "),
+                    "  -- newest first\nSELECT 1 AS n ;\n",
+                    false
+                )
+            )
+            .unwrap(),
+            ["CREATE VIEW `shop`.`v` AS\n-- newest first\nSELECT 1 AS n"]
+        );
+        // WITH and a parenthesised SELECT are queries too
+        for query in [
+            "WITH big AS (SELECT 1 AS n) SELECT n FROM big",
+            "(SELECT 1 AS n) UNION ALL (SELECT 2)",
+        ] {
+            assert!(view_statements(Engine::Postgres, &view(pg.clone(), query, false)).is_ok());
+        }
+        // a name that tries to leave its place stays one quoted identifier
+        assert_eq!(
+            view_statements(
+                Engine::Postgres,
+                &view(
+                    at("app", Some("shop"), "v\" AS SELECT 1; DROP TABLE t; --"),
+                    "SELECT 1",
+                    false
+                )
+            )
+            .unwrap(),
+            ["CREATE VIEW \"shop\".\"v\"\" AS SELECT 1; DROP TABLE t; --\" AS\nSELECT 1"]
+        );
+    }
+
+    #[test]
+    fn a_view_is_one_query_that_reads() {
+        let table = || at("app", Some("shop"), "v");
+        let refused = |engine, select: &str| {
+            matches!(
+                view_statements(engine, &view(table(), select, false)),
+                Err(Error::Invalid(_))
+            )
+        };
+        for engine in [Engine::Mysql, Engine::Postgres, Engine::Sqlite] {
+            for select in [
+                "",
+                "   ",
+                "-- only a comment",
+                "/* nothing */ ;",
+                "SELECT 1; SELECT 2",
+                "SELECT 1; DROP TABLE orders",
+                "SELECT 1; -- note\nDROP TABLE orders",
+                "DELETE FROM orders",
+                "DROP TABLE orders",
+                "UPDATE orders SET total = 0",
+                "INSERT INTO orders VALUES (1)",
+                "SHOW TABLES",
+                "EXPLAIN SELECT 1",
+                "SELECT * INTO copy FROM orders",
+                "SELECT * FROM orders FOR UPDATE",
+            ] {
+                assert!(refused(engine, select), "{engine:?}: {select}");
+            }
+        }
+        // PostgreSQL lets a WITH change rows: not a query that reads
+        assert!(refused(
+            Engine::Postgres,
+            "WITH gone AS (DELETE FROM orders RETURNING id) SELECT id FROM gone"
+        ));
+        // MySQL runs what is inside a version comment
+        assert!(refused(
+            Engine::Mysql,
+            "SELECT 1 /*! ; DROP TABLE orders */"
+        ));
+
+        // the name: none, and too long for the engine (not checked for a view that exists)
+        let named = |name: &str, replace| view(at("app", Some("shop"), name), "SELECT 1", replace);
+        assert!(view_statements(Engine::Postgres, &named("  ", false)).is_err());
+        assert!(view_statements(Engine::Postgres, &named(&"n".repeat(64), false)).is_err());
+        assert!(view_statements(Engine::Postgres, &named(&"n".repeat(63), false)).is_ok());
+        assert!(view_statements(Engine::Mysql, &named(&"n".repeat(65), false)).is_err());
+        assert!(view_statements(Engine::Postgres, &named(&"n".repeat(64), true)).is_ok());
+        // PostgreSQL needs the schema; SQL Server is not there yet
+        assert!(view_statements(
+            Engine::Postgres,
+            &view(at("app", None, "v"), "SELECT 1", false)
+        )
+        .is_err());
+        assert!(matches!(
+            view_statements(Engine::Sqlserver, &named("v", false)),
+            Err(Error::Unsupported(_))
         ));
     }
 }
