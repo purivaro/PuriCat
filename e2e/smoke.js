@@ -62,6 +62,14 @@
       return l.querySelector("input, select");
     };
     const dialog = () => document.querySelector('[role="dialog"], [role="alertdialog"]');
+    // For waiting: a field that is not there yet is not an error.
+    const maybeField = (label) => {
+      try {
+        return field(label);
+      } catch {
+        return null;
+      }
+    };
     // A menu or popover that was closed can stay in the page, closed, when the window is
     // covered and its exit animation never runs. Only what is open counts: an item of the
     // same name in a menu that was closed earlier belongs to something else.
@@ -294,7 +302,7 @@
     await rightClick(dbRowOf("Demo MySQL", "puricat_e2e_made"));
     const dbMenuItems = (await waitFor(() => menuItem("Edit database…") && all(`[role="menu"]${OPEN} [role="menuitem"]`), "database menu")).map((e) => e.textContent.replace(/\s+/g, " ").trim());
     await click(menuItem("Edit database…"), "edit database");
-    await waitFor(() => dbDialog("edit") && field("Collation").value === "utf8mb4_bin", "the database as it is now");
+    await waitFor(() => dbDialog("edit") && maybeField("Collation")?.value === "utf8mb4_bin", "the database as it is now");
     const editBefore = {
       charset: field("Character set").value,
       saveDisabled: dbButton("Save changes").disabled,
@@ -325,7 +333,7 @@
 
     // PostgreSQL: the encoding read back from the server, then a new name
     await dbMenu("Demo PostgreSQL", "puricat_e2e_made", "Edit database…");
-    await waitFor(() => dbDialog("edit") && field("Encoding").value === "UTF8", "the postgres database as it is now");
+    await waitFor(() => dbDialog("edit") && maybeField("Encoding")?.value === "UTF8", "the postgres database as it is now");
     await type(field("Name"), "puricat_e2e_renamed");
     const renamePlan = await waitFor(() => dbPlan()?.includes("RENAME TO") && dbPlan(), "rename statement");
     if (renamePlan !== 'ALTER DATABASE "puricat_e2e_made" RENAME TO "puricat_e2e_renamed";') throw new Error(`rename statement: ${renamePlan}`);
@@ -1405,6 +1413,122 @@
       exported[format] = await invoke("export_result", { tab: sqlTabId, result: 0, format, path: `__WORK__/export.${format}` });
     }
     log.push({ stage: "sql-more", allowed, failed, txn, historyItems, exported });
+
+    // 8c-2. Through the window what was only tested below it: Stop, a lost connection, a
+    //       PostgreSQL query tab, and the confirmation on a Production-labelled connection.
+    const mysqlQueryTitle = frontTab().title;
+    const scalar = () => gridCells()[0];
+    const killer = async (connectionName, database, sql) => {
+      const id = (await invoke("list_connections")).find((c) => c.name === connectionName).id;
+      await invoke("run_sql", { id, tab: "e2e-killer", database, sql, options: { maxRows: 10, changeLimit: null } });
+      await invoke("close_console", { tab: "e2e-killer" });
+    };
+    // Stop: a statement that would run for 30 seconds is stopped from its button, the tab says
+    // so, and the next run works on the same tab.
+    const stopRun = async (sql, label) => {
+      await runSql(sql);
+      const stopButton = await waitFor(() => sqlButton("Stop"), `the Stop button (${label})`, 10000);
+      await sleep(700);
+      const pressed = Date.now();
+      await click(stopButton, `stop (${label})`);
+      await waitFor(() => !sqlButton("Stop") && sqlStatus() !== "", `the run to end after Stop (${label})`, 15000);
+      const stopped = { label, afterMs: Date.now() - pressed, statuses: sqlStatus(), messages: messages() };
+      if (stopped.afterMs > 8000) throw new Error(`Stop took ${stopped.afterMs} ms on ${label}`);
+      if (stopped.statuses !== "cancelled") throw new Error(`a stopped run reads ${JSON.stringify(stopped)}`);
+      return stopped;
+    };
+    // A lost connection: the server ends the tab's own connection; the next run says so and
+    // the one after reconnects.
+    const loseConnection = async (connectionName, database, idSql, killSql, label) => {
+      await runSql(idSql);
+      await waitFor(() => /^\d+$/.test(scalar() ?? ""), `the session id (${label})`, 20000);
+      const before = scalar();
+      await killer(connectionName, database, killSql(before));
+      await runSql("SELECT 41 AS after_kill");
+      await waitFor(() => sqlStatus() === "error", `the lost connection reported (${label})`, 20000).catch((e) => {
+        throw new Error(`${e.message}: statuses “${sqlStatus()}”, cells ${JSON.stringify(gridCells())}, running ${!!sqlButton("Stop")}, alert “${document.querySelector(`${panelSel} [role="alert"]`)?.textContent ?? ""}”`);
+      });
+      const reported = all(`${panelSel} [data-sql-messages] li`).map((li) => ({ status: li.dataset.status, text: li.textContent.replace(/\s+/g, " ").trim() }));
+      if (!reported[0].text.includes("the connection was lost. Run again to reconnect.") || reported[0].text.includes("https://")) throw new Error(`a lost connection reads ${JSON.stringify(reported)}`);
+      await runSql(idSql);
+      await waitFor(() => !sqlButton("Stop") && /^\d+$/.test(scalar() ?? "") && scalar() !== before, `a new connection (${label})`, 20000);
+      return { label, before, after: scalar(), reported: reported[0].text };
+    };
+
+    const mysqlStop = await stopRun("SELECT SLEEP(30) AS slept", "MySQL");
+    await runSql("SELECT 7 AS after_stop");
+    await waitFor(() => !sqlButton("Stop") && scalar() === "7", "a run after Stop (MySQL)", 20000);
+    const mysqlLost = await loseConnection("Demo MySQL", "puricat_e2e", "SELECT CONNECTION_ID() AS cid", (id) => `KILL ${id}`, "MySQL");
+    await stage("sql-stop-lost", { mysqlStop, mysqlLost });
+
+    // PostgreSQL: a query tab opened on a database from its menu runs there.
+    await dbMenu("Demo PostgreSQL", "puricat_e2e", "New query");
+    await waitFor(() => frontTab()?.title.includes("Demo PostgreSQL") && sqlTab()?.__editor, "a PostgreSQL query tab", 30000);
+    const pgQueryTitle = frontTab().title;
+    await runSql("-- PostgreSQL\nSELECT order_no, status FROM shop.orders WHERE order_no = 'SO-10001';\nSELECT current_database() AS db;");
+    await waitFor(() => gridCells().includes("SO-10001"), "PostgreSQL rows in a query tab", 20000);
+    const pgSql = {
+      title: pgQueryTitle,
+      row: gridCells(),
+      tabs: all(`${panelSel} [role="tab"]`).map((b) => b.textContent.replace(/\s+/g, " ").trim()),
+      summary: document.querySelector(`${panelSel} [data-sql-summary]`)?.textContent.trim(),
+    };
+    await click(all(`${panelSel} [role="tab"]`).find((b) => b.textContent.trim().startsWith("Result 2")), "the second result");
+    await waitFor(() => scalar() === "puricat_e2e", "the database of the PostgreSQL tab");
+    // A write inside a transaction the user opened, rolled back: nothing changes.
+    await runSql("BEGIN;\nUPDATE shop.orders SET order_no = order_no || '-x' WHERE id <= 3;\nROLLBACK;\nSELECT COUNT(*) AS changed FROM shop.orders WHERE order_no LIKE '%-x'");
+    await waitFor(() => !sqlButton("Stop") && scalar() === "0", "the PostgreSQL script, rolled back", 20000);
+    await showMessages();
+    await waitFor(() => sqlStatus() === "ok,ok,ok,ok", "the PostgreSQL script's messages", 10000);
+    pgSql.rolledBack = messages().map((m) => m.text.slice(0, 80));
+    const pgStop = await stopRun("SELECT pg_sleep(30)", "PostgreSQL");
+    const pgLost = await loseConnection("Demo PostgreSQL", "postgres", "SELECT pg_backend_pid() AS pid", (pid) => `SELECT pg_terminate_backend(${pid})`, "PostgreSQL");
+    await stage("sql-postgres", { pgSql, pgStop, pgLost });
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the PostgreSQL query tab");
+    await waitFor(() => !all('[role="tab"]').some((t) => t.title === pgQueryTitle), "the PostgreSQL query tab to close");
+
+    // Production: every statement that can change data is confirmed, a read is not, and
+    // Cancel runs nothing.
+    const prodTest = await create({ name: "Demo Production", host: "127.0.0.1", user: "__MYSQL_USER__", environment: "Production" });
+    if (!prodTest.startsWith("Connected to MySQL")) throw new Error(`the Production connection did not test: ${prodTest}`);
+    await save();
+    await click(await waitFor(() => treeRow("Demo Production"), "the Production connection"), "connect to it");
+    await waitFor(() => dbRowOf("Demo Production", "puricat_e2e"), "the databases of the Production connection", 20000);
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await rightClick(treeRow("Demo Production"));
+    await click(await waitFor(() => menuItemWith("New query"), "new query on Production"), "new query");
+    await waitFor(() => frontTab()?.title.includes("Demo Production") && sqlTab()?.__editor, "a Production query tab", 30000);
+    const prodQueryTitle = frontTab().title;
+    const prodId = (await invoke("list_connections")).find((c) => c.name === "Demo Production").id;
+    const historyCount = async () => (await invoke("list_history", { id: prodId, limit: 50 })).length;
+    await runSql("SELECT 1 AS reads_freely");
+    await waitFor(() => scalar() === "1" && !document.querySelector("[data-sql-confirm]"), "a read without confirmation", 20000);
+    const historyBefore = await historyCount();
+    await runSql("UPDATE puricat_e2e.orders SET note = note WHERE id = 1");
+    const prodConfirm = await waitFor(() => document.querySelector("[data-sql-confirm]"), "the Production confirmation");
+    const prodText = prodConfirm.textContent.replace(/\s+/g, " ").trim();
+    if (!prodText.includes("This is a PRODUCTION connection") || !prodText.includes("Changes data or structure")) throw new Error(`the Production confirmation reads: ${prodText}`);
+    await stage("sql-production", { prodText });
+    await click(exact("[data-sql-confirm] button", "Cancel"), "cancel on Production");
+    await waitFor(() => !document.querySelector("[data-sql-confirm]"), "the confirmation closed");
+    await sleep(500);
+    const historyAfterCancel = await historyCount();
+    if (historyAfterCancel !== historyBefore) throw new Error("a cancelled statement on Production was run");
+    await runSql("UPDATE puricat_e2e.orders SET note = note WHERE id = 1");
+    await click(await waitFor(() => exact("[data-sql-confirm] button", "Run anyway"), "the confirmation again"), "run anyway");
+    await waitFor(() => sqlStatus() === "ok", "the confirmed statement", 20000);
+    const historyAfterRun = await historyCount();
+    if (historyAfterRun !== historyBefore + 1) throw new Error(`history went from ${historyBefore} to ${historyAfterRun}`);
+    await click(document.querySelector('[role="tab"][aria-selected="true"] button'), "close the Production query tab");
+    await waitFor(() => !all('[role="tab"]').some((t) => t.title === prodQueryTitle), "the Production query tab to close");
+    await waitFor(() => all('[role="menu"]').every((m) => m.dataset.state === "closed"), "menus closed");
+    await rightClick(treeRow("Demo Production"));
+    await click(await waitFor(() => menuItem("Delete…"), "delete the Production connection"), "delete");
+    await click(await waitFor(() => exact('[role="alertdialog"] button', "Delete connection"), "the delete confirmation"), "confirm delete");
+    await waitFor(() => !treeRow("Demo Production"), "the Production connection gone");
+    await click(all('[role="tab"]').find((t) => t.title === mysqlQueryTitle), "back to the MySQL query tab");
+    await waitFor(() => frontTab()?.title === mysqlQueryTitle && sqlTab()?.__editor, "the MySQL query tab in front");
+    log.push({ stage: "sql-ui-gaps", mysqlStop, mysqlLost, pgSql, pgStop, pgLost, prodText, history: [historyBefore, historyAfterCancel, historyAfterRun] });
 
     // 8d. SQL console: the statement at the cursor, and saved scripts
     const sqlEditor = () => sqlTab().__editor;
